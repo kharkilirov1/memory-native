@@ -47,6 +47,9 @@ def make_linear(kind: str, fin: int, fout: int, init_gain: float = 1.0, **counte
         return RMSCounterLinear(fin, fout, init_gain=init_gain, **counter_kw)
     if kind == "counter_packed":
         return PackedRMSCounterLinear(fin, fout, init_gain=init_gain, **counter_kw)
+    if kind == "counter_triton":
+        from .triton_counter import TritonCounterLinear
+        return TritonCounterLinear(fin, fout, init_gain=init_gain, **counter_kw)
     if kind == "qat":
         return TernaryQATLinear(fin, fout, init_gain)
     if kind == "dense":
