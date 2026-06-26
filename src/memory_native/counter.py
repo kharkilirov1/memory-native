@@ -168,7 +168,7 @@ class CompactCounterLinear(nn.Module):
         lr: float = 0.04,
         lr_scale: float = 2e-4,
         init_gain: float = 1.0,
-        tile_rows: int = 64,
+        tile_rows: int = 0,
         local_grad_clip: float = 0.0,
         pulse_mode: str = "direct",
         act_save_bits: int = 0,
@@ -181,7 +181,12 @@ class CompactCounterLinear(nn.Module):
         self.C = int(C)
         self.lr = float(lr)
         self.lr_scale = float(lr_scale)
-        self.tile_rows = int(tile_rows)
+        # tile_rows=0 -> untiled: do the update in one shot. Tiling never materializes a full
+        # [out,in] grad_w, but that buffer is tiny (1 MiB at d=512) and the training peak is
+        # activation-bound, so tiling buys no peak -- only ~3x slower from the per-tile Python
+        # loop's launch overhead. Default untiled (fast); set tile_rows>0 for the strict
+        # never-materialize-grad_w property on very large layers.
+        self.tile_rows = int(tile_rows) if int(tile_rows) > 0 else int(out_features)
         self.local_grad_clip = float(local_grad_clip)
         # 0 = store fp activation; >0 = store unbiased act_save_bits-bit Q(x) for the update.
         self.act_save_bits = int(act_save_bits)

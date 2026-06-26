@@ -87,7 +87,9 @@ def charlm_main(argv=None) -> None:
     ap.add_argument("--fs-lr-scale", type=float, default=2e-4)
     ap.add_argument("--fp-lr", type=float, default=2e-3)
     ap.add_argument("--base-lr", type=float, default=3e-3)
-    ap.add_argument("--tile-rows", type=int, default=64)
+    ap.add_argument("--tile-rows", type=int, default=0,
+                    help="0=untiled update (fast, default); >0 tiles grad_w to never "
+                         "materialize the full [out,in] gradient (strict, ~3x slower)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--data-path", default=None)

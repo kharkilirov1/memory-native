@@ -1,0 +1,10 @@
+torch 2.10.0+cu128 Tesla T4
+
+==== update path: does untiled (fewer launches) close the gap? (s512) ====
+config                                       tok/s        peak
+dense+AdamW                                 18,733    1.86 GiB
+counter_packed tile_rows=64 (default)        3,111    1.30 GiB
+counter_packed tile_rows=128                 5,134    1.30 GiB
+counter_packed tile_rows=2048 (untiled)      8,936    1.30 GiB
+
+=== DONE ===

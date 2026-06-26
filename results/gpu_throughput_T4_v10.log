@@ -1,0 +1,9 @@
+torch 2.10.0+cu128 Tesla T4
+
+==== throughput: do the forward+grad_x kernels close the 5x gap? (s512) ====
+config                           tok/s        peak
+dense+AdamW                     19,085    1.86 GiB
+counter_packed (pure torch)      3,201    1.30 GiB
+counter_triton (fwd+grad_x kernels)     2,474    1.30 GiB
+
+=== DONE ===
