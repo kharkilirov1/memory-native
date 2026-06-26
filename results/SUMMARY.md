@@ -52,6 +52,28 @@ backward kernel `triton_grad_x` (grad_x decoded from packed state, no dense weig
   more weight-side kernels. The in-kernel grad_x still matters for bandwidth and for very large
   d / large-batch regimes where weights dominate — just not for this peak.
 
+## Update 2: attacking the activation wall — act_save_bits (T4 verified)
+
+Since the peak is activation-bound, the lever is the saved activation. `act_save_bits` stores
+an unbiased low-bit (int8) quantization of each counter layer's input instead of fp32
+([`gpu_validate_T4_actbits.log`](gpu_validate_T4_actbits.log)):
+
+| saved activation | val loss (3 seeds, s512, 300 steps) | mean | vs fp | training peak (batch 16) |
+|---|---|---|---|---|
+| fp | 2.554 / 2.561 / 2.546 | 2.554 | — | 1.56 GiB |
+| **int8** | 2.578 / 2.572 / 2.629 | 2.593 | +1.5% | **1.33 GiB (−14%)** |
+| int4 | 2.565 / 2.600 / 2.568 | 2.578 | +0.9% | 1.33 GiB |
+
+(batch 32: 3.52 → 3.06 GiB, −13%.) **The activation lever works:** ~14% peak reduction for
+~1% val cost; int4 and int8 are comparable in quality (both ~+1%, within seed noise). With it,
+counter_packed+int8-acts (1.33 GiB) sits clearly below dense+AdamW (1.64 GiB) at batch 16.
+
+Notes: (1) the earlier single-run int8=3.01 was a bad-seed outlier — the 3-seed mean is 2.593.
+(2) int4 stores the same int8 container here (1 byte), so it has the same peak as int8; true
+4-bit packing (0.5 byte) would roughly double the activation saving at the same ~1% quality.
+(3) Only counter-layer inputs are quantized; LayerNorm/gelu/attention activations stay fp, so
+this is a floor, not the limit — reversible blocks would remove the rest.
+
 ## Honest finding on memory
 
 **Training peak is only ~1.05× smaller than dense+AdamW right now** (counter 1.57 GiB vs
