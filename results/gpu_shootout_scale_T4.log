@@ -1,0 +1,18 @@
+torch 2.10.0+cu128 Tesla T4
+corpus source: /kaggle/working/tinyshakespeare.txt (downloaded)
+
+==== SHOOTOUT s512 (d=512, 8L), 200 steps, batch 16 ====
+config                val        peak     tok/s
+counter+int4       2.6390 1018.34 MiB     9,919
+dense+AdamW        2.6184    1.19 GiB    19,503
+dense+8bitAdam     2.6224    1.35 GiB    19,052
+  -> counter peak is 1.19x below AdamW
+
+==== SHOOTOUT small (d=768, 12L), 200 steps, batch 16 ====
+config                val        peak     tok/s
+counter+int4       2.9315    2.06 GiB     3,526
+dense+AdamW        3.0771    2.73 GiB     6,004
+dense+8bitAdam     3.1192    3.34 GiB     6,032
+  -> counter peak is 1.32x below AdamW
+
+=== DONE ===
