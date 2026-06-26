@@ -90,7 +90,10 @@ class _FusedCounterLinearFn(torch.autograd.Function):
         if module.act_save_bits:
             from .actquant import quantize_codes
             codes, scale = quantize_codes(x.reshape(-1, x.shape[-1]), module.act_save_bits, dim=-1)
-            ctx.save_for_backward(codes.to(torch.int16), scale)
+            # store as int8 (1 byte/elem) for bits<=8: codes in [-127,127] fit. This is the
+            # actual saved-activation memory win (4x vs fp32). bits 9..15 fall back to int16.
+            store = codes.to(torch.int8) if module.act_save_bits <= 8 else codes.to(torch.int16)
+            ctx.save_for_backward(store, scale)
             ctx.x_shape = x.shape
             ctx.quantized = True
         else:
