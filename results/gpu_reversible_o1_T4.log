@@ -1,0 +1,12 @@
+torch 2.10.0+cu128 Tesla T4
+
+==== O(1) reversible: is peak now FLAT in depth? (dim=512, 2048 tokens) ====
+ depth       plain  per-block rev  O(1) whole-chain
+     8  314.43 MiB     157.98 MiB        137.97 MiB
+    16  486.86 MiB     198.17 MiB        146.16 MiB
+    32  815.47 MiB     278.55 MiB        162.53 MiB
+    64    1.44 GiB     439.32 MiB        195.28 MiB
+   128    2.72 GiB     760.85 MiB        260.78 MiB
+   256    5.29 GiB       1.37 GiB        391.78 MiB
+
+=== DONE ===
