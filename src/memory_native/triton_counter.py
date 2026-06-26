@@ -8,11 +8,14 @@ without ever materializing the dense weight. That removes the transient dense we
 forward and reads 0.75 byte/weight from HBM instead of 4.
 
 Scope / honesty:
-  * This is the FORWARD kernel. The fused backward UPDATE kernel (forming grad_w in registers
-    and applying the counter transition in-place, the analogue of the engine's OpenCL
-    counter_*_fused) is the next milestone; here the backward still uses the PyTorch per-tile
-    update inherited from PackedRMSCounterLinear (memory-native via packed storage, but it
-    decodes tiles in torch).
+  * Two kernels now run in-GEMM with no dense weight: the FORWARD (y = x W^T) and the
+    backward grad_x (grad_x = grad_out W), both decoding packed state in registers. So neither
+    the forward nor grad_x materializes a dense [out,in] weight on CUDA.
+  * The counter UPDATE still uses the PyTorch per-tile path inherited from
+    PackedRMSCounterLinear: it forms grad_w one [tile_rows, in] tile at a time (never the full
+    [out,in] gradient) and decodes that tile in torch. A single fully-in-register update kernel
+    (the analogue of the engine's OpenCL counter_*_fused) is the remaining milestone; combine
+    with act_save_bits to shrink the saved activation too.
   * !!! UNVERIFIED ON HARDWARE !!! It was written without a GPU to run it on. Before relying
     on it, run tests/test_triton.py on a CUDA machine with triton installed (it is skipped
     otherwise) -- it checks the Triton forward against the reference dense decode.
@@ -25,7 +28,7 @@ import torch
 
 from .packed import PackedRMSCounterLinear
 
-__all__ = ["HAS_TRITON", "triton_decode_matmul", "TritonCounterLinear"]
+__all__ = ["HAS_TRITON", "triton_decode_matmul", "triton_grad_x", "TritonCounterLinear"]
 
 try:
     import triton
@@ -92,6 +95,82 @@ if HAS_TRITON:
         )
 
 
+if HAS_TRITON:
+
+    @triton.jit
+    def _decode_gradx_kernel(
+        go_ptr, state_ptr, scale_ptr, gx_ptr,
+        M, N, K, C,
+        stride_gom, stride_gon,
+        stride_sn,
+        stride_gxm, stride_gxk,
+        BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+    ):
+        # grad_x[M,K] = grad_out[M,N] @ W[N,K], W[n,k] = scale[n]*t(state[n,k]); contract over N.
+        pid_m = tl.program_id(0)
+        pid_k = tl.program_id(1)
+        offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+        offs_k = pid_k * BLOCK_K + tl.arange(0, BLOCK_K)
+        lv = 2 * C - 1
+        acc = tl.zeros((BLOCK_M, BLOCK_K), dtype=tl.float32)
+
+        for n0 in range(0, N, BLOCK_N):
+            offs_n = n0 + tl.arange(0, BLOCK_N)
+            go = tl.load(
+                go_ptr + offs_m[:, None] * stride_gom + offs_n[None, :] * stride_gon,
+                mask=(offs_m[:, None] < M) & (offs_n[None, :] < N), other=0.0,
+            )  # [BM, BN]
+            # decode W tile [BN, BK]
+            group = offs_k // 4
+            lane = offs_k % 4
+            base = offs_n[:, None] * stride_sn + group[None, :] * 3
+            m_nk = (offs_n[:, None] < N) & (offs_k[None, :] < K)
+            b0 = tl.load(state_ptr + base + 0, mask=m_nk, other=0).to(tl.int32)
+            b1 = tl.load(state_ptr + base + 1, mask=m_nk, other=0).to(tl.int32)
+            b2 = tl.load(state_ptr + base + 2, mask=m_nk, other=0).to(tl.int32)
+            code0 = b0 & 0x3F
+            code1 = ((b0 >> 6) | (b1 << 2)) & 0x3F
+            code2 = ((b1 >> 4) | (b2 << 4)) & 0x3F
+            code3 = (b2 >> 2) & 0x3F
+            ln = lane[None, :]
+            code = tl.where(ln == 0, code0, tl.where(ln == 1, code1, tl.where(ln == 2, code2, code3)))
+            t = code // lv - 1
+            scale = tl.load(scale_ptr + offs_n, mask=offs_n < N, other=0.0)  # [BN]
+            w = t.to(tl.float32) * scale[:, None]  # [BN, BK]
+            acc += tl.dot(go, w)  # [BM,BN] x [BN,BK] -> [BM,BK]
+
+        tl.store(
+            gx_ptr + offs_m[:, None] * stride_gxm + offs_k[None, :] * stride_gxk,
+            acc, mask=(offs_m[:, None] < M) & (offs_k[None, :] < K),
+        )
+
+
+def triton_grad_x(grad_out: torch.Tensor, state: torch.Tensor, scale: torch.Tensor,
+                  C: int, in_features: int, out_features: int) -> torch.Tensor:
+    """grad_x = grad_out @ W with W decoded from packed 6-bit `state` in-kernel (no dense W)."""
+    if not HAS_TRITON:
+        raise RuntimeError("triton not available")
+    assert grad_out.is_cuda and state.is_cuda, "triton_grad_x requires CUDA tensors"
+    M, N = grad_out.shape
+    K = in_features
+    assert N == out_features and K % 4 == 0
+    scale = scale.reshape(N).contiguous()
+    grad_out = grad_out.contiguous()
+    state = state.contiguous()
+    gx = torch.empty((M, K), device=grad_out.device, dtype=torch.float32)
+    BLOCK_M, BLOCK_N, BLOCK_K = 64, 64, 32
+    grid = (triton.cdiv(M, BLOCK_M), triton.cdiv(K, BLOCK_K))
+    _decode_gradx_kernel[grid](
+        grad_out, state, scale, gx,
+        M, N, K, C,
+        grad_out.stride(0), grad_out.stride(1),
+        state.stride(0),
+        gx.stride(0), gx.stride(1),
+        BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,
+    )
+    return gx
+
+
 def triton_decode_matmul(x: torch.Tensor, state: torch.Tensor, scale: torch.Tensor,
                          C: int, in_features: int, out_features: int) -> torch.Tensor:
     """y = x @ W^T with W decoded from packed 6-bit `state` inside the kernel (no dense W).
@@ -134,3 +213,12 @@ class TritonCounterLinear(PackedRMSCounterLinear):
             return triton_decode_matmul(x, self.state, self.scale, self.C,
                                         self.in_features, self.out_features)
         return super()._forward_matmul(x)
+
+    def _has_fast_grad_x(self) -> bool:
+        return HAS_TRITON and self.state.is_cuda
+
+    def _backward_grad_x(self, grad_out2d: torch.Tensor) -> torch.Tensor:
+        # grad_x straight from packed state -> no transient dense weight on the backward.
+        # (The counter update still consumes per-tile grad_w; the dense weight is gone.)
+        return triton_grad_x(grad_out2d, self.state, self.scale, self.C,
+                             self.in_features, self.out_features)

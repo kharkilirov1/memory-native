@@ -41,3 +41,35 @@ def test_triton_forward_matches_reference():
         from memory_native.triton_counter import triton_decode_matmul
         got = triton_decode_matmul(x, layer.state, layer.scale, C, n_in, n_out)
     assert torch.allclose(got, ref, atol=1e-4, rtol=1e-4), (got - ref).abs().max()
+
+
+@pytest.mark.skipif(not (CUDA and HAS_TRITON), reason="needs CUDA + triton")
+def test_triton_grad_x_matches_reference():
+    """grad_x straight from packed state must match grad_out @ dense_W within f32 tol."""
+    torch.manual_seed(0)
+    n_in, n_out, M, C = 128, 96, 64, 11
+    layer = TritonCounterLinear(n_in, n_out, C=C).cuda()
+    grad_out = torch.randn(M, n_out, device="cuda")
+    with torch.no_grad():
+        ref = grad_out @ layer._dense_weight(torch.float32)        # [M, n_in]
+        from memory_native.triton_counter import triton_grad_x
+        got = triton_grad_x(grad_out, layer.state, layer.scale, C, n_in, n_out)
+    assert torch.allclose(got, ref, atol=1e-4, rtol=1e-4), (got - ref).abs().max()
+
+
+@pytest.mark.skipif(not (CUDA and HAS_TRITON), reason="needs CUDA + triton")
+def test_triton_full_backward_trains():
+    """End-to-end on CUDA: forward + grad_x in-kernel, layer recovers a ternary teacher."""
+    import math
+    torch.manual_seed(0)
+    n, N, C = 64, 256, 11
+    ts = 0.25
+    base = math.sqrt(3.0 / (2.0 * n))
+    tw = torch.randint(-1, 2, (n, n), device="cuda").float()
+    x = torch.randn(N, n, device="cuda")
+    y = x @ (ts * tw).t()
+    lay = TritonCounterLinear(n, n, C=C, lr=0.005, lr_scale=0.0, init_gain=ts / base).cuda().train()
+    for _ in range(400):
+        ((lay(x) - y) ** 2).mean().backward()
+    with torch.no_grad():
+        assert ((lay(x) - y) ** 2).mean().item() < 5e-3

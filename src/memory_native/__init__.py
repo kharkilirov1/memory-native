@@ -22,7 +22,7 @@ from .counter import (
 )
 from .reversible import ReversibleCouplingBlock, ReversibleSequential
 from .packed import PackedRMSCounterLinear, pack_codes, unpack_codes
-from .triton_counter import HAS_TRITON, TritonCounterLinear, triton_decode_matmul
+from .triton_counter import HAS_TRITON, TritonCounterLinear, triton_decode_matmul, triton_grad_x
 from .baselines import TernaryQATLinear, make_linear
 from .models import CONFIGS, GPT, GPTConfig
 from .memory import compare_training_peak, fmt_bytes, memory_report, peak_training_memory
@@ -42,6 +42,7 @@ __all__ = [
     "unpack_codes",
     "TritonCounterLinear",
     "triton_decode_matmul",
+    "triton_grad_x",
     "HAS_TRITON",
     "encode_state",
     "decode_state",
