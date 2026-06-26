@@ -25,6 +25,7 @@ from .packed import PackedRMSCounterLinear, pack_codes, unpack_codes
 from .triton_counter import HAS_TRITON, TritonCounterLinear, triton_decode_matmul, triton_grad_x
 from .baselines import TernaryQATLinear, make_linear
 from .models import CONFIGS, GPT, GPTConfig
+from .reversible_gpt import ReversibleGPT
 from .memory import compare_training_peak, fmt_bytes, memory_report, peak_training_memory
 from .actquant import effective_bits, quantize_codes, stochastic_quantize
 from .budget import BudgetRow, format_budget, training_budget
@@ -54,6 +55,7 @@ __all__ = [
     "TernaryQATLinear",
     "make_linear",
     "GPT",
+    "ReversibleGPT",
     "GPTConfig",
     "CONFIGS",
     "memory_report",
