@@ -1,0 +1,26 @@
+torch 2.10.0+cu128 Tesla T4
+corpus source: /kaggle/working/tinyshakespeare.txt (downloaded)
+FULL METHOD run: d=1024, 12L, block=256, batch=16, steps=2000, vocab=65
+
+==== peak @ d=1024,12L (one step) ====
+  full method (counter+reversible)   peak  982.41 MiB  persistent 110.29 MiB
+  dense+AdamW (reversible arch)      peak    2.85 GiB  persistent 577.45 MiB
+  dense+AdamW (plain GPT)            peak    3.69 GiB  persistent 577.45 MiB
+
+==== TRAINING full method, 2000 steps ====
+  step     0  train 4.4623  1,633 tok/s  elapsed 3s
+  step   200  train 2.6337  1,522 tok/s  elapsed 538s
+  step   400  train 2.4800  1,517 tok/s  elapsed 1080s
+  step   600  train 2.2818  1,515 tok/s  elapsed 1622s
+  step   800  train 2.0758  1,514 tok/s  elapsed 2165s
+  step  1000  train 2.0106  1,512 tok/s  elapsed 2708s
+  step  1200  train 1.7774  1,512 tok/s  elapsed 3251s
+  step  1400  train 1.6713  1,512 tok/s  elapsed 3794s
+  step  1600  train 1.6698  1,511 tok/s  elapsed 4336s
+  step  1800  train 1.5730  1,511 tok/s  elapsed 4881s
+  step  2000  train 1.4463  1,510 tok/s  elapsed 5424s
+
+FINAL: val 1.7182 | training peak 983.37 MiB | 1,510 tok/s | 5424s
+counter layers 72, mean zero-frac 0.333, persistent 110.29 MiB
+
+=== DONE ===
