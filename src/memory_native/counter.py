@@ -83,15 +83,31 @@ class _FusedCounterLinearFn(torch.autograd.Function):
             )
         module._outstanding_forward = True
         ctx.module = module
-        ctx.save_for_backward(x)
-        return module._forward_matmul(x)
+        y = module._forward_matmul(x)
+        # Activation-memory lever: if act_save_bits is set, store an UNBIASED low-bit
+        # quantization of x (codes + per-row scale) instead of fp x. The update only needs
+        # E[Q(x)|x] = x, so it stays unbiased; the saved activation shrinks from fp to b bits.
+        if module.act_save_bits:
+            from .actquant import quantize_codes
+            codes, scale = quantize_codes(x.reshape(-1, x.shape[-1]), module.act_save_bits, dim=-1)
+            ctx.save_for_backward(codes.to(torch.int16), scale)
+            ctx.x_shape = x.shape
+            ctx.quantized = True
+        else:
+            ctx.save_for_backward(x)
+            ctx.quantized = False
+        return y
 
     @staticmethod
     def backward(ctx, grad_out: torch.Tensor):
-        (x,) = ctx.saved_tensors
         module: CompactCounterLinear = ctx.module
-
-        x2 = x.reshape(-1, x.shape[-1])
+        if ctx.quantized:
+            codes, scale = ctx.saved_tensors
+            x2 = (codes.to(scale.dtype) * scale)            # dequant Q(x): [-1, in]
+            x = x2.reshape(ctx.x_shape)
+        else:
+            (x,) = ctx.saved_tensors
+            x2 = x.reshape(-1, x.shape[-1])
         go2 = grad_out.reshape(-1, grad_out.shape[-1])
         grad_x2 = torch.zeros((x2.shape[0], module.in_features), device=x.device, dtype=x.dtype)
 
@@ -134,6 +150,7 @@ class CompactCounterLinear(nn.Module):
         tile_rows: int = 64,
         local_grad_clip: float = 0.0,
         pulse_mode: str = "direct",
+        act_save_bits: int = 0,
     ) -> None:
         super().__init__()
         if 3 * (2 * C - 1) > 256:
@@ -145,6 +162,8 @@ class CompactCounterLinear(nn.Module):
         self.lr_scale = float(lr_scale)
         self.tile_rows = int(tile_rows)
         self.local_grad_clip = float(local_grad_clip)
+        # 0 = store fp activation; >0 = store unbiased act_save_bits-bit Q(x) for the update.
+        self.act_save_bits = int(act_save_bits)
         if pulse_mode not in {"direct", "ternary"}:
             raise ValueError("pulse_mode must be 'direct' or 'ternary'")
         self.pulse_mode = pulse_mode

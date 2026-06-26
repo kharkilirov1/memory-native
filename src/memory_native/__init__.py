@@ -26,6 +26,8 @@ from .triton_counter import HAS_TRITON, TritonCounterLinear, triton_decode_matmu
 from .baselines import TernaryQATLinear, make_linear
 from .models import CONFIGS, GPT, GPTConfig
 from .memory import compare_training_peak, fmt_bytes, memory_report, peak_training_memory
+from .actquant import effective_bits, quantize_codes, stochastic_quantize
+from .budget import BudgetRow, format_budget, training_budget
 from .optimizers import GaLoreAdamW, LoMo, available_optimizers, build_optimizer
 from .data import get_batch, load_corpus, synthetic_corpus
 
@@ -60,6 +62,12 @@ __all__ = [
     "available_optimizers",
     "GaLoreAdamW",
     "LoMo",
+    "stochastic_quantize",
+    "quantize_codes",
+    "effective_bits",
+    "training_budget",
+    "format_budget",
+    "BudgetRow",
     "load_corpus",
     "get_batch",
     "synthetic_corpus",
