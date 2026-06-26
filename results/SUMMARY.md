@@ -69,10 +69,23 @@ an unbiased low-bit (int8) quantization of each counter layer's input instead of
 counter_packed+int8-acts (1.33 GiB) sits clearly below dense+AdamW (1.64 GiB) at batch 16.
 
 Notes: (1) the earlier single-run int8=3.01 was a bad-seed outlier — the 3-seed mean is 2.593.
-(2) int4 stores the same int8 container here (1 byte), so it has the same peak as int8; true
-4-bit packing (0.5 byte) would roughly double the activation saving at the same ~1% quality.
-(3) Only counter-layer inputs are quantized; LayerNorm/gelu/attention activations stay fp, so
+(2) Only counter-layer inputs are quantized; LayerNorm/gelu/attention activations stay fp, so
 this is a floor, not the limit — reversible blocks would remove the rest.
+
+### True 4-bit packing (0.5 byte/elem)
+`act_save_bits=4` now bit-packs two signed nibbles per byte (lossless vs the quantized codes),
+so a saved counter input is 0.5 byte/elem — 8× below fp32. T4 peak:
+
+| batch | asb=0 | asb=8 (int8) | asb=4 (packed) | dense+AdamW |
+|---|---|---|---|---|
+| 16 | 1.56 GiB | 1.33 (−14%) | **1.26 GiB (−19%)** | 1.64 |
+| 32 | 3.52 GiB | 3.06 (−13%) | **2.92 GiB (−17%)** | 3.16 |
+
+Packed-4 adds ~5% over int8 (−19% total at batch 16); quality is identical to the int4 above
+(packing is lossless). counter_packed + int4-packed activations (1.26 GiB) is 1.30× smaller
+than dense+AdamW. The diminishing return (halving counter-input bytes → only ~5% more peak)
+quantifies that counter-layer inputs are ≈1/3 of activation memory; the remaining 2/3
+(LayerNorm/gelu/attention, all fp) is the reversible-block frontier.
 
 ## Honest finding on memory
 
