@@ -29,6 +29,29 @@ counter+RMS not only tracks AdamW at this scale, it edges it out — the stronge
 evidence so far (previous evidence was micro/tiny only). It is slower (per-element decode/
 update in PyTorch); the Triton forward addresses part of this, the fused backward the rest.
 
+## Update: Triton grad_x kernel verified, and the peak is activation-bound
+
+A second T4 run ([`gpu_validate_T4_grad_x.log`](gpu_validate_T4_grad_x.log)) added the new
+backward kernel `triton_grad_x` (grad_x decoded from packed state, no dense weight):
+
+- **Both kernels correct on hardware**: forward err ≤ 3.6e-6, grad_x err ≤ 1e-5 vs the dense
+  reference; full in-kernel forward+grad_x backward recovers a ternary teacher to MSE 0.0.
+- **But removing the dense weight does NOT lower the training peak** at s512/batch16:
+
+  | s512, batch 16 | training peak |
+  |---|---|
+  | counter_packed (torch backward) | 1.57 GiB |
+  | counter_packed (Triton fwd + grad_x) | 1.57 GiB |
+  | dense + AdamW | 1.64 GiB |
+
+  The Triton path is byte-for-byte the same peak as the torch path. The per-layer weight
+  (512×512×4 = 1 MiB) is negligible next to the activation tensors, so eliminating it doesn't
+  move a 1.57 GiB peak. **Empirically: the weight/optimizer side is solved; the training peak
+  is activation-dominated.** This is exactly the deep-v2 conclusion ("activation is the next
+  wall"). The lever that moves the GiB-scale peak is `act_save_bits` / reversible blocks, not
+  more weight-side kernels. The in-kernel grad_x still matters for bandwidth and for very large
+  d / large-batch regimes where weights dominate — just not for this peak.
+
 ## Honest finding on memory
 
 **Training peak is only ~1.05× smaller than dense+AdamW right now** (counter 1.57 GiB vs

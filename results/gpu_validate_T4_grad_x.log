@@ -1,0 +1,21 @@
+=== ENV ===
+torch 2.10.0+cu128 | cuda True
+device: Tesla T4 (7, 5)
+triton 3.6.0
+HAS_TRITON True
+
+==== triton kernels vs reference (forward + grad_x) ====
+  [32x64@48] forward err 7.15e-07 PASS | grad_x err 9.54e-07 PASS
+  [64x512@512] forward err 3.58e-06 PASS | grad_x err 3.10e-06 PASS
+  [128x256@1024] forward err 0.00e+00 PASS | grad_x err 1.00e-05 PASS
+
+==== full in-kernel backward trains (teacher recovery on cuda) ====
+  TritonCounterLinear final MSE 0.00000 PASS
+
+==== training-peak memory s512 (does in-kernel grad_x remove the dense-weight peak?) ====
+  counter_packed (torch backward)   peak 1.57 GiB
+  counter_rms    (torch backward)   peak 1.57 GiB
+  counter_packed (TRITON fwd+grad_x) peak 1.57 GiB
+  dense+adamw   peak 1.64 GiB
+
+=== DONE ===
