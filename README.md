@@ -85,23 +85,29 @@ optimizer cost) — matching the larger-scale numbers in [`../docs`](../docs).
 
 **Honest framing — read before quoting memory numbers.**
 
-- **Realized now (pure PyTorch):** the *learning dynamics* and the *optimizer-state* saving.
-  The counter layer carries no FP master weight and no per-weight Adam moments, so its
-  persistent state and training peak beat dense+AdamW on the optimizer pool. `memory_report`
-  / `memory-native-memgate` quantify this (real `torch.cuda.max_memory_allocated` on CUDA).
-- **NOT realized in pure PyTorch:** the **sub-byte (0.75 byte/weight)** win. This layer
-  decodes states to dense fp32 tensors around the GEMM and stores state as `uint8` (1 byte,
-  not 0.75 packed). Reaching the true packed peak needs a custom kernel.
+- **Realized now (pure PyTorch, verified on CPU):** the *learning dynamics*, the
+  *optimizer-state* saving (no FP master weight, no Adam moments), and — with
+  `PackedRMSCounterLinear` (`kind="counter_packed"`) — **genuinely packed 0.75 byte/weight
+  persistent state** (4 codes / 3 bytes, bit-identical to the engine's packing; round-trip
+  and identical-dynamics tested). `memory_report` / `memory-native-memgate` quantify it (real
+  `torch.cuda.max_memory_allocated` on CUDA, byte accounting on CPU).
+- **Partially realized (written, NOT verified on hardware):** the Triton forward kernel
+  (`triton_counter.py`, `TritonCounterLinear`) decodes the packed state *inside* the GEMM, so
+  the forward materializes no dense weight and reads 0.75 byte/weight from HBM. It falls back
+  to the packed PyTorch forward without CUDA/triton. **It has not been run on a GPU** — run
+  `tests/test_triton.py` on CUDA+triton to validate before relying on it.
+- **Still a torch op (the remaining milestone):** the *backward update* still decodes tiles
+  in PyTorch. The fused backward kernel (form `grad_w` in registers + apply the counter
+  transition in place, the analogue of the engine's OpenCL `counter_*_fused`) is next.
 
 ### Roadmap
-1. **Triton packed kernel** — a 6-bit-state → ternary GEMM with a fused counter-update
-   backward epilogue that forms `grad_w` in registers and updates the state in place (the
-   CUDA analogue of the engine's OpenCL `*_fused_*` kernels). This is what makes the 0.75
-   byte/weight *training peak* real on CUDA.
-2. **Baselines that matter** — compare against 8-bit Adam (bitsandbytes), GaLore, LoMo, not
-   only FP32+Adam, so "16× less memory" is measured against real memory-efficient training.
-3. **Scale validation** — run the parity gate at d=512–768 on a real GPU before any
-   larger-model claim. The current evidence is micro/tiny scale.
+1. **Validate + extend the Triton path on a GPU** — confirm the forward kernel, then write the
+   fused backward-update kernel so the *training peak* (not just persistent state) is sub-byte
+   on CUDA. This is the only remaining piece that needs hardware this repo hasn't run on.
+2. **Done — baselines that matter:** `--optimizer {bnb8,galore,lomo}` compares against real
+   memory-efficient training, not only FP32+Adam (see table above).
+3. **Scale validation** — `scripts/run_scale_validation.sh` runs the d=512–768 parity sweep;
+   the numbers must be captured on a real GPU (current verified evidence is micro/tiny scale).
 
 ## Constraints (same eager-only contract as the engine)
 
@@ -117,14 +123,19 @@ optimizer cost) — matching the larger-scale numbers in [`../docs`](../docs).
 
 ```
 src/memory_native/
-  counter.py      CompactCounterLinear, RMSCounterLinear, encode/decode, stochastic rounding
-  reversible.py   ReversibleCouplingBlock, ReversibleSequential (recompute backward)
-  baselines.py    TernaryQATLinear, make_linear factory
-  models.py       swappable-linear GPT harness + configs
-  memory.py       memory_report, peak_training_memory, compare_training_peak
-  data.py         char corpus loader with offline synthetic fallback
-  cli.py          memory-native-charlm / memory-native-memgate entry points
-tests/            pytest: encode/decode, learning, reversible grad-check, memory gate
+  counter.py        CompactCounterLinear, RMSCounterLinear, encode/decode, stochastic rounding
+  packed.py         PackedRMSCounterLinear — real 0.75 byte/weight storage (4 codes / 3 bytes)
+  triton_counter.py TritonCounterLinear + in-GEMM packed decode (CUDA, unverified-on-hardware)
+  reversible.py     ReversibleCouplingBlock, ReversibleSequential (recompute backward)
+  baselines.py      TernaryQATLinear, make_linear factory (kinds incl. counter_packed)
+  optimizers.py     build_optimizer: adamw / bnb8 / galore / lomo
+  models.py         swappable-linear GPT harness + configs (micro/tiny/s512/small)
+  memory.py         memory_report, peak_training_memory, compare_training_peak
+  data.py           char corpus loader with offline synthetic fallback
+  cli.py            memory-native-charlm / memory-native-memgate entry points
+scripts/            run_scale_validation.sh (one-command GPU sweep -> results/)
+tests/              pytest: encode/decode, learning, reversible grad-check, packed round-trip,
+                    optimizers, memory gate, triton (CUDA-skipped)
 ```
 
 ## License

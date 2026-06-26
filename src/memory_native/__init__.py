@@ -21,6 +21,8 @@ from .counter import (
     ternary_gradient_unbiased,
 )
 from .reversible import ReversibleCouplingBlock, ReversibleSequential
+from .packed import PackedRMSCounterLinear, pack_codes, unpack_codes
+from .triton_counter import HAS_TRITON, TritonCounterLinear, triton_decode_matmul
 from .baselines import TernaryQATLinear, make_linear
 from .models import CONFIGS, GPT, GPTConfig
 from .memory import compare_training_peak, fmt_bytes, memory_report, peak_training_memory
@@ -33,6 +35,12 @@ __all__ = [
     "C_DEFAULT",
     "CompactCounterLinear",
     "RMSCounterLinear",
+    "PackedRMSCounterLinear",
+    "pack_codes",
+    "unpack_codes",
+    "TritonCounterLinear",
+    "triton_decode_matmul",
+    "HAS_TRITON",
     "encode_state",
     "decode_state",
     "stochastic_round",

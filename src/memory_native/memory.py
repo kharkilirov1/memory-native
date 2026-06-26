@@ -51,7 +51,9 @@ def memory_report(model: nn.Module) -> dict[str, float]:
     params = _unique(model.parameters())
     buffers = _unique(model.buffers())
     counter = [m for m in model.modules() if isinstance(m, CompactCounterLinear)]
-    counter_weights = sum(int(m.state.numel()) for m in counter)
+    # logical weight count (in*out), independent of whether state is stored 1 byte/weight
+    # (CompactCounterLinear) or packed 0.75 byte/weight (PackedRMSCounterLinear).
+    counter_weights = sum(m.in_features * m.out_features for m in counter)
     fp_params = sum(int(p.numel()) for p in params)
     parameter_bytes = sum(p.numel() * p.element_size() for p in params)
     buffer_bytes = sum(b.numel() * b.element_size() for b in buffers)
