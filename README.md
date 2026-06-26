@@ -130,6 +130,8 @@ src/memory_native/
   packed.py         PackedRMSCounterLinear — real 0.75 byte/weight storage (4 codes / 3 bytes)
   triton_counter.py TritonCounterLinear + in-GEMM packed decode (CUDA, unverified-on-hardware)
   reversible.py     ReversibleCouplingBlock, ReversibleSequential (recompute backward)
+  actquant.py       unbiased low-bit saved activations (the counter layer's act_save_bits)
+  budget.py         training_budget — symbolic 4-pool memory model (deep-v2, reproduced exact)
   baselines.py      TernaryQATLinear, make_linear factory (kinds incl. counter_packed)
   optimizers.py     build_optimizer: adamw / bnb8 / galore / lomo
   models.py         swappable-linear GPT harness + configs (micro/tiny/s512/small)
