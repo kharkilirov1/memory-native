@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "memory-native"
+version = "0.1.0"
+description = "Finite-state counter synapses + reversible activations for memory-efficient training, in pure PyTorch"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Kharki" }]
+keywords = ["pytorch", "quantization", "ternary", "memory-efficient-training", "optimizer", "reversible"]
+dependencies = ["torch>=2.1"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.scripts]
+memory-native-charlm = "memory_native.cli:charlm_main"
+memory-native-memgate = "memory_native.cli:memgate_main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
