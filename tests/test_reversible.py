@@ -54,3 +54,33 @@ def test_reversible_reconstruction_accurate_with_depth():
     # a backward must run end-to-end through the reconstructing chain without error
     (y ** 2).sum().backward()
     assert x.grad is not None and torch.isfinite(x.grad).all()
+
+
+def test_counters_learn_inside_reversible_no_grad_input():
+    """The full method: counter layers inside a reversible stack must self-update through the
+    recompute, even when the input carries no gradient (the tap forces backward to run)."""
+    import torch.nn as nn
+    from memory_native import ReversibleSequential, RMSCounterLinear
+
+    torch.manual_seed(0)
+    half, depth = 32, 4
+    def cmlp():
+        return nn.Sequential(RMSCounterLinear(half, half, C=11, lr=4e-3, lr_scale=2e-4),
+                             nn.Tanh(),
+                             RMSCounterLinear(half, half, C=11, lr=4e-3, lr_scale=2e-4))
+    stack = ReversibleSequential(
+        [ReversibleCouplingBlock(2 * half, F=cmlp(), G=cmlp()) for _ in range(depth)]).train()
+    counters = [m for m in stack.modules() if isinstance(m, RMSCounterLinear)]
+    x = torch.randn(64, 2 * half)        # NOTE: no requires_grad
+    target = torch.randn(64, 2 * half)
+    first = None
+    for _ in range(200):
+        y = stack(x)
+        loss = ((y - target) ** 2).mean()
+        loss.backward()                  # counters self-update via the recompute
+        if first is None:
+            first = loss.item()
+    last = loss.item()
+    flips = sum(int(c.weight_flips) for c in counters)
+    assert flips > 0, "counters never updated inside reversible (tap missing?)"
+    assert last < first, (first, last)
