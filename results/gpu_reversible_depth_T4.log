@@ -1,0 +1,11 @@
+torch 2.10.0+cu128 Tesla T4
+
+==== activation pool: does reversible make peak depth-INDEPENDENT? (dim=512, 2048 tokens) ====
+ depth  plain (stores acts)   reversible (recompute)
+     8           314.43 MiB               157.98 MiB
+    16           486.86 MiB               198.17 MiB
+    32           815.47 MiB               278.55 MiB
+    64             1.44 GiB               439.32 MiB
+   128             2.72 GiB               760.85 MiB
+
+=== DONE ===

@@ -1,0 +1,10 @@
+torch 2.10.0+cu128 Tesla T4 | total VRAM 14.6 GiB
+
+==== can counter train models a T4 can't? (batch=1, seq=256) ====
+model                   ~lin params  counter+int4   dense+AdamW
+d=1024,12L                    151M     566.10 MiB      3.00 GiB
+d=1536,16L                    453M       1.21 GiB      8.71 GiB
+d=2048,24L                   1208M       2.41 GiB           OOM
+d=2560,32L                   2517M       4.21 GiB           OOM
+
+=== DONE ===
