@@ -73,3 +73,23 @@ def test_triton_full_backward_trains():
         ((lay(x) - y) ** 2).mean().backward()
     with torch.no_grad():
         assert ((lay(x) - y) ** 2).mean().item() < 5e-3
+
+
+@pytest.mark.skipif(not (CUDA and HAS_TRITON), reason="needs CUDA + triton")
+def test_triton_forward_handles_3d_input():
+    """Transformer activations are [B,T,d]; the kernel path must flatten leading dims."""
+    lay = TritonCounterLinear(64, 48, C=11).cuda()
+    x = torch.randn(4, 7, 64, device="cuda")  # [B, T, d]
+    y = lay(x)
+    assert y.shape == (4, 7, 48)
+
+
+def test_counter_layer_accepts_3d_input_cpu():
+    """Regression for the 3D bug the GPU run caught: a counter layer used inside a transformer
+    receives [B,T,d]. The base (non-kernel) path must handle it."""
+    from memory_native import RMSCounterLinear
+    lay = RMSCounterLinear(32, 48, C=11).train()
+    x = torch.randn(3, 5, 32)
+    y = lay(x)
+    assert y.shape == (3, 5, 48)
+    y.sum().backward()  # drains the outstanding forward without error

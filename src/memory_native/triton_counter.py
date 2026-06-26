@@ -210,8 +210,11 @@ class TritonCounterLinear(PackedRMSCounterLinear):
 
     def _forward_matmul(self, x: torch.Tensor) -> torch.Tensor:
         if HAS_TRITON and x.is_cuda and x.dtype == torch.float32:
-            return triton_decode_matmul(x, self.state, self.scale, self.C,
-                                        self.in_features, self.out_features)
+            # flatten any leading dims ([B,T,d] -> [B*T,d]); the kernel is 2D.
+            x2 = x.reshape(-1, x.shape[-1])
+            y2 = triton_decode_matmul(x2, self.state, self.scale, self.C,
+                                      self.in_features, self.out_features)
+            return y2.reshape(*x.shape[:-1], self.out_features)
         return super()._forward_matmul(x)
 
     def _has_fast_grad_x(self) -> bool:
