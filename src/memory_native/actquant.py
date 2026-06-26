@@ -14,7 +14,29 @@ from __future__ import annotations
 
 import torch
 
-__all__ = ["stochastic_quantize", "quantize_codes", "dequantize_codes", "effective_bits"]
+__all__ = ["stochastic_quantize", "quantize_codes", "dequantize_codes", "effective_bits",
+           "pack_int4", "unpack_int4"]
+
+
+def pack_int4(codes: torch.Tensor) -> torch.Tensor:
+    """Pack signed 4-bit codes (values in [-8,7]) two per byte -> uint8, ~half the bytes.
+    Returns a flat uint8 tensor; the caller keeps the element count to unpack."""
+    flat = codes.reshape(-1).to(torch.int64)
+    nib = (flat + 8).clamp_(0, 15)  # signed [-8,7] -> [0,15]
+    if nib.numel() % 2:
+        nib = torch.cat([nib, nib.new_zeros(1)])
+    lo = nib[0::2]
+    hi = nib[1::2]
+    return (lo | (hi << 4)).to(torch.uint8)
+
+
+def unpack_int4(packed: torch.Tensor, n: int) -> torch.Tensor:
+    """Inverse of pack_int4. Returns a flat int8 tensor of length n with values in [-8,7]."""
+    p = packed.to(torch.int64)
+    lo = (p & 0x0F) - 8
+    hi = ((p >> 4) & 0x0F) - 8
+    out = torch.stack([lo, hi], dim=1).reshape(-1)[:n]
+    return out.to(torch.int8)
 
 
 def _levels(bits: int) -> int:
