@@ -3,7 +3,23 @@ import math
 import torch
 
 from memory_native import RMSCounterLinear
-from memory_native.actquant import effective_bits, quantize_codes, stochastic_quantize
+from memory_native.actquant import (
+    effective_bits,
+    pack_int4,
+    quantize_codes,
+    stochastic_quantize,
+    unpack_int4,
+)
+
+
+def test_pack_int4_roundtrip_and_halves_bytes():
+    torch.manual_seed(0)
+    codes = torch.randint(-7, 8, (133,), dtype=torch.int8)  # odd length on purpose
+    packed = pack_int4(codes)
+    assert packed.dtype == torch.uint8
+    assert packed.numel() == (codes.numel() + 1) // 2          # ~0.5 byte/elem
+    back = unpack_int4(packed, codes.numel())
+    assert torch.equal(back, codes)
 
 
 def test_quantizer_is_unbiased():

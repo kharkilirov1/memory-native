@@ -88,11 +88,18 @@ class _FusedCounterLinearFn(torch.autograd.Function):
         # quantization of x (codes + per-row scale) instead of fp x. The update only needs
         # E[Q(x)|x] = x, so it stays unbiased; the saved activation shrinks from fp to b bits.
         if module.act_save_bits:
-            from .actquant import quantize_codes
-            codes, scale = quantize_codes(x.reshape(-1, x.shape[-1]), module.act_save_bits, dim=-1)
-            # store as int8 (1 byte/elem) for bits<=8: codes in [-127,127] fit. This is the
-            # actual saved-activation memory win (4x vs fp32). bits 9..15 fall back to int16.
-            store = codes.to(torch.int8) if module.act_save_bits <= 8 else codes.to(torch.int16)
+            from .actquant import pack_int4, quantize_codes
+            x2 = x.reshape(-1, x.shape[-1])
+            codes, scale = quantize_codes(x2, module.act_save_bits, dim=-1)
+            if module.act_save_bits == 4:
+                # true 4-bit packing: 2 codes per byte -> 0.5 byte/elem (codes in [-7,7]).
+                store = pack_int4(codes)
+                ctx.packed4 = True
+                ctx.n_codes = x2.numel()
+            else:
+                # int8 (1 byte) for bits<=8, int16 for 9..15.
+                store = codes.to(torch.int8) if module.act_save_bits <= 8 else codes.to(torch.int16)
+                ctx.packed4 = False
             ctx.save_for_backward(store, scale)
             ctx.x_shape = x.shape
             ctx.quantized = True
@@ -105,7 +112,12 @@ class _FusedCounterLinearFn(torch.autograd.Function):
     def backward(ctx, grad_out: torch.Tensor):
         module: CompactCounterLinear = ctx.module
         if ctx.quantized:
-            codes, scale = ctx.saved_tensors
+            store, scale = ctx.saved_tensors
+            if ctx.packed4:
+                from .actquant import unpack_int4
+                codes = unpack_int4(store, ctx.n_codes).reshape(-1, module.in_features)
+            else:
+                codes = store
             x2 = (codes.to(scale.dtype) * scale)            # dequant Q(x): [-1, in]
             x = x2.reshape(ctx.x_shape)
         else:
