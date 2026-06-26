@@ -1,0 +1,9 @@
+# build / install artifacts
+*.egg-info/
+build/
+dist/
+__pycache__/
+*.pyc
+.pytest_cache/
+# downloaded data
+tinyshakespeare.txt
