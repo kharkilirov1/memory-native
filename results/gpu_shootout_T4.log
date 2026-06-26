@@ -1,0 +1,19 @@
+torch 2.10.0+cu128 Tesla T4
+corpus source: /kaggle/working/tinyshakespeare.txt (downloaded)
+
+==== SHOOTOUT s512 (d=512, 8L), 400 steps, batch 16, vocab 65 ====
+config                val        peak     tok/s
+counter_int4       2.5161 1018.34 MiB     3,299
+dense_adamw        2.5672    1.19 GiB    17,669
+dense_galore       2.6175    1.35 GiB    16,887
+dense_lomo         2.5133    1.35 GiB    18,390
+dense_bnb8         2.5789    1.26 GiB    17,646
+
+--- summary (memory vs the dense+AdamW reference) ---
+  counter_int4     -0.051 val     1.19x less peak
+  dense_adamw      +0.000 val     1.00x less peak
+  dense_galore     +0.050 val     0.88x less peak
+  dense_lomo       -0.054 val     0.88x less peak
+  dense_bnb8       +0.012 val     0.94x less peak
+
+=== DONE ===
