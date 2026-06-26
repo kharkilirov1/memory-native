@@ -1,0 +1,7 @@
+torch 2.10.0+cu128 Tesla T4
+
+==== training-peak: act_save_bits 0 / 8(int8) / 4(true 4-bit packed) ====
+  batch=16: asb0 1.56 GiB | asb8 1.33 GiB (-14%) | asb4-packed 1.26 GiB (-19%) | dense+adamw 1.64 GiB
+  batch=32: asb0 3.52 GiB | asb8 3.06 GiB (-13%) | asb4-packed 2.92 GiB (-17%) | dense+adamw 3.16 GiB
+
+=== DONE ===
