@@ -84,3 +84,38 @@ def test_counters_learn_inside_reversible_no_grad_input():
     flips = sum(int(c.weight_flips) for c in counters)
     assert flips > 0, "counters never updated inside reversible (tap missing?)"
     assert last < first, (first, last)
+
+
+def test_o1_reversible_sequence_matches_per_block():
+    """ReversibleSequence (O(1) whole-chain) must give identical grads to the per-block version."""
+    import torch.nn as nn
+    from memory_native import ReversibleSequence
+
+    def mk():
+        torch.manual_seed(0)
+        return [ReversibleCouplingBlock(16, F=nn.Linear(8, 8, bias=False),
+                                        G=nn.Linear(8, 8, bias=False)) for _ in range(5)]
+    o1 = ReversibleSequence(mk())
+    pb = ReversibleSequential(mk())
+    x = torch.randn(8, 16, requires_grad=True)
+    g1 = torch.autograd.grad((o1(x) ** 2).sum(), [x] + list(o1.parameters()))
+    x2 = x.detach().clone().requires_grad_(True)
+    g2 = torch.autograd.grad((pb(x2) ** 2).sum(), [x2] + list(pb.parameters()))
+    assert all(torch.allclose(a, b, atol=1e-5) for a, b in zip(g1, g2))
+
+
+def test_o1_reversible_stores_one_output():
+    """The whole-chain Function must save exactly one activation tensor (the final output) +
+    params -- the O(1)-in-depth guarantee."""
+    import torch.nn as nn
+    from memory_native import ReversibleSequence
+
+    blocks = [ReversibleCouplingBlock(16, F=nn.Linear(8, 8, bias=False),
+                                      G=nn.Linear(8, 8, bias=False)) for _ in range(7)]
+    seq = ReversibleSequence(blocks)
+    x = torch.randn(4, 16, requires_grad=True)
+    y = seq(x)
+    n_params = sum(1 for _ in seq.parameters())
+    # saved_tensors = final output (1) + all params; independent of depth beyond the params
+    assert len(y.grad_fn.saved_tensors) == 1 + n_params
+    (y ** 2).sum().backward()

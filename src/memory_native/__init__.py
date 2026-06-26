@@ -20,7 +20,7 @@ from .counter import (
     stochastic_round,
     ternary_gradient_unbiased,
 )
-from .reversible import ReversibleCouplingBlock, ReversibleSequential
+from .reversible import ReversibleCouplingBlock, ReversibleSequence, ReversibleSequential
 from .packed import PackedRMSCounterLinear, pack_codes, unpack_codes
 from .triton_counter import HAS_TRITON, TritonCounterLinear, triton_decode_matmul, triton_grad_x
 from .baselines import TernaryQATLinear, make_linear
@@ -50,6 +50,7 @@ __all__ = [
     "ternary_gradient_unbiased",
     "ReversibleCouplingBlock",
     "ReversibleSequential",
+    "ReversibleSequence",
     "TernaryQATLinear",
     "make_linear",
     "GPT",
