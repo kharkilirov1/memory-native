@@ -109,21 +109,27 @@ class _FusedCounterLinearFn(torch.autograd.Function):
             (x,) = ctx.saved_tensors
             x2 = x.reshape(-1, x.shape[-1])
         go2 = grad_out.reshape(-1, grad_out.shape[-1])
-        grad_x2 = torch.zeros((x2.shape[0], module.in_features), device=x.device, dtype=x.dtype)
+
+        # grad_x: a kernel subclass (Triton) computes it straight from packed state with no
+        # dense weight at all; the base path accumulates it tile-by-tile in the loop below.
+        use_kernel = module._has_fast_grad_x()
+        if use_kernel:
+            grad_x2 = module._backward_grad_x(go2)
+        else:
+            grad_x2 = torch.zeros((x2.shape[0], module.in_features), device=x.device, dtype=x.dtype)
 
         # The full weight-gradient never exists. Only [tile_rows, in_features] is live.
-        for lo in range(0, module.out_features, module.tile_rows):
-            hi = min(lo + module.tile_rows, module.out_features)
-            t_i, c_i = module._decode_rows(lo, hi)
-            s_i = module.scale[lo:hi]
-            w_i = s_i.to(x.dtype) * t_i.to(x.dtype)
-
-            go_i = go2[:, lo:hi]
-            grad_x2.add_(go_i @ w_i)
-
-            if module.training and module.update_enabled:
-                grad_w_i = (go_i.transpose(0, 1) @ x2).float()
-                module._update_tile(lo, hi, grad_w_i, t_i, c_i, s_i)
+        if (module.training and module.update_enabled) or not use_kernel:
+            for lo in range(0, module.out_features, module.tile_rows):
+                hi = min(lo + module.tile_rows, module.out_features)
+                t_i, c_i = module._decode_rows(lo, hi)
+                s_i = module.scale[lo:hi]
+                if not use_kernel:
+                    w_i = s_i.to(x.dtype) * t_i.to(x.dtype)
+                    grad_x2.add_(go2[:, lo:hi] @ w_i)
+                if module.training and module.update_enabled:
+                    grad_w_i = (go2[:, lo:hi].transpose(0, 1) @ x2).float()
+                    module._update_tile(lo, hi, grad_w_i, t_i, c_i, s_i)
 
         module._outstanding_forward = False
         # grads for (x, module, tap); tap's grad is unused.
@@ -200,6 +206,14 @@ class CompactCounterLinear(nn.Module):
         # y = x @ W^T. Base path materializes the dense weight; a kernel subclass (Triton)
         # may override this to decode the packed state inside the GEMM with no dense weight.
         return F.linear(x, self._dense_weight(x.dtype))
+
+    def _has_fast_grad_x(self) -> bool:
+        # Base path computes grad_x tile-by-tile in the backward loop. A kernel subclass
+        # returns True and provides _backward_grad_x to form grad_x straight from state.
+        return False
+
+    def _backward_grad_x(self, grad_out2d: torch.Tensor) -> torch.Tensor:  # pragma: no cover
+        raise NotImplementedError
 
     def _dense_weight(self, dtype: torch.dtype) -> torch.Tensor:
         t, _ = decode_state(self.state, self.C)
