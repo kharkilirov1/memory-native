@@ -28,11 +28,21 @@ spread is within single-seed/short-run noise (~±0.04 seen earlier), so the hone
 "on par with the best," not "beats them" — but it is clearly not paying a quality penalty for
 the memory win.
 
-**The real cost is throughput.** counter is ~5× slower (3.3k vs ~17-18k tok/s): the per-element
-state decode and the still-PyTorch tiled update. The Triton forward + grad_x kernels (verified)
-remove the dense-weight work but not the update; a fully fused update kernel is what would
-narrow this gap. So the method's honest value proposition is **lowest-memory training at
-competitive quality, if you can afford slower steps.**
+**The cost is throughput — but smaller than first measured.** The shootout's counter row
+(3.3k tok/s) used the default tiled update (tile_rows=64). The ~5× gap turned out to be
+*kernel-launch overhead from the per-tile Python loop*, not compute: doing the update untiled
+(now the default) is **2.9× faster at identical peak** — counter_packed+int4 runs at **~8.9k
+tok/s** on T4, i.e. **~2.1× slower than AdamW (18.7k), not 5×.** (Measured: tile_rows 64 →
+3.1k, 128 → 5.1k, untiled → 8.9k tok/s, all at 1.30 GiB.)
+
+A surprising negative result worth recording: the Triton forward + grad_x kernels (verified
+correct on T4) **do not help here** — no memory benefit (the dense weight is negligible vs the
+activation-bound peak) and they are actually *slower* than torch's `decode + cuBLAS` (a naive
+non-autotuned Triton matmul loses to cuBLAS). So a fused *update* kernel — not a weight kernel
+— is the only remaining throughput lever; the untiled torch path already captures most of it.
+
+Net value proposition: **lowest-memory training (1.2–1.4× below the best memory-efficient
+optimizers) at competitive quality, for ~2× slower steps.**
 
 ## Caveats
 - Single seed, 400 steps; per-optimizer LRs are reasonable but not exhaustively tuned (GaLore/
