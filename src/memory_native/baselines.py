@@ -36,13 +36,17 @@ class TernaryQATLinear(nn.Module):
 
 
 def make_linear(kind: str, fin: int, fout: int, init_gain: float = 1.0, **counter_kw):
-    """Factory used by the GPT harness. kind in {dense, qat, counter, counter_rms}."""
+    """Factory used by the GPT harness.
+    kind in {dense, qat, counter, counter_rms, counter_packed}."""
     from .counter import CompactCounterLinear, RMSCounterLinear
+    from .packed import PackedRMSCounterLinear
 
     if kind == "counter":
         return CompactCounterLinear(fin, fout, init_gain=init_gain, **counter_kw)
     if kind == "counter_rms":
         return RMSCounterLinear(fin, fout, init_gain=init_gain, **counter_kw)
+    if kind == "counter_packed":
+        return PackedRMSCounterLinear(fin, fout, init_gain=init_gain, **counter_kw)
     if kind == "qat":
         return TernaryQATLinear(fin, fout, init_gain)
     if kind == "dense":

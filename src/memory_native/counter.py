@@ -84,11 +84,7 @@ class _FusedCounterLinearFn(torch.autograd.Function):
         module._outstanding_forward = True
         ctx.module = module
         ctx.save_for_backward(x)
-
-        t, _ = decode_state(module.state, module.C)
-        scale = module.scale.to(dtype=x.dtype)
-        weight = scale * t.to(dtype=x.dtype)
-        return F.linear(x, weight)
+        return module._forward_matmul(x)
 
     @staticmethod
     def backward(ctx, grad_out: torch.Tensor):
@@ -102,7 +98,7 @@ class _FusedCounterLinearFn(torch.autograd.Function):
         # The full weight-gradient never exists. Only [tile_rows, in_features] is live.
         for lo in range(0, module.out_features, module.tile_rows):
             hi = min(lo + module.tile_rows, module.out_features)
-            t_i, c_i = decode_state(module.state[lo:hi], module.C)
+            t_i, c_i = module._decode_rows(lo, hi)
             s_i = module.scale[lo:hi]
             w_i = s_i.to(x.dtype) * t_i.to(x.dtype)
 
@@ -174,8 +170,27 @@ class CompactCounterLinear(nn.Module):
             tap = torch.zeros((), device=x.device, dtype=x.dtype, requires_grad=True)
             return _FusedCounterLinearFn.apply(x, self, tap)
         # inference: pure forward, no update, no graph.
+        return self._forward_matmul(x)
+
+    # --- storage abstraction (overridden by the packed-6bit subclass) -------------
+    # Base storage is one uint8 code per weight in `state` [out, in]. A subclass may store
+    # `state` packed (4 codes / 3 bytes) and override these three to pack/unpack at the
+    # boundary; the autograd Function and _update_tile go through them, so the update math
+    # is shared and the persistent footprint is whatever the storage chooses.
+    def _forward_matmul(self, x: torch.Tensor) -> torch.Tensor:
+        # y = x @ W^T. Base path materializes the dense weight; a kernel subclass (Triton)
+        # may override this to decode the packed state inside the GEMM with no dense weight.
+        return F.linear(x, self._dense_weight(x.dtype))
+
+    def _dense_weight(self, dtype: torch.dtype) -> torch.Tensor:
         t, _ = decode_state(self.state, self.C)
-        return F.linear(x, self.scale.to(x.dtype) * t.to(x.dtype))
+        return self.scale.to(dtype) * t.to(dtype)
+
+    def _decode_rows(self, lo: int, hi: int) -> tuple[torch.Tensor, torch.Tensor]:
+        return decode_state(self.state[lo:hi], self.C)
+
+    def _write_rows(self, lo: int, hi: int, t: torch.Tensor, c: torch.Tensor) -> None:
+        self.state[lo:hi].copy_(encode_state(t, c, self.C))
 
     @torch.no_grad()
     def _update_tile(self, lo, hi, grad_w, t_i, c_i, s_i) -> None:
@@ -204,7 +219,7 @@ class CompactCounterLinear(nn.Module):
             blocked, torch.sign(cc) * (self.C - 1), remainder
         ).clamp_(-(self.C - 1), self.C - 1)
 
-        self.state[lo:hi].copy_(encode_state(new_t, remainder, self.C))
+        self._write_rows(lo, hi, new_t, remainder)
         self.scale[lo:hi].copy_(s_new)
         self.update_events.add_(int((cc != c_i).sum().item()))
         self.weight_flips.add_(int((new_t != t_i).sum().item()))
@@ -270,7 +285,7 @@ class RMSCounterLinear(CompactCounterLinear):
             blocked, torch.sign(cc) * (self.C - 1), remainder
         ).clamp_(-(self.C - 1), self.C - 1)
 
-        self.state[lo:hi].copy_(encode_state(new_t, remainder, self.C))
+        self._write_rows(lo, hi, new_t, remainder)
         self.scale[lo:hi].copy_(s_new)
         self.update_events.add_(int((cc != c_i).sum().item()))
         self.weight_flips.add_(int((new_t != t_i).sum().item()))
