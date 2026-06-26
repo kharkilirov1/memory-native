@@ -91,19 +91,22 @@ optimizer cost) — matching the larger-scale numbers in [`../docs`](../docs).
   persistent state** (4 codes / 3 bytes, bit-identical to the engine's packing; round-trip
   and identical-dynamics tested). `memory_report` / `memory-native-memgate` quantify it (real
   `torch.cuda.max_memory_allocated` on CUDA, byte accounting on CPU).
-- **Partially realized (written, NOT verified on hardware):** the Triton forward kernel
-  (`triton_counter.py`, `TritonCounterLinear`) decodes the packed state *inside* the GEMM, so
-  the forward materializes no dense weight and reads 0.75 byte/weight from HBM. It falls back
-  to the packed PyTorch forward without CUDA/triton. **It has not been run on a GPU** — run
-  `tests/test_triton.py` on CUDA+triton to validate before relying on it.
+- **Verified on GPU (Tesla T4):** the Triton forward kernel (`triton_counter.py`,
+  `TritonCounterLinear`) decodes the packed state *inside* the GEMM (no dense weight) and
+  matches the dense reference within f32 tol (err ≤ 3e-6). And at **d=512** counter+RMS keeps
+  parity with — slightly beats — dense AdamW (val −1.7%). See [`results/SUMMARY.md`](results/SUMMARY.md).
 - **Still a torch op (the remaining milestone):** the *backward update* still decodes tiles
-  in PyTorch. The fused backward kernel (form `grad_w` in registers + apply the counter
-  transition in place, the analogue of the engine's OpenCL `counter_*_fused`) is next.
+  in PyTorch. Because of that, the measured *training peak* is only ~1.05× below dense+AdamW
+  at d=512 (the peak is dominated by activations + the transient dense weight); the sub-byte
+  win shows up in *persistent* state, not the peak. The fused backward kernel (form `grad_w`
+  in registers + apply the counter transition in place, the analogue of the engine's OpenCL
+  `counter_*_fused`) is what makes the *training-peak* sub-byte too. That is the one open item.
 
 ### Roadmap
-1. **Validate + extend the Triton path on a GPU** — confirm the forward kernel, then write the
-   fused backward-update kernel so the *training peak* (not just persistent state) is sub-byte
-   on CUDA. This is the only remaining piece that needs hardware this repo hasn't run on.
+1. **Fused backward kernel** — the forward Triton kernel is verified on a T4
+   ([`results/SUMMARY.md`](results/SUMMARY.md)); the remaining piece is the backward-update
+   kernel (form `grad_w` in registers + update state in place) so the *training peak* — not
+   just persistent state — is sub-byte on CUDA. This is the one open milestone.
 2. **Done — baselines that matter:** `--optimizer {bnb8,galore,lomo}` compares against real
    memory-efficient training, not only FP32+Adam (see table above).
 3. **Scale validation** — `scripts/run_scale_validation.sh` runs the d=512–768 parity sweep;
