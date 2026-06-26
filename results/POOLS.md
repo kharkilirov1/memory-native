@@ -41,6 +41,27 @@ whole chain). Plain stores O(depth) with a *large* constant (all per-block inter
 3.6× gap. **True O(1) needs a single whole-chain reversible Function** (the classic RevNet
 backward) — the next implementation step.
 
+
+### O(1) whole-chain reversible — activation pool collapsed (T4)
+
+`ReversibleSequence` makes the whole stack a single autograd Function that stores ONLY the
+final output (classic RevNet backward). Gradients are identical to the per-block version
+(verified, max diff 0.0). Peak vs depth (dim=512, 2048 tokens), counter MLP blocks
+(`gpu_reversible_o1_T4.log`):
+
+| depth | plain | per-block rev (O(depth)) | O(1) whole-chain |
+|---|---|---|---|
+| 8 | 314 MiB | 158 | 138 |
+| 32 | 815 | 279 | 163 |
+| 128 | 2.72 GiB | 761 | 261 |
+| 256 | **5.29 GiB** | 1.37 GiB | **392 MiB** |
+
+Over a 32× depth increase (8→256), plain grows **16.8×** but O(1) grows only **2.8×** — and
+that residual is the counter *weights* (state grows linearly with depth, ~1 byte/weight),
+not activations. The **activation pool is now O(1) in depth.** At depth 256 the full method is
+**13.5× below plain** (5.29 GiB → 392 MiB), and the gap widens with depth — converging on the
+verified budget-calculator projection (~10–16× for the full method).
+
 ## Combined
 
 Both levers are demonstrated on real hardware. The full method (counter + reversible) is what
