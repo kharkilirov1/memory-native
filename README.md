@@ -45,9 +45,37 @@ the model (embeddings, norms, head) trains those as usual.
 # Falls back to a synthetic corpus offline; use --data-path for real tinyshakespeare.
 memory-native-charlm --config tiny --steps 600 --device cuda
 
-# training-peak memory gate: counter_rms vs dense+AdamW (real peak on CUDA)
-memory-native-memgate --config tiny --device cuda
+# compare the dense baseline under a memory-efficient optimizer instead of FP32 AdamW:
+memory-native-charlm --config tiny --kinds dense --optimizer galore --device cuda
+
+# training-peak memory gate: counter_rms vs dense across optimizers (real peak on CUDA)
+memory-native-memgate --config s512 --optimizers adamw,galore,lomo,bnb8 --device cuda
 ```
+
+### Baselines (the honest comparison set)
+`--optimizer` / `--optimizers` selects what the dense baseline is trained with, so the memory
+claim is measured against real memory-efficient training, not only FP32 AdamW:
+
+| name | what | optimizer-state memory | deps |
+|---|---|---|---|
+| `adamw` | FP32 AdamW | 2×params (fp32 m,v) | torch |
+| `bnb8` | 8-bit AdamW (bitsandbytes) | ~0.5×params | bitsandbytes + CUDA |
+| `galore` | low-rank projected AdamW | ~2×rank×dim | torch (built in) |
+| `lomo` | fused-backward SGD | **zero** moments | torch (built in) |
+
+GaLore and LoMo are implemented in plain PyTorch here (run on CPU, no extra deps); `bnb8`
+is optional and used where bitsandbytes+CUDA are present (skips cleanly otherwise).
+
+### Scale validation
+The biggest open question is whether parity holds beyond micro/tiny. One command runs the
+full sweep (parity across kinds + dense-vs-optimizers + memory gate) at d=512 and saves logs:
+
+```bash
+scripts/run_scale_validation.sh s512 2000 cuda      # config steps device
+DATA_PATH=/path/to/tinyshakespeare.txt scripts/run_scale_validation.sh small 4000 cuda
+```
+
+Logs land in `results/` (not committed pre-filled — capture them on your GPU).
 
 A 60-step micro run already reproduces the method's story: `counter_rms` lands within ~0.1%
 of dense, beats vanilla counter, and isolates to ~+2.5% over ternary-QAT (the counter-

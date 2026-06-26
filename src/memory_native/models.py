@@ -28,6 +28,7 @@ class GPTConfig:
 CONFIGS = {
     "micro": GPTConfig(32, 16, 2, 2, 32),
     "tiny": GPTConfig(2048, 128, 4, 4, 256),
+    "s512": GPTConfig(8192, 256, 8, 8, 512),
     "small": GPTConfig(8192, 256, 12, 12, 768),
 }
 

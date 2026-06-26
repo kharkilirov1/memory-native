@@ -24,6 +24,7 @@ from .reversible import ReversibleCouplingBlock, ReversibleSequential
 from .baselines import TernaryQATLinear, make_linear
 from .models import CONFIGS, GPT, GPTConfig
 from .memory import compare_training_peak, fmt_bytes, memory_report, peak_training_memory
+from .optimizers import GaLoreAdamW, LoMo, available_optimizers, build_optimizer
 from .data import get_batch, load_corpus, synthetic_corpus
 
 __version__ = "0.1.0"
@@ -47,6 +48,10 @@ __all__ = [
     "peak_training_memory",
     "compare_training_peak",
     "fmt_bytes",
+    "build_optimizer",
+    "available_optimizers",
+    "GaLoreAdamW",
+    "LoMo",
     "load_corpus",
     "get_batch",
     "synthetic_corpus",

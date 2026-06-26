@@ -15,6 +15,7 @@ import torch
 from .data import get_batch, load_corpus
 from .memory import fmt_bytes, memory_report, peak_training_memory
 from .models import CONFIGS, GPT
+from .optimizers import available_optimizers, build_optimizer
 
 
 def _device(name: str) -> torch.device:
@@ -32,8 +33,8 @@ def _train_one(kind: str, args, vocab, train_data, val_data, device) -> dict:
     model = GPT(kind, cfg, **kw).to(device)
     model.train()
 
-    opt = torch.optim.AdamW(model.trainable_parameters(),
-                            lr=args.base_lr if kind in ("dense", "qat") else args.fp_lr)
+    lr = args.base_lr if kind in ("dense", "qat") else args.fp_lr
+    opt = build_optimizer(args.optimizer, model.trainable_parameters(), lr)
     g = torch.Generator().manual_seed(args.seed)
 
     @torch.no_grad()
@@ -47,6 +48,9 @@ def _train_one(kind: str, args, vocab, train_data, val_data, device) -> dict:
         model.train()
         return tot / args.eval_iters
 
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+        torch.cuda.reset_peak_memory_stats(device)
     started = time.time()
     for step in range(args.steps + 1):
         x, y = get_batch(train_data, cfg.block_size, args.batch, device, g)
@@ -56,12 +60,18 @@ def _train_one(kind: str, args, vocab, train_data, val_data, device) -> dict:
         opt.step()
         if step % max(1, args.steps // 6) == 0:
             print(f"  [{kind:12s}] step {step:5d}  train {loss.item():.4f}")
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    elapsed = time.time() - started
     final_val = evaluate()
     rep = memory_report(model)
-    print(f"  [{kind:12s}] final val {final_val:.4f}  "
-          f"persistent {fmt_bytes(rep['persistent_bytes'])}  "
-          f"({time.time()-started:.0f}s)")
-    return {"final_val": final_val, "report": rep}
+    tokens = (args.steps + 1) * args.batch * cfg.block_size
+    tok_s = tokens / max(elapsed, 1e-9)
+    peak = int(torch.cuda.max_memory_allocated(device)) if device.type == "cuda" else 0
+    peak_str = f"  peak {fmt_bytes(peak)}" if peak else ""
+    print(f"  [{kind:12s}] final val {final_val:.4f}  persistent {fmt_bytes(rep['persistent_bytes'])}"
+          f"  {tok_s:,.0f} tok/s{peak_str}  ({elapsed:.0f}s)")
+    return {"final_val": final_val, "report": rep, "tok_s": tok_s, "peak_bytes": peak}
 
 
 def charlm_main(argv=None) -> None:
@@ -81,6 +91,9 @@ def charlm_main(argv=None) -> None:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--data-path", default=None)
+    ap.add_argument("--optimizer", default="adamw", choices=available_optimizers(),
+                    help="optimizer for the trainable (non-counter) params: "
+                         "adamw | bnb8 | galore | lomo")
     args = ap.parse_args(argv)
 
     device = _device(args.device)
@@ -109,21 +122,21 @@ def charlm_main(argv=None) -> None:
 
 
 def memgate_main(argv=None) -> None:
-    ap = argparse.ArgumentParser(description="training-peak memory gate (counter vs dense+AdamW)")
+    ap = argparse.ArgumentParser(
+        description="training-peak memory gate: counter_rms vs dense across memory-efficient optimizers")
     ap.add_argument("--config", choices=list(CONFIGS), default="tiny")
     ap.add_argument("--batch", type=int, default=16)
     ap.add_argument("--device", default="cpu")
+    ap.add_argument("--optimizers", default="adamw,galore,lomo",
+                    help="comma list of dense baselines to compare against: "
+                         f"{','.join(available_optimizers())}")
     args = ap.parse_args(argv)
     device = _device(args.device)
     cfg = CONFIGS[args.config]
 
-    def batch():
-        x = torch.randint(0, cfg.vocab_size, (args.batch, cfg.block_size), device=device)
-        y = torch.randint(0, cfg.vocab_size, (args.batch, cfg.block_size), device=device)
-        return x, y
-
     import torch.nn.functional as F
-    x, y = batch()
+    x = torch.randint(0, cfg.vocab_size, (args.batch, cfg.block_size), device=device)
+    y = torch.randint(0, cfg.vocab_size, (args.batch, cfg.block_size), device=device)
 
     def step(model, opt=None):
         if opt is not None:
@@ -134,24 +147,36 @@ def memgate_main(argv=None) -> None:
         if opt is not None:
             opt.step()
 
+    # counter_rms: self-updating, no optimizer over its ternary weights.
     counter = GPT("counter_rms", cfg).to(device).train()
-    dense = GPT("dense", cfg).to(device).train()
-    dopt = torch.optim.AdamW(dense.trainable_parameters(), lr=3e-3)
-
     cpeak = peak_training_memory(lambda: step(counter), device)
-    dpeak = peak_training_memory(lambda: step(dense, dopt), device)
+    cr = memory_report(counter)
 
-    cr, dr = memory_report(counter), memory_report(dense)
-    print(f"device={device}  config={args.config}")
+    print(f"device={device}  config={args.config}  batch={args.batch}")
     print(f"persistent state: counter_rms={fmt_bytes(cr['persistent_bytes'])}  "
-          f"dense={fmt_bytes(dr['persistent_bytes'])}")
-    print(f"counter weights packed-to-6bit would be {fmt_bytes(cr['counter_packed_6bit_bytes'])}")
+          f"(counter weights packed-to-6bit would be {fmt_bytes(cr['counter_packed_6bit_bytes'])})")
+
+    rows = []
+    for oname in [o.strip() for o in args.optimizers.split(",") if o.strip()]:
+        dense = GPT("dense", cfg).to(device).train()
+        try:
+            dopt = build_optimizer(oname, dense.trainable_parameters(), lr=3e-3)
+        except RuntimeError as exc:
+            print(f"  dense+{oname:7s}: SKIP ({exc})")
+            continue
+        dpeak = peak_training_memory(lambda: step(dense, dopt), device)
+        rows.append((oname, dpeak, memory_report(dense)))
+
     if device.type == "cuda":
-        print(f"TRAINING PEAK (max_memory_allocated): counter_rms={fmt_bytes(cpeak)}  "
-              f"dense+AdamW={fmt_bytes(dpeak)}  ratio={dpeak/max(cpeak,1):.2f}x")
+        print(f"TRAINING PEAK (max_memory_allocated):  counter_rms = {fmt_bytes(cpeak)}")
+        for oname, dpeak, _ in rows:
+            print(f"  dense+{oname:7s} = {fmt_bytes(dpeak):>12s}   "
+                  f"{dpeak/max(cpeak,1):.2f}x of counter_rms")
     else:
         print("training peak: CPU has no allocator-peak API; run with --device cuda for the "
-              "real peak. (persistent-state comparison above still holds.)")
+              "real peak. Persistent-state comparison:")
+        for oname, _, dr in rows:
+            print(f"  dense+{oname:7s} persistent {fmt_bytes(dr['persistent_bytes'])}")
 
 
 if __name__ == "__main__":
