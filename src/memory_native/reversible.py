@@ -22,7 +22,7 @@ from typing import Sequence
 import torch
 import torch.nn as nn
 
-__all__ = ["ReversibleCouplingBlock", "ReversibleSequential"]
+__all__ = ["ReversibleCouplingBlock", "ReversibleSequential", "ReversibleSequence"]
 
 
 class _ReversibleFn(torch.autograd.Function):
@@ -96,8 +96,9 @@ class ReversibleCouplingBlock(nn.Module):
 
 
 class ReversibleSequential(nn.Module):
-    """A stack of reversible blocks. Activation memory is independent of depth: only the
-    final output is kept by autograd; every block reconstructs its input in backward."""
+    """A stack of reversible blocks applied one at a time. Each block is its own autograd
+    Function that stores ITS OWN output, so activation memory is O(depth) with a *small*
+    constant (one [N,dim] per block). For the O(1)-in-depth ideal use ReversibleSequence."""
 
     def __init__(self, blocks: Sequence[ReversibleCouplingBlock]) -> None:
         super().__init__()
@@ -107,3 +108,86 @@ class ReversibleSequential(nn.Module):
         for b in self.blocks:
             x = b(x)
         return x
+
+
+def _couple_fwd(block: "ReversibleCouplingBlock", x: torch.Tensor) -> torch.Tensor:
+    d = x.shape[-1] // 2
+    x1, x2 = x[..., :d], x[..., d:]
+    y1 = x1 + block.F(x2)
+    y2 = x2 + block.G(y1)
+    return torch.cat([y1, y2], dim=-1)
+
+
+def _couple_bwd(block: "ReversibleCouplingBlock", y: torch.Tensor, grad_y: torch.Tensor):
+    d = y.shape[-1] // 2
+    y1, y2 = y[..., :d], y[..., d:]
+    with torch.no_grad():                       # reconstruct this block's input from its output
+        x2 = y2 - block.G(y1)
+        x1 = y1 - block.F(x2)
+    x1 = x1.detach().requires_grad_(True)
+    x2 = x2.detach().requires_grad_(True)
+    with torch.enable_grad():                   # recompute to get grads (fires inner counters)
+        z1 = x1 + block.F(x2)
+        z2 = x2 + block.G(z1)
+        z = torch.cat([z1, z2], dim=-1)
+    params = tuple(block.F.parameters()) + tuple(block.G.parameters())
+    grads = torch.autograd.grad(z, (x1, x2) + params, grad_y)
+    grad_x = torch.cat([grads[0], grads[1]], dim=-1)
+    x = torch.cat([x1.detach(), x2.detach()], dim=-1)
+    return x, grad_x, grads[2:]
+
+
+class _ReversibleSequenceFn(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, blocks, meta, tap, *all_params):
+        ctx.blocks = blocks
+        ctx.meta = meta
+        with torch.no_grad():                   # run the whole chain; keep NO intermediates
+            for b in blocks:
+                x = _couple_fwd(b, x)
+        ctx.save_for_backward(x.detach(), *all_params)   # store ONLY the final output (+params)
+        return x
+
+    @staticmethod
+    def backward(ctx, grad_out):
+        y = ctx.saved_tensors[0]
+        n_params = len(ctx.saved_tensors) - 1
+        grad_params = [None] * n_params
+        offsets, off = [], 0
+        for (nf, ng) in ctx.meta:
+            offsets.append(off)
+            off += nf + ng
+        grad_y = grad_out
+        for i in range(len(ctx.blocks) - 1, -1, -1):     # walk the chain backwards
+            x, grad_x, gparams = _couple_bwd(ctx.blocks[i], y, grad_y)
+            base = offsets[i]
+            for k, g in enumerate(gparams):
+                grad_params[base + k] = g
+            y, grad_y = x, grad_x                          # earlier block's output = this input
+        return (grad_y, None, None, None) + tuple(grad_params)
+
+
+class ReversibleSequence(nn.Module):
+    """A reversible stack with **O(1)-in-depth** activation memory: the whole chain is a single
+    autograd Function that stores ONLY the final output. Backward walks the chain in reverse,
+    reconstructing each block's input from its output and recomputing locally (classic RevNet).
+    Inner self-updating counter layers fire once per block during that walk.
+
+    Note: the float inverse accumulates a little reconstruction error with depth (~3e-3 over
+    ~12 blocks); training-neutral at modest depth, but very deep stacks may want anchors."""
+
+    def __init__(self, blocks: Sequence[ReversibleCouplingBlock]) -> None:
+        super().__init__()
+        self.blocks = nn.ModuleList(blocks)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        all_params, meta = [], []
+        for b in self.blocks:
+            fp = tuple(b.F.parameters())
+            gp = tuple(b.G.parameters())
+            meta.append((len(fp), len(gp)))
+            all_params.extend(fp)
+            all_params.extend(gp)
+        tap = (torch.zeros((), device=x.device, dtype=x.dtype, requires_grad=True)
+               if torch.is_grad_enabled() else x.new_zeros(()))
+        return _ReversibleSequenceFn.apply(x, tuple(self.blocks), tuple(meta), tap, *all_params)
