@@ -1,0 +1,12 @@
+torch 2.10.0+cu128 Tesla T4
+
+==== peak (deterministic) ====
+  counter_packed asb=0 1.56 GiB | asb=8 1.33 GiB  (-14%)
+
+==== quality: 3 seeds x {fp,8,4}, s512, 300 steps (settle the int8 question) ====
+corpus source: /kaggle/working/tinyshakespeare.txt (downloaded)
+  act_save_bits=fp: vals ['2.5543', '2.5608', '2.5462']  mean 2.5538
+  act_save_bits= 8: vals ['2.5780', '2.5718', '2.6287']  mean 2.5928
+  act_save_bits= 4: vals ['2.5652', '2.5996', '2.5678']  mean 2.5775
+
+=== DONE ===
