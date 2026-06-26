@@ -26,10 +26,12 @@ __all__ = ["ReversibleCouplingBlock", "ReversibleSequential"]
 
 
 class _ReversibleFn(torch.autograd.Function):
-    # apply(x, F, G, n_f, *params): params are F's params followed by G's params, passed as
-    # individual tensors so autograd routes one gradient back into each leaf parameter.
+    # apply(x, F, G, tap, n_f, *params): params are F's params then G's params, passed as
+    # individual tensors so autograd routes one gradient back into each leaf parameter. `tap`
+    # is a scalar requiring grad so the output requires grad (and backward + any inner self-
+    # updating counter layers run) even when the input and F/G carry no gradient.
     @staticmethod
-    def forward(ctx, x, F, G, n_f, *params):
+    def forward(ctx, x, F, G, tap, n_f, *params):
         ctx.F, ctx.G, ctx.n_f = F, G, n_f
         d = x.shape[-1] // 2
         with torch.no_grad():
@@ -63,8 +65,8 @@ class _ReversibleFn(torch.autograd.Function):
 
         grads = torch.autograd.grad(z, (x1, x2) + tuple(params), grad_y)
         grad_x = torch.cat([grads[0], grads[1]], dim=-1)
-        # match apply's signature: x, F(None), G(None), n_f(None), then one grad per param.
-        return (grad_x, None, None, None) + tuple(grads[2:])
+        # match apply's signature: x, F(None), G(None), tap(None), n_f(None), then param grads.
+        return (grad_x, None, None, None, None) + tuple(grads[2:])
 
 
 class ReversibleCouplingBlock(nn.Module):
@@ -86,7 +88,11 @@ class ReversibleCouplingBlock(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         f_params = tuple(self.F.parameters())
         g_params = tuple(self.G.parameters())
-        return _ReversibleFn.apply(x, self.F, self.G, len(f_params), *f_params, *g_params)
+        # tap forces the output to require grad so backward runs even when neither the input
+        # nor F/G need a gradient (e.g. F/G are self-updating counter layers with no params).
+        tap = (torch.zeros((), device=x.device, dtype=x.dtype, requires_grad=True)
+               if torch.is_grad_enabled() else x.new_zeros(()))
+        return _ReversibleFn.apply(x, self.F, self.G, tap, len(f_params), *f_params, *g_params)
 
 
 class ReversibleSequential(nn.Module):
