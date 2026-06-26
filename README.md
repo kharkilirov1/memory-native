@@ -5,6 +5,15 @@ in **pure PyTorch** — no custom engine, runs on stock CPU/CUDA. This is the en
 port of the [memory-native-training](../) method: everything that previously required the
 MotifCL C++/OpenCL build runs here with `pip install`.
 
+> **Validated value proposition (real runs on a Tesla T4 — [`results/SHOOTOUT.md`](results/SHOOTOUT.md)):**
+> the lowest training-memory of every contestant (AdamW, 8-bit Adam, GaLore, LoMo) at
+> competitive-to-better quality, for ~2× slower steps — and the advantage **grows with scale**.
+> At d=768 counter+int4 beats AdamW and 8-bit Adam on memory *and* quality at once (peak 1.32×
+> below AdamW / 1.62× below 8-bit Adam; val −4.7% vs AdamW; speed gap narrowing). The method
+> wins because it cuts both the optimizer pool (zero state) and activations (int4), while the
+> memory-efficient *optimizers* only shrink optimizer state — a small slice of the
+> activation-bound peak.
+
 The method attacks all four memory pools of training at once:
 
 | Pool | Lever | What it is |
