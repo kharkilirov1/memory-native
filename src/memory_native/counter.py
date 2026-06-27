@@ -121,6 +121,7 @@ class _FusedCounterLinearFn(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_out: torch.Tensor):
         module: CompactCounterLinear = ctx.module
+        saved_i8 = None                                     # (codes int8 [M,in], row scale [M,1])
         if ctx.quantized:
             store, scale = ctx.saved_tensors
             if ctx.packed4:
@@ -128,6 +129,8 @@ class _FusedCounterLinearFn(torch.autograd.Function):
                 codes = unpack_int4(store, ctx.n_codes).reshape(-1, module.in_features)
             else:
                 codes = store
+                if module.act_save_bits == 8:               # int8 codes -> reusable by the int8 update
+                    saved_i8 = (store, scale)
             x2 = (codes.to(scale.dtype) * scale)            # dequant Q(x): [-1, in]
             x = x2.reshape(ctx.x_shape)
         else:
@@ -158,7 +161,11 @@ class _FusedCounterLinearFn(torch.autograd.Function):
                     w_i = s_i.to(x.dtype) * t_i.to(x.dtype)
                     grad_x2.add_(go2[:, lo:hi] @ w_i)
                 if fire:
-                    if module.update_compute == "int8":
+                    if module.update_compute == "int8" and saved_i8 is not None:
+                        # reuse the int8 activation saved in forward; quantize only grad_out
+                        from .int8_compute import int8_correlation_presaved
+                        grad_w_i = int8_correlation_presaved(go2[:, lo:hi], saved_i8[0], saved_i8[1])
+                    elif module.update_compute == "int8":
                         from .int8_compute import int8_correlation
                         grad_w_i = int8_correlation(go2[:, lo:hi], x2)
                     else:

@@ -20,7 +20,7 @@ from __future__ import annotations
 import torch
 
 __all__ = ["quantize_int8_cols", "quantize_int8_rows", "int8_mm", "int8_correlation",
-           "int8_forward_ternary"]
+           "int8_correlation_presaved", "int8_forward_ternary"]
 
 
 def _srq(u: torch.Tensor, stochastic: bool) -> torch.Tensor:
@@ -83,3 +83,18 @@ def int8_correlation(delta: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
     xq, xa = quantize_int8_cols(x)                # xa [1,K]
     acc = int8_mm(dq.t().contiguous(), xq)        # [N,K] int32
     return acc.to(torch.float32) * da.t() * xa    # * [N,1] * [1,K]
+
+
+def int8_correlation_presaved(delta: torch.Tensor, qx_int8: torch.Tensor,
+                              ax_row: torch.Tensor) -> torch.Tensor:
+    """G = delta^T X reusing the activation already saved as int8 -- quantize ONLY delta.
+
+    The forward saved X as int8 codes qx (per-TOKEN row scale ax_row, i.e. X_mk ~ ax_m * qx_mk).
+    Since m is summed in delta^T X, that per-row scale folds into delta:
+        G_ok = sum_m delta_mo (ax_m qx_mk) = sum_m (delta_mo ax_m) qx_mk.
+    So scale delta's rows by ax, quantize that per output column, and int8-GEMM against the saved
+    qx -- no re-quantization of X (the part that made int8_correlation lose to cuBLAS).
+    delta [M,N], qx_int8 [M,K], ax_row [M,1] -> G [N,K]. Unbiased (two independent quant stages)."""
+    dq, db = quantize_int8_cols(delta * ax_row)   # fold row scale into delta, then per-N-col quant
+    acc = int8_mm(dq.t().contiguous(), qx_int8)   # [N,K] int32 -- qx is the SAVED int8 activation
+    return acc.to(torch.float32) * db.t()         # [N,K] * [N,1]
