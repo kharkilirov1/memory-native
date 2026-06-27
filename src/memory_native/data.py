@@ -24,15 +24,24 @@ def synthetic_corpus(n_chars: int = 200_000, seed: int = 1234) -> str:
     letters = "abcdefghijklmnopqrstuvwxyz"
     words = ["".join(rng.choice(letters) for _ in range(rng.randint(2, 8))) for _ in range(96)]
     out: list[str] = []
-    while sum(len(w) + 1 for w in out) < n_chars:
-        out.append(rng.choice(words))
+    total = 0                       # running length; re-summing the list each step is O(n^2)
+    while total < n_chars:
+        w = rng.choice(words)
         r = rng.random()
-        out.append("\n" if r < 0.08 else (", " if r < 0.2 else (". " if r < 0.32 else " ")))
+        sep = "\n" if r < 0.08 else (", " if r < 0.2 else (". " if r < 0.32 else " "))
+        out.append(w); out.append(sep)
+        total += len(w) + len(sep)
     return "".join(out)
 
 
-def load_corpus(device, data_path: str | None = None, cache_dir: str | None = None):
-    """Returns (train_ids, val_ids, vocab_size). 90/10 split."""
+def load_corpus(device, data_path: str | None = None, cache_dir: str | None = None,
+                download: bool = True, timeout: float = 10.0):
+    """Returns (train_ids, val_ids, vocab_size). 90/10 split.
+
+    Resolution order: explicit data_path -> cached file -> download (if enabled) -> synthetic.
+    The download is bounded by `timeout` seconds and any failure falls back to the deterministic
+    synthetic corpus, so this never hangs offline/behind a firewall. Pass download=False to skip
+    the network entirely (cache-or-synthetic only)."""
     cache = os.path.join(cache_dir or os.getcwd(), "tinyshakespeare.txt")
     candidates = ([data_path] if data_path else []) + [cache]
 
@@ -45,11 +54,17 @@ def load_corpus(device, data_path: str | None = None, cache_dir: str | None = No
     if text is None:
         if data_path:
             raise FileNotFoundError(f"data_path not found: {data_path}")
-        try:
-            urllib.request.urlretrieve(TINY_SHAKESPEARE_URL, cache)
-            text, source = open(cache, encoding="utf-8").read(), cache + " (downloaded)"
-        except Exception as exc:  # offline / blocked: deterministic fallback
-            text, source = synthetic_corpus(), f"SYNTHETIC fallback (download failed: {exc})"
+        if not download:
+            text, source = synthetic_corpus(), "SYNTHETIC (download disabled)"
+        else:
+            try:  # bounded by timeout so a stalled/blocked connection cannot hang the run
+                with urllib.request.urlopen(TINY_SHAKESPEARE_URL, timeout=timeout) as resp:
+                    raw = resp.read().decode("utf-8")
+                with open(cache, "w", encoding="utf-8") as fh:
+                    fh.write(raw)
+                text, source = raw, cache + " (downloaded)"
+            except Exception as exc:  # offline / blocked / slow: deterministic fallback
+                text, source = synthetic_corpus(), f"SYNTHETIC fallback (download failed: {exc})"
 
     print(f"corpus source: {source}")
     chars = sorted(set(text))

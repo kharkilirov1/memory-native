@@ -93,13 +93,15 @@ def charlm_main(argv=None) -> None:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--data-path", default=None)
+    ap.add_argument("--no-download", action="store_true",
+                    help="never hit the network: use --data-path / cache, else synthetic corpus")
     ap.add_argument("--optimizer", default="adamw", choices=available_optimizers(),
                     help="optimizer for the trainable (non-counter) params: "
                          "adamw | bnb8 | galore | lomo")
     args = ap.parse_args(argv)
 
     device = _device(args.device)
-    train_data, val_data, vocab = load_corpus(device, args.data_path)
+    train_data, val_data, vocab = load_corpus(device, args.data_path, download=not args.no_download)
     # vocab from the corpus overrides the config's placeholder vocab_size
     cfg = CONFIGS[args.config]
     CONFIGS[args.config] = cfg.__class__(vocab, cfg.block_size, cfg.n_layer, cfg.n_head, cfg.n_embd)

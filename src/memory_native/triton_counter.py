@@ -7,18 +7,20 @@ the per-row scale, reconstructs each weight tile in registers, and accumulates y
 without ever materializing the dense weight. That removes the transient dense weight from the
 forward and reads 0.75 byte/weight from HBM instead of 4.
 
-Scope / honesty:
-  * Two kernels now run in-GEMM with no dense weight: the FORWARD (y = x W^T) and the
-    backward grad_x (grad_x = grad_out W), both decoding packed state in registers. So neither
-    the forward nor grad_x materializes a dense [out,in] weight on CUDA.
-  * The counter UPDATE still uses the PyTorch per-tile path inherited from
-    PackedRMSCounterLinear: it forms grad_w one [tile_rows, in] tile at a time (never the full
-    [out,in] gradient) and decodes that tile in torch. A single fully-in-register update kernel
-    (the analogue of the engine's OpenCL counter_*_fused) is the remaining milestone; combine
-    with act_save_bits to shrink the saved activation too.
-  * !!! UNVERIFIED ON HARDWARE !!! It was written without a GPU to run it on. Before relying
-    on it, run tests/test_triton.py on a CUDA machine with triton installed (it is skipped
-    otherwise) -- it checks the Triton forward against the reference dense decode.
+Scope / status (verified on a Tesla T4 -- see results/SUMMARY.md, results/KERNEL.md):
+  * Two kernels run in-GEMM with no dense weight: the FORWARD (y = x W^T) and the backward
+    grad_x (grad_x = grad_out W), both decoding packed state in registers. T4-VERIFIED for
+    correctness (forward err <= 3e-6, grad_x err <= 1e-5 vs the dense decode). HOWEVER they are
+    net-negative in practice: a hand-written Triton matmul loses to torch-decode + cuBLAS and the
+    peak is activation-bound, not weight-bound, so these two kernels buy no real memory/speed win.
+    They are kept as a reference decode-in-GEMM implementation, not a recommended path.
+  * The counter UPDATE: the one kernel that does pay off. memory_native.fused_update collapses
+    the per-element RMS+stochastic-rounding update into one launch -- T4-VERIFIED bit-quantified
+    against a CPU reference and benchmarked at x45.9 on the update / x1.26 on the full step; it is
+    wired into PackedRMSCounterLinear._fused_update. It still CONSUMES a materialized grad_w tile,
+    though. The strict-memory analogue of the engine's OpenCL counter_*_fused -- an update kernel
+    that takes (state, scale, v, x_or_Q(x), grad_out) and forms grad_w in registers so no dense
+    gradient is ever materialized -- is the remaining open milestone.
   * When triton or CUDA is unavailable, TritonCounterLinear transparently falls back to the
     plain PackedRMSCounterLinear forward, so the class is safe to use anywhere.
 """
@@ -203,9 +205,10 @@ def triton_decode_matmul(x: torch.Tensor, state: torch.Tensor, scale: torch.Tens
 
 class TritonCounterLinear(PackedRMSCounterLinear):
     """PackedRMSCounterLinear whose forward GEMM decodes the packed state in-kernel (Triton),
-    so no dense weight is materialized on the forward. Falls back to the packed PyTorch
-    forward when triton/CUDA are unavailable. Backward update is inherited (PyTorch) — the
-    fused backward kernel is the next milestone. UNVERIFIED ON HARDWARE (see module docstring).
+    so no dense weight is materialized on the forward. Falls back to the packed PyTorch forward
+    when triton/CUDA are unavailable. T4-verified for correctness but net-negative vs torch-decode
+    + cuBLAS (see module docstring); kept as a reference decode-in-GEMM, not a recommended path.
+    The update kernel that actually pays off lives in memory_native.fused_update.
     """
 
     def _forward_matmul(self, x: torch.Tensor) -> torch.Tensor:
