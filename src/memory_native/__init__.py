@@ -27,6 +27,7 @@ from .baselines import TernaryQATLinear, make_linear
 from .models import CONFIGS, GPT, GPTConfig
 from .reversible_gpt import ReversibleGPT
 from .fused_qkv import CounterQKVLinear
+from .int8_compute import int8_correlation, int8_mm, quantize_int8_cols
 from .memory import compare_training_peak, fmt_bytes, memory_report, peak_training_memory
 from .actquant import effective_bits, quantize_codes, stochastic_quantize
 from .budget import BudgetRow, format_budget, training_budget
@@ -58,6 +59,9 @@ __all__ = [
     "GPT",
     "ReversibleGPT",
     "CounterQKVLinear",
+    "int8_correlation",
+    "int8_mm",
+    "quantize_int8_cols",
     "GPTConfig",
     "CONFIGS",
     "memory_report",
