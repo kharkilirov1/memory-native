@@ -69,6 +69,7 @@ class PackedRMSCounterLinear(RMSCounterLinear):
         from .fused_update import HAS_TRITON, triton_counter_update
         if not (HAS_TRITON and grad_w.is_cuda and self.use_rms
                 and self.pulse_mode == "direct" and self.local_grad_clip == 0
+                and self.rms_mode == "exact" and self.scale_rebase == "eager"
                 and lo == 0 and hi == self.out_features):
             return False
         seed = self._sr_step
