@@ -78,6 +78,12 @@ class PackedRMSCounterLinear(RMSCounterLinear):
         triton_counter_update(self.state, self.scale, self.v, grad_w,
                               C=self.C, lr=self.lr, lr_scale=self.lr_scale,
                               rms_beta=self.rms_beta, rms_eps=self.rms_eps, seed=seed)
+        # The kernel mutates the packed state directly, bypassing _write_rows/_refresh_t_cache, so
+        # the derived T cache would go stale (forward would read the OLD ternary weight). Rebuild it
+        # from the new truth state. Safe-but-not-fastest; the fast path is to refresh T inside the
+        # kernel only where t actually flipped.
+        if self.cache_mode != "none":
+            self._build_t_cache()
         return True
 
     # storage hooks ------------------------------------------------------------

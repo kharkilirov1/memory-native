@@ -16,7 +16,7 @@ import torch
 
 from memory_native import ReversibleGPT, GPTConfig, fmt_bytes, peak_training_memory
 from memory_native.packed import PackedRMSCounterLinear
-from memory_native.int8_compute import int8_correlation, int8_mm, quantize_int8_cols
+from memory_native.int8_compute import int8_correlation, int8_forward_ternary
 from memory_native.fused_update import HAS_TRITON, triton_counter_update
 
 
@@ -47,7 +47,7 @@ def main():
     print("\n== M5 forward: decode vs int8-cache ==")
     print(f"  decode + GEMM       {bench(lambda: lay._forward_matmul(x)):.3f} ms")
     print(f"  int8 cache + GEMM   {bench(lambda: layc._forward_matmul(x)):.3f} ms")
-    print(f"  int8 cache + _int_mm {bench(lambda: int8_mm(quantize_int8_cols(x, False)[0], Ti8.t().contiguous())):.3f} ms")
+    print(f"  int8 forward (_int_mm, row-scale) {bench(lambda: int8_forward_ternary(x, Ti8)):.3f} ms")
 
     print("\n== M6 update correlation: fp32 vs int8 ==")
     print(f"  fp32  go^T @ x      {bench(lambda: go.t() @ x):.3f} ms")

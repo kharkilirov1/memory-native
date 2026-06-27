@@ -167,7 +167,9 @@ class _FusedCounterLinearFn(torch.autograd.Function):
                     # energy) instead of the full ||G_o||^2 reduction (post-LN E[r_o^2]~||D_o||^2).
                     proxy_gsq = None
                     if getattr(module, "rms_mode", "exact") == "proxy":
-                        proxy_gsq = go2[:, lo:hi].pow(2).mean(dim=0, keepdim=True).t() * x2.pow(2).mean()
+                        # E[r_o^2] ~ (sum_m D_mo^2) * E[X^2]: SUM over the M tokens, not mean --
+                        # mean is off by 1/M, so the denominator scales ~1/sqrt(M) (batch/seq).
+                        proxy_gsq = go2[:, lo:hi].pow(2).sum(dim=0, keepdim=True).t() * x2.pow(2).mean()
                     # Data-parallel: the counter optimizer lives in the state and is applied
                     # in-place here, so there is no Parameter .grad for DDP to all-reduce. Sync
                     # the counter gradient itself across ranks -> every replica applies the same

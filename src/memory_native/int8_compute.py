@@ -19,21 +19,35 @@ from __future__ import annotations
 
 import torch
 
-__all__ = ["quantize_int8_cols", "int8_mm", "int8_correlation"]
+__all__ = ["quantize_int8_cols", "quantize_int8_rows", "int8_mm", "int8_correlation",
+           "int8_forward_ternary"]
 
 
-def quantize_int8_cols(x: torch.Tensor, stochastic: bool = True):
-    """Per-column symmetric int8 quantization of [M, D]. Returns (q int8 [M,D], scale [1,D]).
-    Stochastic rounding makes it unbiased: E[scale * q] = x."""
-    amax = x.abs().amax(dim=0, keepdim=True).clamp_min(1e-12)
-    scale = amax / 127.0
-    u = x / scale
+def _srq(u: torch.Tensor, stochastic: bool) -> torch.Tensor:
     if stochastic:
         fl = torch.floor(u)
         q = fl + (torch.rand_like(u) < (u - fl)).to(u.dtype)
     else:
         q = torch.round(u)
-    return q.clamp_(-127, 127).to(torch.int8), scale
+    return q.clamp_(-127, 127).to(torch.int8)
+
+
+def quantize_int8_cols(x: torch.Tensor, stochastic: bool = True):
+    """Per-COLUMN symmetric int8 of [M, D]. Returns (q int8 [M,D], scale [1,D]). Unbiased when
+    stochastic: E[scale * q] = x. This is the right scaling for the UPDATE correlation Delta^T X,
+    where the per-output-row and per-input-column scales factor out as an outer product."""
+    amax = x.abs().amax(dim=0, keepdim=True).clamp_min(1e-12)
+    scale = amax / 127.0
+    return _srq(x / scale, stochastic), scale
+
+
+def quantize_int8_rows(x: torch.Tensor, stochastic: bool = True):
+    """Per-ROW (per-token) symmetric int8 of [M, D]. Returns (q int8 [M,D], scale [M,1]). This is
+    the right scaling for the FORWARD Y = X T^T: the per-token scale a_m factors OUT of the sum
+    over k (Y_mo = a_m * sum_k q_mk T_ok), which a per-column scale would not."""
+    amax = x.abs().amax(dim=1, keepdim=True).clamp_min(1e-12)
+    scale = amax / 127.0
+    return _srq(x / scale, stochastic), scale
 
 
 def int8_mm(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
@@ -45,6 +59,16 @@ def int8_mm(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
         except Exception:  # shape/arch constraints -> fall back, stay correct
             pass
     return a.to(torch.int32) @ b.to(torch.int32)
+
+
+def int8_forward_ternary(x: torch.Tensor, t_int8: torch.Tensor) -> torch.Tensor:
+    """Y_unscaled = (a_x * q_x) T^T for the int8 forward, with the CORRECT per-token (row) scale.
+    x [M,K] fp, t_int8 [N,K] int8 (the visible ternary cache). Returns [M,N] fp; multiply by the
+    per-output row scale s_o outside (the GEMM epilogue) to get Y = X (diag(s) T)^T. Using a
+    per-column X scale here would be wrong -- it cannot be pulled out of the sum over k."""
+    xq, ax = quantize_int8_rows(x)                # ax [M,1]
+    acc = int8_mm(xq, t_int8.t().contiguous())    # [M,N] int32
+    return acc.to(torch.float32) * ax             # per-token scale factors out
 
 
 def int8_correlation(delta: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
