@@ -16,6 +16,7 @@ from __future__ import annotations
 import math
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -28,6 +29,15 @@ __all__ = [
     "CompactCounterLinear",
     "RMSCounterLinear",
 ]
+
+
+def _allreduce_grad_w_(grad_w: torch.Tensor) -> None:
+    """Average a counter weight-gradient across data-parallel ranks, in place. No-op unless a
+    process group is initialized. Called inside backward so all replicas apply an identical
+    counter update and their packed states stay synchronized (the counter has no Parameter
+    gradient for DDP to handle -- the optimizer is the in-place state update itself)."""
+    if dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1:
+        dist.all_reduce(grad_w, op=dist.ReduceOp.AVG)
 
 # C=8 -> counter c in {-7..+7} (15 levels), 3*15 = 45 reachable states (fits 6 bits / uint8).
 # Larger C is allowed while 3*(2C-1) <= 256 (uint8); C=11 gives 63 states (best per ablation).
@@ -144,6 +154,11 @@ class _FusedCounterLinearFn(torch.autograd.Function):
                     grad_x2.add_(go2[:, lo:hi] @ w_i)
                 if module.training and module.update_enabled:
                     grad_w_i = (go2[:, lo:hi].transpose(0, 1) @ x2).float()
+                    # Data-parallel: the counter optimizer lives in the state and is applied
+                    # in-place here, so there is no Parameter .grad for DDP to all-reduce. Sync
+                    # the counter gradient itself across ranks -> every replica applies the same
+                    # update (same SR seed) and the packed state stays bit-identical everywhere.
+                    _allreduce_grad_w_(grad_w_i)
                     if not module._fused_update(lo, hi, grad_w_i):
                         module._update_tile(lo, hi, grad_w_i, t_i, c_i, s_i)
 
