@@ -1,9 +1,14 @@
 # memory-native (PyTorch)
 
 Finite-state **counter synapses** + **reversible activations** for memory-efficient training,
-in **pure PyTorch** — no custom engine, runs on stock CPU/CUDA. This is the engine-independent
-port of the [memory-native-training](../) method: everything that previously required the
-MotifCL C++/OpenCL build runs here with `pip install`.
+in **pure PyTorch** — no custom engine, runs on stock CPU/CUDA. The standalone, engine-independent
+package: everything that previously required the MotifCL C++/OpenCL build runs here with
+`pip install -e .`.
+
+> **GPU-validated** (Tesla T4 / T4×2): [`results/KERNEL.md`](results/KERNEL.md) (fused update
+> ×45.9 / step ×1.26) · [`results/SCALE_1B.md`](results/SCALE_1B.md) (1.21B params on one T4 at
+> 2.25 GiB; dense+Adam OOMs at 18 GiB) · [`results/POOLS.md`](results/POOLS.md) (all four memory
+> pools) · [`results/SHOOTOUT.md`](results/SHOOTOUT.md) (vs AdamW / 8-bit Adam / GaLore / LoMo).
 
 > **Validated value proposition (real runs on a Tesla T4 — [`results/SHOOTOUT.md`](results/SHOOTOUT.md)):**
 > the lowest training-memory of every contestant (AdamW, 8-bit Adam, GaLore, LoMo) at
@@ -104,29 +109,44 @@ optimizer cost) — matching the larger-scale numbers in [`../docs`](../docs).
   `TritonCounterLinear`) decodes the packed state *inside* the GEMM (no dense weight) and
   matches the dense reference within f32 tol (err ≤ 3e-6). And at **d=512** counter+RMS keeps
   parity with — slightly beats — dense AdamW (val −1.7%). See [`results/SUMMARY.md`](results/SUMMARY.md).
-- **Still a torch op (the remaining milestone):** the *backward update* still decodes tiles
-  in PyTorch. Because of that, the measured *training peak* is only ~1.05× below dense+AdamW
-  at d=512 (the peak is dominated by activations + the transient dense weight); the sub-byte
-  win shows up in *persistent* state, not the peak. The fused backward kernel (form `grad_w`
-  in registers + apply the counter transition in place, the analogue of the engine's OpenCL
-  `counter_*_fused`) is what makes the *training-peak* sub-byte too. That is the one open item.
+- **Activation pool — collapsed (T4):** `ReversibleSequence` is a single whole-chain RevNet
+  Function (stores only the final output, reconstructs the rest), so activation memory is **O(1)
+  in depth** — 13.5× below plain at depth 256 (5.29 GiB → 392 MiB), gradients identical to the
+  per-block version. With `act_save_bits` (unbiased int8/int4 saved activations) the saved-X cost
+  drops too. See [`results/POOLS.md`](results/POOLS.md).
+- **Fused update kernel — done (T4):** `memory_native.fused_update` collapses the per-element
+  RMS+stochastic-rounding update into one launch (deterministic hash-SR, bit-quantified against a
+  CPU reference), **×45.9 on the update / ×1.26 on the step**, wired into
+  `PackedRMSCounterLinear`. See [`results/KERNEL.md`](results/KERNEL.md).
+- **Scale — demonstrated (T4):** the full method (counter + reversible) trains a **1.21B-param**
+  model on a single 14.6 GiB T4 at **2.25 GiB peak**, where dense+Adam needs 18 GiB of state
+  and OOMs before step 0. See [`results/SCALE_1B.md`](results/SCALE_1B.md).
+- **The one open milestone — strict update-from-IO:** the PyTorch update still consumes a
+  materialized `grad_w` tile. The strict analogue of the engine's OpenCL `counter_*_fused` — a
+  kernel taking `(state, scale, v, x or Q(x), grad_out)` that forms `grad_w` in registers so **no
+  dense gradient is ever materialized** — is what makes the *training peak* (not just persistent
+  state) sub-byte on CUDA. This is the remaining piece.
 
 ### Roadmap
-1. **Fused backward kernel** — the forward Triton kernel is verified on a T4
-   ([`results/SUMMARY.md`](results/SUMMARY.md)); the remaining piece is the backward-update
-   kernel (form `grad_w` in registers + update state in place) so the *training peak* — not
-   just persistent state — is sub-byte on CUDA. This is the one open milestone.
-2. **Done — baselines that matter:** `--optimizer {bnb8,galore,lomo}` compares against real
-   memory-efficient training, not only FP32+Adam (see table above).
-3. **Scale validation** — `scripts/run_scale_validation.sh` runs the d=512–768 parity sweep;
-   the numbers must be captured on a real GPU (current verified evidence is micro/tiny scale).
+1. **Strict update-from-IO kernel** — `counter_update_from_io(state, scale, v, x_or_Qx, grad_out)`
+   with no materialized `grad_w`. The forward/grad_x decode-in-GEMM kernels are T4-verified but
+   net-negative vs cuBLAS; the fused *update* (from `grad_w`) is done and pays off — the open ROI
+   is fusing the `grad_w` formation into the update so the peak is sub-byte too.
+2. **Multi-session scale** — 2×T4 data-parallel + checkpoint/resume
+   ([`scripts/fineweb_1b_2xt4.py`](scripts/fineweb_1b_2xt4.py)); accumulate tokens across Kaggle
+   sessions on real web text (FineWeb-Edu, BPE).
+3. **Reversible at depth** — anchors (store every k blocks) to trade a little memory for less
+   recompute, and a depth-sweep for float-reconstruction error beyond the tested range.
 
 ## Constraints (same eager-only contract as the engine)
 
 - The in-backward update is **eager-only**: incompatible with gradient accumulation, weight
-  sharing of a counter module, DDP all-reduce, activation checkpointing, and `torch.compile`
-  graph capture without an explicit scheduler. One forward → one backward per step; do
-  measurements under `torch.no_grad()`.
+  sharing of a counter module, activation checkpointing, and `torch.compile` graph capture
+  without an explicit scheduler. One forward → one backward per step; measure under
+  `torch.no_grad()`. **Data-parallel is supported** a different way than DDP: the counter
+  gradient is all-reduced *inside* backward (the optimizer is an in-place state update, so there
+  is no Parameter `.grad`), keeping every replica's packed state bit-identical — validated on
+  2×T4 (0 bytes differ across ranks). See `scripts/fineweb_1b_2xt4.py`.
 - `ReversibleCouplingBlock` needs deterministic `F`/`G` (no dropout/RNG). Float reconstruction
   is exact enough at tested depth (≤12 blocks); deeper stacks need a depth-sweep and possibly
   anchors.
@@ -137,7 +157,8 @@ optimizer cost) — matching the larger-scale numbers in [`../docs`](../docs).
 src/memory_native/
   counter.py        CompactCounterLinear, RMSCounterLinear, encode/decode, stochastic rounding
   packed.py         PackedRMSCounterLinear — real 0.75 byte/weight storage (4 codes / 3 bytes)
-  triton_counter.py TritonCounterLinear + in-GEMM packed decode (CUDA, unverified-on-hardware)
+  triton_counter.py TritonCounterLinear + in-GEMM packed decode (CUDA; T4-verified, net-negative)
+  fused_update.py   one-launch RMS+SR counter update kernel (CUDA; T4-verified, ×45.9)
   reversible.py     ReversibleCouplingBlock, ReversibleSequential (recompute backward)
   actquant.py       unbiased low-bit saved activations (the counter layer's act_save_bits)
   budget.py         training_budget — symbolic 4-pool memory model (deep-v2, reproduced exact)
