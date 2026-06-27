@@ -94,6 +94,26 @@ if HAS_TRITON:
         return x
 
     @triton.jit
+    def _tick(code, gw, row, col, in_features, lv, C, Cf, lr, denom, s_old, s_new, seed):
+        """SR counter tick for one weight; returns the new 6-bit code. Mirrors counter_update_hashsr."""
+        t = code // lv - 1
+        c = code % lv - (C - 1)
+        tick = (-lr) * (gw / denom) * (Cf / s_new)
+        val = c.to(tl.float32) * (s_old / s_new) + tick
+        fl = tl.floor(val)
+        elem = row * in_features + col
+        rnd = (_hash_u32(seed ^ _hash_u32(elem)) & 0x00FFFFFF).to(tl.float32) * (1.0 / 16777216.0)
+        cc = fl + tl.where(rnd < (val - fl), 1.0, 0.0)
+        carry = tl.where(cc >= 0, tl.floor(cc / Cf), tl.ceil(cc / Cf))
+        rem = cc - carry * Cf
+        nt = t.to(tl.float32) + carry
+        ct = tl.minimum(tl.maximum(nt, -1.0), 1.0)
+        sgn = tl.where(cc > 0, 1.0, tl.where(cc < 0, -1.0, 0.0))
+        rem = tl.where(ct != nt, sgn * (Cf - 1.0), rem)
+        rem = tl.minimum(tl.maximum(rem, -(Cf - 1.0)), Cf - 1.0)
+        return ((ct.to(tl.int32) + 1) * lv + (rem.to(tl.int32) + (C - 1))) & 0x3F
+
+    @triton.jit
     def _counter_update_kernel(state_ptr, scale_ptr, v_ptr, grad_w_ptr,
                                C, in_features, lr, lr_scale, rms_beta, rms_eps, seed,
                                BLOCK_I: tl.constexpr):
@@ -130,7 +150,7 @@ if HAS_TRITON:
         denom = tl.maximum(tl.sqrt(vv), rms_eps)
         s_new = tl.minimum(tl.maximum(s_old - lr_scale * grad_s, 1e-5), 10.0)
         Cf = C * 1.0
-        # pass 2: apply per packed group of 4, write 3 bytes
+        # pass 2: apply per packed group of 4 (in_features % 4 == 0 so col<in_features holds)
         for g0 in range(0, gpr, BLOCK_I):
             gids = g0 + tl.arange(0, BLOCK_I)
             gmask = gids < gpr
@@ -138,33 +158,18 @@ if HAS_TRITON:
             b0 = tl.load(state_ptr + base + 0, mask=gmask, other=0).to(tl.int32)
             b1 = tl.load(state_ptr + base + 1, mask=gmask, other=0).to(tl.int32)
             b2 = tl.load(state_ptr + base + 2, mask=gmask, other=0).to(tl.int32)
-            codes4 = (b0 & 0x3F, ((b0 >> 6) | (b1 << 2)) & 0x3F,
-                      ((b1 >> 4) | (b2 << 4)) & 0x3F, (b2 >> 2) & 0x3F)
-            nc = []
-            for k in range(4):
-                col = gids * 4 + k
-                cmask = gmask & (col < in_features)
-                gw = tl.load(grad_w_ptr + row * in_features + col, mask=cmask, other=0.0)
-                code = codes4[k]
-                t = code // lv - 1
-                c = code % lv - (C - 1)
-                tick = (-lr) * (gw / denom) * (Cf / s_new)
-                val = c.to(tl.float32) * (s_old / s_new) + tick
-                fl = tl.floor(val)
-                elem = (row * in_features + col).to(tl.int32)
-                rnd = (_hash_u32(seed ^ _hash_u32(elem)) & 0x00FFFFFF).to(tl.float32) * (1.0 / 16777216.0)
-                cc = fl + tl.where(rnd < (val - fl), 1.0, 0.0)
-                carry = tl.where(cc >= 0, tl.floor(cc / Cf), tl.ceil(cc / Cf))
-                rem = cc - carry * Cf
-                nt = t.to(tl.float32) + carry
-                ct = tl.minimum(tl.maximum(nt, -1.0), 1.0)
-                sgn = tl.where(cc > 0, 1.0, tl.where(cc < 0, -1.0, 0.0))
-                rem = tl.where(ct != nt, sgn * (Cf - 1.0), rem)
-                rem = tl.minimum(tl.maximum(rem, -(Cf - 1.0)), Cf - 1.0)
-                nc.append(((ct.to(tl.int32) + 1) * lv + (rem.to(tl.int32) + (C - 1))) & 0x3F)
-            p0 = (nc[0] | (nc[1] << 6)) & 0xFF
-            p1 = ((nc[1] >> 2) | (nc[2] << 4)) & 0xFF
-            p2 = ((nc[2] >> 4) | (nc[3] << 2)) & 0xFF
+            col0 = gids * 4
+            gw0 = tl.load(grad_w_ptr + row * in_features + col0 + 0, mask=gmask, other=0.0)
+            gw1 = tl.load(grad_w_ptr + row * in_features + col0 + 1, mask=gmask, other=0.0)
+            gw2 = tl.load(grad_w_ptr + row * in_features + col0 + 2, mask=gmask, other=0.0)
+            gw3 = tl.load(grad_w_ptr + row * in_features + col0 + 3, mask=gmask, other=0.0)
+            nc0 = _tick(b0 & 0x3F, gw0, row, col0 + 0, in_features, lv, C, Cf, lr, denom, s_old, s_new, seed)
+            nc1 = _tick(((b0 >> 6) | (b1 << 2)) & 0x3F, gw1, row, col0 + 1, in_features, lv, C, Cf, lr, denom, s_old, s_new, seed)
+            nc2 = _tick(((b1 >> 4) | (b2 << 4)) & 0x3F, gw2, row, col0 + 2, in_features, lv, C, Cf, lr, denom, s_old, s_new, seed)
+            nc3 = _tick((b2 >> 2) & 0x3F, gw3, row, col0 + 3, in_features, lv, C, Cf, lr, denom, s_old, s_new, seed)
+            p0 = (nc0 | (nc1 << 6)) & 0xFF
+            p1 = ((nc1 >> 2) | (nc2 << 4)) & 0xFF
+            p2 = ((nc2 >> 4) | (nc3 << 2)) & 0xFF
             tl.store(state_ptr + base + 0, p0.to(tl.uint8), mask=gmask)
             tl.store(state_ptr + base + 1, p1.to(tl.uint8), mask=gmask)
             tl.store(state_ptr + base + 2, p2.to(tl.uint8), mask=gmask)
