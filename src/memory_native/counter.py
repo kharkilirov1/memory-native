@@ -202,7 +202,7 @@ class CompactCounterLinear(nn.Module):
         lr: float = 0.04,
         lr_scale: float = 2e-4,
         init_gain: float = 1.0,
-        tile_rows: int = 0,
+        tile_rows: int = 256,
         local_grad_clip: float = 0.0,
         pulse_mode: str = "direct",
         act_save_bits: int = 0,
@@ -218,11 +218,12 @@ class CompactCounterLinear(nn.Module):
         self.C = int(C)
         self.lr = float(lr)
         self.lr_scale = float(lr_scale)
-        # tile_rows=0 -> untiled: do the update in one shot. Tiling never materializes a full
-        # [out,in] grad_w, but that buffer is tiny (1 MiB at d=512) and the training peak is
-        # activation-bound, so tiling buys no peak -- only ~3x slower from the per-tile Python
-        # loop's launch overhead. Default untiled (fast); set tile_rows>0 for the strict
-        # never-materialize-grad_w property on very large layers.
+        # tile_rows=R: the update runs over R-row tiles, materializing only an [R,in] grad_w tile.
+        # With the row-slice fused Triton kernel this is the fast-low-peak mode -- T4 frontier
+        # (results/ACCELERATION.md) shows R~256 at ~0.83x the full-matrix step time at half the
+        # transient gradient. Default 256. tile_rows=0 means untiled (one shot, full [out,in] grad
+        # tile); set it for the no-row-slicing path. (On the torch fallback the per-tile loop adds
+        # a little launch overhead but the result is identical -- the update is per-row independent.)
         self.tile_rows = int(tile_rows) if int(tile_rows) > 0 else int(out_features)
         self.local_grad_clip = float(local_grad_clip)
         # 0 = store fp activation; >0 = store unbiased act_save_bits-bit Q(x) for the update.
