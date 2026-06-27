@@ -61,29 +61,39 @@ class PackedRMSCounterLinear(RMSCounterLinear):
         self._sr_step = 0  # per-call seed for the kernel's deterministic stochastic rounding
 
     def _fused_update(self, lo: int, hi: int, grad_w: torch.Tensor) -> bool:
-        """One-launch Triton RMS+SR update on the whole packed matrix (~45x the torch tile path
-        on a T4). Returns True if applied; False (-> caller uses torch) when a precondition the
-        kernel doesn't cover is set, or no CUDA/triton. The deterministic hash-SR rounds within
-        one counter quantum of the torch path on a negligible fraction of weights -- unbiased
-        noise SR already injects (validated bit-quantified on GPU)."""
+        """One-launch Triton RMS+SR update for a packed row range.
+
+        Originally the fused kernel only fired for the full matrix (`lo==0, hi==out`).  That made
+        the *fast* path and the *low-peak* path mutually exclusive: `tile_rows>0` used cuBLAS for a
+        small grad_w tile but then fell back to the slow torch transition.  The kernel is row-local,
+        so a contiguous row slice of the packed state is sufficient.
+
+        This gives a practical middle ground between:
+          * full fast path: materialize one [out,in] grad_w and fuse the transition;
+          * strict from-IO: no grad_w but a hand-written GEMM (very slow on T4);
+          * tiled fast path: materialize only [tile_rows,in] grad_w, then fuse the transition.
+
+        The deterministic hash-SR seed is advanced per tile, so different row tiles do not reuse the
+        same rounding stream even though the Triton kernel sees local row indices 0..tile_rows-1.
+        """
         from .fused_update import HAS_TRITON, triton_counter_update
         if not (HAS_TRITON and grad_w.is_cuda and self.use_rms
                 and self.pulse_mode == "direct" and self.local_grad_clip == 0
                 and self.rms_mode == "exact" and self.scale_rebase == "eager"
-                and not self.decimate_updates  # kernel doesn't report flip-rate; torch path does
-                and lo == 0 and hi == self.out_features):
+                and not self.decimate_updates):  # kernel doesn't report flip-rate; torch path does
+            return False
+        if grad_w.shape != (hi - lo, self.in_features):
             return False
         seed = self._sr_step
         self._sr_step += 1
-        triton_counter_update(self.state, self.scale, self.v, grad_w,
+        triton_counter_update(self.state[lo:hi], self.scale[lo:hi], self.v[lo:hi], grad_w.contiguous(),
                               C=self.C, lr=self.lr, lr_scale=self.lr_scale,
                               rms_beta=self.rms_beta, rms_eps=self.rms_eps, seed=seed)
-        # The kernel mutates the packed state directly, bypassing _write_rows/_refresh_t_cache, so
-        # the derived T cache would go stale (forward would read the OLD ternary weight). Rebuild it
-        # from the new truth state. Safe-but-not-fastest; the fast path is to refresh T inside the
-        # kernel only where t actually flipped.
+        # The kernel mutates the packed state directly, bypassing _write_rows/_refresh_t_cache.
+        # Refresh only the affected rows instead of rebuilding the whole derived T cache.
         if self.cache_mode != "none":
-            self._build_t_cache()
+            t_new, _ = self._decode_rows(lo, hi)
+            self._refresh_t_cache(lo, hi, t_new)
         return True
 
     # storage hooks ------------------------------------------------------------
