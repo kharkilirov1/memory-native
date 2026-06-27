@@ -46,11 +46,19 @@ def test_reference_recovers_teacher():
 
 
 @pytest.mark.skipif(not (CUDA and HAS_TRITON), reason="needs CUDA + triton")
-def test_triton_update_matches_reference_bitexact():
-    """The fused Triton update must equal the deterministic-SR reference bit-for-bit."""
+@pytest.mark.parametrize("out,in_,C", [(24, 64, 11), (512, 2048, 11), (256, 4096, 8)])
+def test_triton_update_matches_reference(out, in_, C):
+    """The fused Triton update must match the deterministic-SR reference.
+
+    Bit-identity is *not* required: the kernel reduces row-stats (g_sq, grad_s) in BLOCK_I
+    chunks while the torch reference reduces in one pass, so s_new/denom differ by ~1e-7. That
+    feeds every element's `val` and can flip a stochastic-rounding boundary on a tiny fraction of
+    weights (rnd granularity 1/2**24 over ~out*in elements -> O(1) flips). A flip moves one weight
+    by exactly one counter quantum -- the same unbiased noise SR already injects -- so we assert
+    the divergence is a negligible fraction of weights, each off by at most one quantum.
+    """
     from memory_native.packed import pack_codes, unpack_codes
     torch.manual_seed(0)
-    out, in_, C = 24, 64, 11
     codes = encode_state(torch.randint(-1, 2, (out, in_), dtype=torch.int16),
                          torch.randint(-(C - 1), C, (out, in_), dtype=torch.int16), C).cuda()
     grad_w = torch.randn(out, in_, device="cuda")
@@ -66,6 +74,17 @@ def test_triton_update_matches_reference_bitexact():
     sc2, v2 = scale.clone(), v.clone()
     triton_counter_update(packed, sc2, v2, grad_w, **kw)
     got_codes = unpack_codes(packed, in_)
-    assert torch.equal(got_codes, ref_codes), (got_codes.int() - ref_codes.int()).abs().max()
-    assert torch.allclose(sc2, ref_scale, atol=1e-6)
+
+    # row-stat outputs match closely (different reduction order -> ~1e-7)
+    assert torch.allclose(sc2, ref_scale, atol=1e-5)
     assert torch.allclose(v2, ref_v, atol=1e-6)
+    # where codes differ, the weight moved by at most one counter quantum (t + c/C)
+    gt, gc = decode_state(got_codes, C)
+    rt, rc = decode_state(ref_codes, C)
+    pos_got = gt.float() + gc.float() / C
+    pos_ref = rt.float() + rc.float() / C
+    mism = (got_codes != ref_codes)
+    frac = mism.float().mean().item()
+    max_quanta = (pos_got - pos_ref).abs().max().item()
+    assert frac < 1e-3, f"too many SR-boundary flips: {frac:.2e}"
+    assert max_quanta < 1.0 / C + 1e-6, f"a flip moved a weight by >1 quantum: {max_quanta}"

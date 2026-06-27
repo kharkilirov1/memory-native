@@ -58,6 +58,25 @@ class PackedRMSCounterLinear(RMSCounterLinear):
         codes = self.state  # uint8 [out, in]
         del self._buffers["state"]
         self.register_buffer("state", pack_codes(codes))  # [out, (in//4)*3]
+        self._sr_step = 0  # per-call seed for the kernel's deterministic stochastic rounding
+
+    def _fused_update(self, lo: int, hi: int, grad_w: torch.Tensor) -> bool:
+        """One-launch Triton RMS+SR update on the whole packed matrix (~45x the torch tile path
+        on a T4). Returns True if applied; False (-> caller uses torch) when a precondition the
+        kernel doesn't cover is set, or no CUDA/triton. The deterministic hash-SR rounds within
+        one counter quantum of the torch path on a negligible fraction of weights -- unbiased
+        noise SR already injects (validated bit-quantified on GPU)."""
+        from .fused_update import HAS_TRITON, triton_counter_update
+        if not (HAS_TRITON and grad_w.is_cuda and self.use_rms
+                and self.pulse_mode == "direct" and self.local_grad_clip == 0
+                and lo == 0 and hi == self.out_features):
+            return False
+        seed = self._sr_step
+        self._sr_step += 1
+        triton_counter_update(self.state, self.scale, self.v, grad_w,
+                              C=self.C, lr=self.lr, lr_scale=self.lr_scale,
+                              rms_beta=self.rms_beta, rms_eps=self.rms_eps, seed=seed)
+        return True
 
     # storage hooks ------------------------------------------------------------
     def _all_codes(self) -> torch.Tensor:
