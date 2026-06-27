@@ -9,28 +9,31 @@ cache and the counter transition as a fused epilogue. Strict sub-byte memory sta
 ## GPU-measured (Tesla T4, d=2048, M=4096) — what actually moved
 
 ```
-forward  decode + cuBLAS GEMM        9.96 ms
-forward  int8 cache + cuBLAS GEMM    7.83 ms   (cache removes the 6-bit decode tax, -21%)
-forward  int8 cache + _int_mm        3.48 ms   *** x2.86 vs decode -- the Tensor-Core win ***
+forward  decode + cuBLAS GEMM        10.60 ms
+forward  int8 cache + cuBLAS GEMM     7.71 ms   (cache removes the 6-bit decode tax, -27%)
+forward  int8 _int_mm, GEMM only      3.24 ms   (raw Tensor-Core GEMM, NOT a usable forward)
+forward  int8 correct (row-scale)     5.18 ms   *** x2.05 vs decode -- the honest int8 forward ***
 
-update   torch tile                  7.60 ms
-update   fused Triton kernel         0.43 ms   x17.6 (the update transition)
+update   torch tile                   7.57 ms
+update   fused Triton kernel          0.42 ms   x17.6 (the update transition)
 
-reversible O(1)        peak 427 MiB  834 ms/step
-reversible anchor=8    peak 769 MiB  727 ms/step   (-13% time for +340 MiB -- the M7 knob)
+reversible O(1)        peak 427 MiB   818 ms/step
+reversible anchor=8    peak 769 MiB   715 ms/step   (-13% time for +340 MiB -- the M7 knob)
 ```
 
-The validated headline is **the int8 Tensor-Core forward at ×2.86 over the decode path** — exactly
-the memo's pivot: keep T as a derived int8 cache and run the GEMM on the integer Tensor Cores
-instead of unpacking 6-bit. Honest negatives the same run found:
-- **int8 update correlation lost to fp32 cuBLAS** (8.18 vs 7.36 ms): the per-call stochastic
+The validated headline is **the int8 Tensor-Core forward at ×2.05 over the decode path** (the memo's
+pivot: keep T as a derived int8 cache and run the GEMM on the integer Tensor Cores instead of
+unpacking 6-bit). The raw `_int_mm` is ×3.3, but a *correct* forward needs the per-token (row) scale
+quantize epilogue (a per-column scale cannot be pulled out of X T^T), which costs ~2 ms — so ×2.05
+is the honest number, not ×3.3. Honest negatives the same run found:
+- **int8 update correlation lost to fp32 cuBLAS** (8.21 vs 7.34 ms): the per-call stochastic
   quantize overhead outweighs the int GEMM at this shape. It only pays off by *reusing the
   already-int8-saved activation* (act_save_bits=8) instead of re-quantizing — the open refinement.
-- **fused-QKV forward showed no speedup** (27.1 vs 27.1 ms): the forward is decode-bound, so 3×
+- **fused-QKV forward showed no speedup** (27.2 vs 27.7 ms): the forward is decode-bound, so 3×
   d→d and 1× d→3d decode the same weights. M2's win is fewer saved activations + fewer update
   launches (backward), and it *composes* with the int8 cache (which removes the decode floor).
 
-Bench script: `scripts/` (run on `mn-kernel-test`). Numbers are one T4; treat as directional.
+Bench: `scripts/gpu_acceleration_bench.py` (log `gpu_acceleration_bench_T4.log`). One T4; directional.
 
 | # | Milestone | Status |
 |---|---|---|
@@ -38,8 +41,8 @@ Bench script: `scripts/` (run on `mn-kernel-test`). Numbers are one T4; treat as
 | M2 | Fused QKV counter layer | **done** — `CounterQKVLinear` (d→3d); bit-identical to three separate layers (test), one saved activation + one update + one larger GEMM. Opt-in via `ReversibleGPT(fused_qkv=True)` |
 | M3 | Shared activation handle | **done for QKV** (the high-value case) via M2 — one fused layer ⇒ one saved/quantized activation + one update. A general cross-layer handle (sharing Q(h) across arbitrary layers with independent dither streams) is **deferred**: it needs autograd coordination across layers for marginal gain beyond QKV — documented, not built. |
 | M4 | Lagged RMS one-pass + lazy rebase + proxy | **done** — `rms_mode={exact,lagged,proxy}`, `scale_rebase={eager,lazy}` on RMSCounterLinear. lagged uses last step's v; lazy rebases the counter at the next read via a per-row `s_base`; **proxy** takes the row second-moment from grad_out norms × activation energy (post-LN E[r_o²]~‖Δ_o‖²) instead of the full ‖G_o‖² reduction. Parity gate: every mode recovers the teacher to MSE 0.0 (`test_lagged_rms`). Fused kernel stays exact/eager-only; other modes use the torch path. |
-| M5 | Derived visible cache (`cache_mode={none,fp16,int8}`) | **done (mechanism)** — `CompactCounterLinear(cache_mode=...)` keeps the visible ternary T in fp16/int8 (a derived view, persistent=False, rebuilt from truth state, refreshed on every visible flip in `_write_rows`). Forward routes through `_visible_t` so the GEMM never unpacks 6-bit. Bit-exact vs the decode forward (T=−1/0/1 is exact in fp16/int8) and tracks the state through updates (`test_cache`). Profiler (CPU d=256): forward 1.28→0.29 ms with the cache (decode tax removed, now near the pure GEMM). The int8 *Tensor-Core GEMM itself* is M6 (GPU). |
-| M6 | int8 Tensor-Core compute path | open (GPU) — the cache already stores int8 T; what's left is doing `X_int8 @ T_int8` / `Δ_int8 @ T_int8` / `Δ_int8^T X_int8` on the Tensor Cores (`torch._int_mm` / cuBLASLt). `Q(Δ)^T Q(X)` is an unbiased estimator of the update correlation; ships behind a parity gate (numerics change). Needs a T4. |
+| M5 | Derived visible cache (`cache_mode={none,fp16,int8}`) | **done (mechanism)** — keeps the visible ternary T in fp16/int8 (a derived view, persistent=False, rebuilt from truth state, refreshed on every visible flip in `_write_rows`, **and after the CUDA fused update**, which mutates packed state directly). Forward routes through `_visible_t` so the GEMM never unpacks 6-bit. Bit-exact vs the decode forward and tracks the state through updates (`test_cache`, `test_review_fixes`). **Not free: a speed mode that adds live memory** — `int8` is 0.75 B truth + 1.0 B cache ≈ **1.75 B/weight** (`fp16` ≈ 2.75); still far below dense+Adam's ~12–16, but count it honestly. |
+| M6 | int8 Tensor-Core compute path | **partial** — `int8_correlation` (update, per-column scale, unbiased) and `int8_forward_ternary` (forward, **per-token/row scale** so a_m factors out of X T^T — a per-column scale is wrong for forward). Both validated unbiased on CPU; `update_compute="int8"` is wired. The Tensor-Core GEMM (`torch._int_mm`) drops in on CUDA. **Not yet a built-in training forward path**, and the int8 update re-quantizes x/Δ each call (can lose to fp32 cuBLAS) — the open refinement is to reuse the already-int8-saved activation. |
 | M7 | Reversible anchors (`anchor_every`) | **done** — `ReversibleSequence(anchor_every=A)` / `ReversibleGPT(anchor_every=A)`. Stores the activation every A blocks and recomputes each chunk forward from its anchor instead of inverting: skips the inverse pass (~1 fwd/block faster) and is *exact* (no float-inverse error), at O(L/A + A) memory. Gradient parity vs plain autograd verified for A∈{1,2,3,5,8} (`test_anchors`); model trains, counters fire. (the peak-memory/speed frontier number is a GPU benchmark, queued with M5/M6.) `proxy` RMS still open (needs grad_out/x plumbing) |
 | M8 | Adaptive update decimation by flip-rate | **done** — `decimate_updates=True`. A near-stable layer (tiny flip-rate) fires the update only every `_dec_period` steps (1→2→4→8 as flip-rate crosses 1e-3/1e-4/1e-5), lr scaled by the period to compensate; grad_x always runs, only the update is skipped. Parity gate (`test_decimation`): recovers the teacher to MSE 0.0 and engages (period→8 once stable); default off leaves the path untouched. Uses the torch update path (kernel doesn't report flip-rate) |
 
@@ -55,15 +58,26 @@ The decode is ~7× the matmul here and the torch update dominates — i.e. the w
 tax (→ M5 derived cache) and the update (→ the fused kernel, already ×45.9, and the strict
 update-from-IO). Re-run on a T4 (`--device cuda`) for the numbers that drive the kernel work.
 
-## Sequencing note
+## What is and isn't closed (honest)
 
-All CPU-validatable milestones are landed: **M1, M2, M4, M7, M8 done; M3 partial** (QKV case
-covered). Each numerics-changing mode (M4 lagged/lazy, M8 decimation) ships behind a teacher
-parity gate and defaults off, so `strict6` / exact-eager / no-decimation remain the default and
-the memory + dynamics claims stay intact. Anchored reversible (M7) is exact (no inverse error).
+**Done:** persistent 6-bit packed state; fused update-from-grad_w (×17.6 on a T4); derived visible
+cache (decode-tax removed); QKV fusion; lagged/lazy/proxy RMS; reversible anchors; late update
+decimation; int8 compute helpers (forward row-scale, update column-scale, both unbiased); 1B
+single-T4 evidence. Each numerics-changing mode is behind a teacher parity gate and defaults off,
+so `strict6` / exact-eager / fp / no-decimation stay the default and the memory + dynamics claims
+hold.
 
-Still open, **GPU-blocked** (wait on the 1B run freeing the T4 quota): M5 derived visible cache
-(fp16→int8) and M6 the int8 Tensor-Core compute path — the memo's main long-term speed path —
-plus the GPU benchmark numbers for M2 (fused QKV), M4, M7's memory/speed frontier, and the
-profiler truth table on a real T4. CPU-side remainders: the general cross-layer shared-activation
-handle (M3) and proxy RMS (needs grad_out/x plumbed into the update).
+**Not yet closed:**
+- the strict PyTorch **update-from-IO** (form grad_w in registers, no materialized dense gradient);
+- int8 Tensor-Core forward is correct (`int8_forward_ternary`) but **not yet a built-in training
+  forward path** on the layer;
+- `cache_mode` accelerates but **adds live memory** (≈1.75 B/weight at int8) — a speed mode;
+- the int8 **update** correlation re-quantizes x/Δ each call, so it can lose to fp32 cuBLAS until
+  it reuses the already-int8-saved activation.
+
+**The next kernel** that closes update-from-IO + cache + memory at once:
+
+    counter_update_from_io_cached(state6_packed, T_cache_int8?, scale, v,
+                                  x_saved_codes_or_x, grad_out, mode={exact,lagged,proxy})
+    # one pass: form grad_w[o,i] = sum_m grad_out[m,o] x[m,i] locally; update RMS/scale/counter;
+    # write packed state6; refresh T_cache only where t actually flipped; never materialize grad_w.
