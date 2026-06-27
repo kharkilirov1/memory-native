@@ -93,7 +93,7 @@ Logs land in `results/` (not committed pre-filled — capture them on your GPU).
 
 A 60-step micro run already reproduces the method's story: `counter_rms` lands within ~0.1%
 of dense, beats vanilla counter, and isolates to ~+2.5% over ternary-QAT (the counter-
-optimizer cost) — matching the larger-scale numbers in [`../docs`](../docs).
+optimizer cost) — matching the larger-scale numbers in [`results/SUMMARY.md`](results/SUMMARY.md).
 
 ## What is measured vs what is roadmap
 
