@@ -6,6 +6,32 @@ update correlations belong on Tensor-Core GEMM, with the visible ternary weight 
 cache and the counter transition as a fused epilogue. Strict sub-byte memory stays the default
 (`strict6`); the speed modes are opt-in so the memory claim stays honest.
 
+## GPU-measured (Tesla T4, d=2048, M=4096) — what actually moved
+
+```
+forward  decode + cuBLAS GEMM        9.96 ms
+forward  int8 cache + cuBLAS GEMM    7.83 ms   (cache removes the 6-bit decode tax, -21%)
+forward  int8 cache + _int_mm        3.48 ms   *** x2.86 vs decode -- the Tensor-Core win ***
+
+update   torch tile                  7.60 ms
+update   fused Triton kernel         0.43 ms   x17.6 (the update transition)
+
+reversible O(1)        peak 427 MiB  834 ms/step
+reversible anchor=8    peak 769 MiB  727 ms/step   (-13% time for +340 MiB -- the M7 knob)
+```
+
+The validated headline is **the int8 Tensor-Core forward at ×2.86 over the decode path** — exactly
+the memo's pivot: keep T as a derived int8 cache and run the GEMM on the integer Tensor Cores
+instead of unpacking 6-bit. Honest negatives the same run found:
+- **int8 update correlation lost to fp32 cuBLAS** (8.18 vs 7.36 ms): the per-call stochastic
+  quantize overhead outweighs the int GEMM at this shape. It only pays off by *reusing the
+  already-int8-saved activation* (act_save_bits=8) instead of re-quantizing — the open refinement.
+- **fused-QKV forward showed no speedup** (27.1 vs 27.1 ms): the forward is decode-bound, so 3×
+  d→d and 1× d→3d decode the same weights. M2's win is fewer saved activations + fewer update
+  launches (backward), and it *composes* with the int8 cache (which removes the decode floor).
+
+Bench script: `scripts/` (run on `mn-kernel-test`). Numbers are one T4; treat as directional.
+
 | # | Milestone | Status |
 |---|---|---|
 | M1 | Layer profiler truth table | **done** — `scripts/layer_profiler.py` (per-phase: forward, GEMM fwd/grad_x/grad_w, decode, pack, act-quant, update torch vs fused) |
