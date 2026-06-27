@@ -15,7 +15,7 @@ cache and the counter transition as a fused epilogue. Strict sub-byte memory sta
 | M5 | Derived visible cache (`cache_mode={none,fp16,int8}`) | open — the central pivot; keep the cache outside truth state, refresh on visible flips |
 | M6 | int8 Tensor-Core compute path | open — `Q(Δ)^T Q(X)` unbiased; needs GPU + a parity gate (numerics change) |
 | M7 | Reversible anchors (`anchor_every`) | **done** — `ReversibleSequence(anchor_every=A)` / `ReversibleGPT(anchor_every=A)`. Stores the activation every A blocks and recomputes each chunk forward from its anchor instead of inverting: skips the inverse pass (~1 fwd/block faster) and is *exact* (no float-inverse error), at O(L/A + A) memory. Gradient parity vs plain autograd verified for A∈{1,2,3,5,8} (`test_anchors`); model trains, counters fire. (the peak-memory/speed frontier number is a GPU benchmark, queued with M5/M6.) `proxy` RMS still open (needs grad_out/x plumbing) |
-| M8 | Adaptive update decimation by flip-rate | open — late-training speed mode |
+| M8 | Adaptive update decimation by flip-rate | **done** — `decimate_updates=True`. A near-stable layer (tiny flip-rate) fires the update only every `_dec_period` steps (1→2→4→8 as flip-rate crosses 1e-3/1e-4/1e-5), lr scaled by the period to compensate; grad_x always runs, only the update is skipped. Parity gate (`test_decimation`): recovers the teacher to MSE 0.0 and engages (period→8 once stable); default off leaves the path untouched. Uses the torch update path (kernel doesn't report flip-rate) |
 
 ## Profiler reading (illustrative, CPU d=256 M=512)
 
@@ -31,7 +31,13 @@ update-from-IO). Re-run on a T4 (`--device cuda`) for the numbers that drive the
 
 ## Sequencing note
 
-M1/M2/M3 are layout changes with **no numeric change** (M2 is bit-identical) — landed first.
-M4–M6 change numerics (unbiased, higher variance) and trade a little memory for the cache, so each
-ships behind a parity gate with `strict6` remaining the default. GPU-dependent milestones (M5/M6,
-and the GPU benchmark of M2/the profiler) wait on free quota.
+All CPU-validatable milestones are landed: **M1, M2, M4, M7, M8 done; M3 partial** (QKV case
+covered). Each numerics-changing mode (M4 lagged/lazy, M8 decimation) ships behind a teacher
+parity gate and defaults off, so `strict6` / exact-eager / no-decimation remain the default and
+the memory + dynamics claims stay intact. Anchored reversible (M7) is exact (no inverse error).
+
+Still open, **GPU-blocked** (wait on the 1B run freeing the T4 quota): M5 derived visible cache
+(fp16→int8) and M6 the int8 Tensor-Core compute path — the memo's main long-term speed path —
+plus the GPU benchmark numbers for M2 (fused QKV), M4, M7's memory/speed frontier, and the
+profiler truth table on a real T4. CPU-side remainders: the general cross-layer shared-activation
+handle (M3) and proxy RMS (needs grad_out/x plumbed into the update).
