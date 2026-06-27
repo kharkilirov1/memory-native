@@ -318,19 +318,35 @@ class RMSCounterLinear(CompactCounterLinear):
     AdamW that vanilla counter-SGD leaves open."""
 
     def __init__(self, *args, rms_beta: float = 0.9, rms_eps: float = 1e-3,
-                 use_rms: bool = True, **kw) -> None:
+                 use_rms: bool = True, rms_mode: str = "exact",
+                 scale_rebase: str = "eager", **kw) -> None:
         super().__init__(*args, **kw)
         self.rms_beta = float(rms_beta)
         self.rms_eps = float(rms_eps)
         self.use_rms = bool(use_rms)
+        # rms_mode: "exact" uses the freshly-updated v for the denominator (the tick depends on a
+        #   row-stat of THIS step's grad -> two passes); "lagged" uses last step's v so the tick
+        #   needs no row-stat of the current grad -> one pass (the strict update-from-IO kernel).
+        # scale_rebase: "eager" rebases the counter to s_new before ticking (needs s_new first);
+        #   "lazy" keeps a per-row calibration scale s_base and rebases at the next step's read,
+        #   so the tick uses the current scale only. lagged+lazy together are the one-pass update.
+        assert rms_mode in ("exact", "lagged")
+        assert scale_rebase in ("eager", "lazy")
+        self.rms_mode = rms_mode
+        self.scale_rebase = scale_rebase
         self.register_buffer("v", torch.zeros((self.out_features, 1), dtype=torch.float32))
+        self.register_buffer("s_base", self.scale.clone())  # scale the counter is calibrated to
 
     @torch.no_grad()
     def _update_tile(self, lo, hi, grad_w, t_i, c_i, s_i) -> None:
         if self.use_rms:
             g_sq = grad_w.pow(2).mean(dim=1, keepdim=True)
-            self.v[lo:hi].mul_(self.rms_beta).add_(g_sq, alpha=1.0 - self.rms_beta)
-            denom = self.v[lo:hi].sqrt().clamp_min(self.rms_eps)
+            if self.rms_mode == "lagged":
+                denom = self.v[lo:hi].sqrt().clamp_min(self.rms_eps)          # previous v
+                self.v[lo:hi].mul_(self.rms_beta).add_(g_sq, alpha=1.0 - self.rms_beta)
+            else:
+                self.v[lo:hi].mul_(self.rms_beta).add_(g_sq, alpha=1.0 - self.rms_beta)
+                denom = self.v[lo:hi].sqrt().clamp_min(self.rms_eps)          # freshly-updated v
             grad_eff = grad_w / denom
         else:
             grad_eff = grad_w
@@ -346,10 +362,23 @@ class RMSCounterLinear(CompactCounterLinear):
         update_signal = (
             grad_eff if self.pulse_mode == "direct" else ternary_gradient_unbiased(grad_eff)
         )
+        if self.scale_rebase == "lazy":
+            # counter is calibrated to s_base; bring it to the current scale s_i, tick in s_i units
+            # (no dependence on s_new), and record that the stored counter is now calibrated to s_i.
+            c_cur = stochastic_round(c_i.float() * (self.s_base[lo:hi] / s_i))
+            ticks = (-self.lr * update_signal) * (self.C / s_i)
+            cc = stochastic_round(c_cur + ticks)
+            self.s_base[lo:hi].copy_(s_i)
+            return self._finish_update(lo, hi, cc, t_i, c_i, s_new)
         c_rebased = c_i.float() * (s_i / s_new)
         ticks = (-self.lr * update_signal) * (self.C / s_new)
         cc = stochastic_round(c_rebased + ticks)
+        self._finish_update(lo, hi, cc, t_i, c_i, s_new)
 
+    @torch.no_grad()
+    def _finish_update(self, lo, hi, cc, t_i, c_i, s_new) -> None:
+        # carry/remainder -> ternary flip + residual, then write state + scale (shared by the
+        # eager and the lazy-rebase paths).
         carry = torch.trunc(cc / self.C)
         remainder = cc - carry * self.C
         proposed_t = t_i.float() + carry

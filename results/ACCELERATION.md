@@ -11,7 +11,7 @@ cache and the counter transition as a fused epilogue. Strict sub-byte memory sta
 | M1 | Layer profiler truth table | **done** — `scripts/layer_profiler.py` (per-phase: forward, GEMM fwd/grad_x/grad_w, decode, pack, act-quant, update torch vs fused) |
 | M2 | Fused QKV counter layer | **done** — `CounterQKVLinear` (d→3d); bit-identical to three separate layers (test), one saved activation + one update + one larger GEMM. Opt-in via `ReversibleGPT(fused_qkv=True)` |
 | M3 | Shared activation handle | **partial** — the QKV case (the important one) is subsumed by M2 (one layer ⇒ one saved activation). A general cross-layer handle is still open |
-| M4 | Lagged RMS one-pass + lazy scale rebase | open — `rms_mode={exact,lagged,proxy}`, `scale_rebase={eager,lazy}`; needs a parity ablation gate |
+| M4 | Lagged RMS one-pass + lazy scale rebase | **done** — `rms_mode={exact,lagged}`, `scale_rebase={eager,lazy}` on RMSCounterLinear. lagged uses last step's v, lazy rebases the counter at the next read via a per-row `s_base`, so the tick needs no row-stat of the current grad → one pass. Parity gate: all 4 combos recover the teacher to MSE 0.00000 (`test_lagged_rms`). Fused kernel stays exact/eager-only; other modes use the torch path. (`proxy` RMS = M7, needs grad_out/x plumbing) |
 | M5 | Derived visible cache (`cache_mode={none,fp16,int8}`) | open — the central pivot; keep the cache outside truth state, refresh on visible flips |
 | M6 | int8 Tensor-Core compute path | open — `Q(Δ)^T Q(X)` unbiased; needs GPU + a parity gate (numerics change) |
 | M7 | Reversible anchors (`anchor_every`) | open — speed/memory knob; O(1) is the memory extreme, not the speed optimum |
