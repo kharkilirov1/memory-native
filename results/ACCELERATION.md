@@ -42,7 +42,7 @@ Bench: `scripts/gpu_acceleration_bench.py` (log `gpu_acceleration_bench_T4.log`)
 | M3 | Shared activation handle | **done for QKV** (the high-value case) via M2 — one fused layer ⇒ one saved/quantized activation + one update. A general cross-layer handle (sharing Q(h) across arbitrary layers with independent dither streams) is **deferred**: it needs autograd coordination across layers for marginal gain beyond QKV — documented, not built. |
 | M4 | Lagged RMS one-pass + lazy rebase + proxy | **done** — `rms_mode={exact,lagged,proxy}`, `scale_rebase={eager,lazy}` on RMSCounterLinear. lagged uses last step's v; lazy rebases the counter at the next read via a per-row `s_base`; **proxy** takes the row second-moment from grad_out norms × activation energy (post-LN E[r_o²]~‖Δ_o‖²) instead of the full ‖G_o‖² reduction. Parity gate: every mode recovers the teacher to MSE 0.0 (`test_lagged_rms`). Fused kernel stays exact/eager-only; other modes use the torch path. |
 | M5 | Derived visible cache (`cache_mode={none,fp16,int8}`) | **done (mechanism)** — keeps the visible ternary T in fp16/int8 (a derived view, persistent=False, rebuilt from truth state, refreshed on every visible flip in `_write_rows`, **and after the CUDA fused update**, which mutates packed state directly). Forward routes through `_visible_t` so the GEMM never unpacks 6-bit. Bit-exact vs the decode forward and tracks the state through updates (`test_cache`, `test_review_fixes`). **Not free: a speed mode that adds live memory** — `int8` is 0.75 B truth + 1.0 B cache ≈ **1.75 B/weight** (`fp16` ≈ 2.75); still far below dense+Adam's ~12–16, but count it honestly. |
-| M6 | int8 Tensor-Core compute path | **partial** — `int8_correlation` (update, per-column scale, unbiased) and `int8_forward_ternary` (forward, **per-token/row scale** so a_m factors out of X T^T — a per-column scale is wrong for forward). Both validated unbiased on CPU; `update_compute="int8"` is wired. The Tensor-Core GEMM (`torch._int_mm`) drops in on CUDA. **Not yet a built-in training forward path**, and the int8 update re-quantizes x/Δ each call (can lose to fp32 cuBLAS) — the open refinement is to reuse the already-int8-saved activation. |
+| M6 | int8 Tensor-Core compute path | **done (forward path) / partial (update)** — `forward_compute="int8"` wires the int8 forward into training (`int8_forward_ternary`, per-token scale, deterministic round-to-nearest so reversible/eager stay valid; grad_x + update stay fp, straight-through). T4 end-to-end: it has a **size crossover** — net-negative at d=512 (17.6k→16.8k tok/s, quantize overhead > GEMM saving on small layers) but net-positive at d=768 (5.9k→6.1k, 0.91→0.95× dense), and ×2.05 on an isolated d=2048 forward → wins more as models grow. Opt-in (fp default), recommended at d≥768. The int8 *update* correlation (`update_compute="int8"`) still re-quantizes x/Δ each call (can lose to fp32 cuBLAS) — the open refinement is reusing the already-int8-saved activation. |
 | M7 | Reversible anchors (`anchor_every`) | **done** — `ReversibleSequence(anchor_every=A)` / `ReversibleGPT(anchor_every=A)`. Stores the activation every A blocks and recomputes each chunk forward from its anchor instead of inverting: skips the inverse pass (~1 fwd/block faster) and is *exact* (no float-inverse error), at O(L/A + A) memory. Gradient parity vs plain autograd verified for A∈{1,2,3,5,8} (`test_anchors`); model trains, counters fire. (the peak-memory/speed frontier number is a GPU benchmark, queued with M5/M6.) `proxy` RMS still open (needs grad_out/x plumbing) |
 | M8 | Adaptive update decimation by flip-rate | **done** — `decimate_updates=True`. A near-stable layer (tiny flip-rate) fires the update only every `_dec_period` steps (1→2→4→8 as flip-rate crosses 1e-3/1e-4/1e-5), lr scaled by the period to compensate; grad_x always runs, only the update is skipped. Parity gate (`test_decimation`): recovers the teacher to MSE 0.0 and engages (period→8 once stable); default off leaves the path untouched. Uses the torch update path (kernel doesn't report flip-rate) |
 
@@ -121,11 +121,16 @@ large-layer/low-VRAM, strict from-IO only when *zero* grad materialization is ma
 
 ## Training speed (the bottom line)
 
-At s512 the counter method now trains at **17.1k tok/s — 0.89× of dense+AdamW (19.2k)**, i.e. ~12%
-slower than dense while using a fraction of the memory (no FP master, no Adam moments, 0.75 B/weight
-state). That is up from ~0.48× before the fused update kernel (the old torch-tile update was the
-wall). This lands inside the memo's "1.1–1.4× dense" target. The big remaining speed lever not yet
-wired into the *training* forward is the int8 Tensor-Core path (×2.05 on forward in isolation).
+At s512 the counter method now trains at **17.1k–17.6k tok/s — 0.89× of dense+AdamW (19.2–19.8k)**,
+i.e. ~11% slower than dense while using a fraction of the memory (no FP master, no Adam moments,
+0.75 B/weight state). That is up from ~0.48× before the fused update kernel (the old torch-tile
+update was the wall). This lands inside the memo's "1.1–1.4× dense" target.
+
+The int8-forward path (`forward_compute="int8"`) closes more of the gap as models grow: it's
+net-negative at d=512 (overhead) but at d=768 reaches **0.95× dense** (5.9k→6.1k), and an isolated
+d=2048 forward is ×2.05 — so on large models it is the path to *match or beat* dense speed. Net: the
+counter method is ~0.89–0.95× dense speed today (fp / int8 forward, scale-dependent), trending to
+parity at scale, at multiples-less memory.
 
 **Still genuinely open (and now lower priority, given the above):**
 - int8 Tensor-Core forward is correct (`int8_forward_ternary`) but **not yet a built-in training
