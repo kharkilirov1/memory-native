@@ -83,7 +83,7 @@ class ReversibleGPT(nn.Module):
     """
 
     def __init__(self, cfg: GPTConfig, kind: str = "counter_packed",
-                 fused_qkv: bool = False, **counter_kw) -> None:
+                 fused_qkv: bool = False, anchor_every: int = 0, **counter_kw) -> None:
         super().__init__()
         self.cfg = cfg
         d = cfg.n_embd
@@ -95,7 +95,7 @@ class ReversibleGPT(nn.Module):
                                           F=_AttnSub(d, cfg.n_head, kind, counter_kw, fused_qkv),
                                           G=_MLPSub(d, kind, counter_kw))
                   for _ in range(cfg.n_layer)]
-        self.rev = ReversibleSequence(blocks)
+        self.rev = ReversibleSequence(blocks, anchor_every=anchor_every)
         self.lnf = nn.LayerNorm(d)
         self.head = nn.Linear(d, cfg.vocab_size, bias=False)
         self.head.weight = self.tok.weight  # tie
