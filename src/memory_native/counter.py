@@ -196,6 +196,7 @@ class CompactCounterLinear(nn.Module):
         pulse_mode: str = "direct",
         act_save_bits: int = 0,
         decimate_updates: bool = False,
+        cache_mode: str = "none",
     ) -> None:
         super().__init__()
         if 3 * (2 * C - 1) > 256:
@@ -238,6 +239,20 @@ class CompactCounterLinear(nn.Module):
         # Diagnostics only: O(1) scalars, not per-weight optimizer state.
         self.register_buffer("update_events", torch.zeros((), dtype=torch.int64), persistent=False)
         self.register_buffer("weight_flips", torch.zeros((), dtype=torch.int64), persistent=False)
+
+        # Derived visible-weight compute cache (memo M5): the visible ternary T is the only thing
+        # forward/grad_x need; the hidden counter c is only the update's. cache_mode keeps T in a
+        # GEMM-friendly dtype so the matmul never pays the 6-bit decode tax. It is a *derived view*
+        # (not truth, not optimizer state): rebuilt from the state, refreshed on visible flips.
+        if cache_mode not in {"none", "fp16", "int8"}:
+            raise ValueError("cache_mode must be 'none', 'fp16' or 'int8'")
+        self.cache_mode = cache_mode
+        if cache_mode != "none":
+            # Built lazily on first use -- subclasses (e.g. the packed layout) finish constructing
+            # their state after this base __init__. Rebuilt from the truth state after any load
+            # (the cache is persistent=False, so it is never the source of truth).
+            self.register_load_state_dict_post_hook(
+                lambda m, _ic: m._build_t_cache() if hasattr(m, "_t_cache") else None)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if torch.is_grad_enabled():
@@ -295,15 +310,40 @@ class CompactCounterLinear(nn.Module):
         r = self._dec_flip_rate
         self._dec_period = 1 if r > 1e-3 else 2 if r > 1e-4 else 4 if r > 1e-5 else 8
 
+    def _build_t_cache(self) -> None:
+        dt = torch.float16 if self.cache_mode == "fp16" else torch.int8
+        t, _ = self._decode_rows(0, self.out_features)
+        cache = t.to(dt)
+        if hasattr(self, "_t_cache"):
+            self._t_cache.copy_(cache)
+        else:
+            self.register_buffer("_t_cache", cache, persistent=False)
+
+    def _visible_t(self, dtype: torch.dtype) -> torch.Tensor:
+        # the visible ternary weight T, from the derived cache when enabled (no decode), else decoded.
+        if self.cache_mode != "none":
+            if not hasattr(self, "_t_cache"):
+                self._build_t_cache()
+            return self._t_cache.to(dtype)
+        t, _ = self._decode_rows(0, self.out_features)
+        return t.to(dtype)
+
     def _dense_weight(self, dtype: torch.dtype) -> torch.Tensor:
-        t, _ = decode_state(self.state, self.C)
-        return self.scale.to(dtype) * t.to(dtype)
+        return self.scale.to(dtype) * self._visible_t(dtype)
 
     def _decode_rows(self, lo: int, hi: int) -> tuple[torch.Tensor, torch.Tensor]:
         return decode_state(self.state[lo:hi], self.C)
 
+    def _refresh_t_cache(self, lo: int, hi: int, t: torch.Tensor) -> None:
+        if self.cache_mode != "none":
+            if not hasattr(self, "_t_cache"):   # state for these rows is already written -> snapshot
+                self._build_t_cache()
+            else:
+                self._t_cache[lo:hi] = t.to(self._t_cache.dtype)
+
     def _write_rows(self, lo: int, hi: int, t: torch.Tensor, c: torch.Tensor) -> None:
         self.state[lo:hi].copy_(encode_state(t, c, self.C))
+        self._refresh_t_cache(lo, hi, t)
 
     @torch.no_grad()
     def _update_tile(self, lo, hi, grad_w, t_i, c_i, s_i) -> None:

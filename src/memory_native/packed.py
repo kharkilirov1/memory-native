@@ -84,9 +84,8 @@ class PackedRMSCounterLinear(RMSCounterLinear):
     def _all_codes(self) -> torch.Tensor:
         return unpack_codes(self.state, self.in_features)
 
-    def _dense_weight(self, dtype: torch.dtype) -> torch.Tensor:
-        t, _ = decode_state(self._all_codes(), self.C)
-        return self.scale.to(dtype) * t.to(dtype)
+    # _dense_weight is inherited from the base: it routes through _visible_t (derived cache when
+    # cache_mode != "none", else _decode_rows -> the packed unpack below). No override needed.
 
     def _decode_rows(self, lo: int, hi: int):
         codes = unpack_codes(self.state[lo:hi], self.in_features)
@@ -94,6 +93,7 @@ class PackedRMSCounterLinear(RMSCounterLinear):
 
     def _write_rows(self, lo: int, hi: int, t: torch.Tensor, c: torch.Tensor) -> None:
         self.state[lo:hi].copy_(pack_codes(encode_state(t, c, self.C)))
+        self._refresh_t_cache(lo, hi, t)
 
     @torch.no_grad()
     def state_statistics(self) -> dict[str, float]:
