@@ -158,7 +158,11 @@ class _FusedCounterLinearFn(torch.autograd.Function):
                     w_i = s_i.to(x.dtype) * t_i.to(x.dtype)
                     grad_x2.add_(go2[:, lo:hi] @ w_i)
                 if fire:
-                    grad_w_i = (go2[:, lo:hi].transpose(0, 1) @ x2).float()
+                    if module.update_compute == "int8":
+                        from .int8_compute import int8_correlation
+                        grad_w_i = int8_correlation(go2[:, lo:hi], x2)
+                    else:
+                        grad_w_i = (go2[:, lo:hi].transpose(0, 1) @ x2).float()
                     # Data-parallel: the counter optimizer lives in the state and is applied
                     # in-place here, so there is no Parameter .grad for DDP to all-reduce. Sync
                     # the counter gradient itself across ranks -> every replica applies the same
@@ -197,6 +201,7 @@ class CompactCounterLinear(nn.Module):
         act_save_bits: int = 0,
         decimate_updates: bool = False,
         cache_mode: str = "none",
+        update_compute: str = "fp",
     ) -> None:
         super().__init__()
         if 3 * (2 * C - 1) > 256:
@@ -246,6 +251,11 @@ class CompactCounterLinear(nn.Module):
         # (not truth, not optimizer state): rebuilt from the state, refreshed on visible flips.
         if cache_mode not in {"none", "fp16", "int8"}:
             raise ValueError("cache_mode must be 'none', 'fp16' or 'int8'")
+        if update_compute not in {"fp", "int8"}:
+            raise ValueError("update_compute must be 'fp' or 'int8'")
+        # "int8" forms grad_w with an unbiased int8 GEMM estimator (Tensor Cores on CUDA) instead
+        # of the fp32 correlation. Unbiased -> training-neutral in expectation; opt-in, fp default.
+        self.update_compute = update_compute
         self.cache_mode = cache_mode
         if cache_mode != "none":
             # Built lazily on first use -- subclasses (e.g. the packed layout) finish constructing
