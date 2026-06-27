@@ -86,6 +86,8 @@ if HAS_TRITON:
 
     @triton.jit
     def _hash_u32(x):
+        # uint32 semantics: logical shifts + wrapping mul (0x846ca68b overflows int32).
+        x = x.to(tl.uint32)
         x = x ^ (x >> 16)
         x = x * 0x7feb352d
         x = x ^ (x >> 15)
@@ -114,11 +116,14 @@ if HAS_TRITON:
         return ((ct.to(tl.int32) + 1) * lv + (rem.to(tl.int32) + (C - 1))) & 0x3F
 
     @triton.jit
-    def _counter_update_kernel(state_ptr, scale_ptr, v_ptr, grad_w_ptr,
-                               C, in_features, lr, lr_scale, rms_beta, rms_eps, seed,
+    def _counter_update_kernel(state_ptr, scale_ptr, v_ptr, grad_w_ptr, seed_ptr,
+                               C, in_features, lr, lr_scale, rms_beta, rms_eps,
                                BLOCK_I: tl.constexpr):
         # One program per output row. state packed [out, (in/4)*3]; grad_w dense [out,in].
+        # seed is loaded from a tensor (not a scalar arg) so Triton never specializes seed==0/1
+        # to a Python int -- that would break the `seed ^ hash` uint32 arithmetic.
         row = tl.program_id(0)
+        seed = tl.load(seed_ptr).to(tl.uint32)
         gpr = in_features // 4
         lv = 2 * C - 1
         # pass 1: row stats (needs t from the packed state)
@@ -188,8 +193,9 @@ def triton_counter_update(state_packed: torch.Tensor, scale: torch.Tensor, v: to
     in_features = grad_w.shape[1]
     assert in_features % 4 == 0
     BLOCK_I = 256
+    seed_t = torch.tensor([int(seed) & 0xFFFFFFFF], dtype=torch.int64, device=grad_w.device)
     _counter_update_kernel[(out,)](
-        state_packed, scale.reshape(out), v.reshape(out), grad_w.contiguous(),
-        C, in_features, lr, lr_scale, rms_beta, rms_eps, int(seed) & 0xFFFFFFFF,
+        state_packed, scale.reshape(out), v.reshape(out), grad_w.contiguous(), seed_t,
+        C, in_features, lr, lr_scale, rms_beta, rms_eps,
         BLOCK_I=BLOCK_I,
     )

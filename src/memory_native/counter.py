@@ -144,7 +144,8 @@ class _FusedCounterLinearFn(torch.autograd.Function):
                     grad_x2.add_(go2[:, lo:hi] @ w_i)
                 if module.training and module.update_enabled:
                     grad_w_i = (go2[:, lo:hi].transpose(0, 1) @ x2).float()
-                    module._update_tile(lo, hi, grad_w_i, t_i, c_i, s_i)
+                    if not module._fused_update(lo, hi, grad_w_i):
+                        module._update_tile(lo, hi, grad_w_i, t_i, c_i, s_i)
 
         module._outstanding_forward = False
         # grads for (x, module, tap); tap's grad is unused.
@@ -234,6 +235,11 @@ class CompactCounterLinear(nn.Module):
 
     def _backward_grad_x(self, grad_out2d: torch.Tensor) -> torch.Tensor:  # pragma: no cover
         raise NotImplementedError
+
+    def _fused_update(self, lo: int, hi: int, grad_w: torch.Tensor) -> bool:
+        # A subclass with a one-launch fused update (Triton) returns True after applying it;
+        # the base path always returns False so the caller runs the torch tile update.
+        return False
 
     def _dense_weight(self, dtype: torch.dtype) -> torch.Tensor:
         t, _ = decode_state(self.state, self.C)
