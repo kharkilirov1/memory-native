@@ -61,14 +61,18 @@ def int8_mm(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     return a.to(torch.int32) @ b.to(torch.int32)
 
 
-def int8_forward_ternary(x: torch.Tensor, t_int8: torch.Tensor) -> torch.Tensor:
+def int8_forward_ternary(x: torch.Tensor, t_int8: torch.Tensor, stochastic: bool = True) -> torch.Tensor:
     """Y_unscaled = (a_x * q_x) T^T for the int8 forward, with the CORRECT per-token (row) scale.
     x [M,K] fp, t_int8 [N,K] int8 (the visible ternary cache). Returns [M,N] fp; multiply by the
     per-output row scale s_o outside (the GEMM epilogue) to get Y = X (diag(s) T)^T. Using a
-    per-column X scale here would be wrong -- it cannot be pulled out of the sum over k."""
-    xq, ax = quantize_int8_rows(x)                # ax [M,1]
-    acc = int8_mm(xq, t_int8.t().contiguous())    # [M,N] int32
-    return acc.to(torch.float32) * ax             # per-token scale factors out
+    per-column X scale here would be wrong -- it cannot be pulled out of the sum over k.
+
+    stochastic=False uses round-to-nearest: deterministic (so F/G stay reversible-safe and the
+    eager contract holds) at the cost of a small quantization bias -- the right tradeoff for the
+    forward. stochastic=True is unbiased but non-deterministic; use it for the update correlation."""
+    xq, ax = quantize_int8_rows(x, stochastic=stochastic)   # ax [M,1]
+    acc = int8_mm(xq, t_int8.t().contiguous())              # [M,N] int32
+    return acc.to(torch.float32) * ax                       # per-token scale factors out
 
 
 def int8_correlation(delta: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
