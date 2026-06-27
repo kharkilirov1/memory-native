@@ -22,7 +22,7 @@ AdamW** (`gpu_validate_T4_oom.log`, batch=1, seq=256):
 The ratio climbs toward the weight-pool advantage (16×) as the model grows; counter fits a
 2.5B-param model on a 14.6 GiB T4 where AdamW OOMs by d=2048.
 
-## Pool 4: activations — reversible, demonstrated (lever works; O(1) is the next step)
+## Pool 4: activations — reversible, O(1) in depth (demonstrated on T4)
 
 Reversible coupling recomputes activations in backward instead of storing them. Peak vs depth
 (dim=512, 2048 tokens, counter MLP F/G) — `gpu_reversible_depth_T4.log`:
@@ -34,12 +34,11 @@ Reversible coupling recomputes activations in backward instead of storing them. 
 | 128 | 2.72 GiB | 761 MiB | **3.6×** |
 
 The activation lever works and the gap **widens with depth** — reversible increasingly wins.
-Honest limitation: the current `ReversibleSequential` makes each block its own autograd
-Function that stores *its own output*, so activation memory is O(depth) with a *small* constant
-(one [N,dim] per block) rather than the O(1) ideal (store only the final output, reconstruct the
-whole chain). Plain stores O(depth) with a *large* constant (all per-block internals), hence the
-3.6× gap. **True O(1) needs a single whole-chain reversible Function** (the classic RevNet
-backward) — the next implementation step.
+This first table is the per-block `ReversibleSequential`: each block is its own autograd Function
+storing *its own output*, so activation memory is O(depth) with a *small* constant (one [N,dim]
+per block) vs plain's O(depth) with a *large* constant (all per-block internals), hence the 3.6×
+gap. The O(1) ideal — store only the final output and reconstruct the whole chain — is realized
+by `ReversibleSequence` (single whole-chain RevNet Function), measured in the next section.
 
 
 ### O(1) whole-chain reversible — activation pool collapsed (T4)
@@ -67,4 +66,8 @@ verified budget-calculator projection (~10–16× for the full method).
 Both levers are demonstrated on real hardware. The full method (counter + reversible) is what
 the verified budget calculator projects at ~10× total (21 → 2 GiB at L=24/d=2048); these runs
 substantiate each half. The honest status: pools 1–3 are realized and decisive at scale; pool 4
-works and improves with depth but is not yet O(1) in this PyTorch implementation.
+is **O(1) in depth** via the whole-chain `ReversibleSequence` (gradients identical to per-block,
+max diff 0.0), demonstrated **13.5× below plain at depth 256** (5.29 GiB → 392 MiB). The one
+strictness gap left is in the PyTorch *update* path, which still consumes a materialized grad_w
+tile (the engine's OpenCL `counter_*_fused` does not) — see results/KERNEL.md and the
+update-from-IO milestone in triton_counter.py.
