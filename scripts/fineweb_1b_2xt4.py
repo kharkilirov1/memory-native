@@ -160,6 +160,12 @@ def worker(rank, world):
               f"peak {fmt_bytes(torch.cuda.max_memory_allocated())}  "
               f"{(s-start_step)*toks/el:,.0f} tok/s  {el:.0f}s  ckpt -> {CKPT_OUT}", flush=True)
     dist.destroy_process_group()
+    sys.stdout.flush(); sys.stderr.flush()
+    # Hard-exit: the HF streaming dataset's background threads race the GIL during normal Python
+    # finalization (PyGILState_Release fatal error), which flips the kernel to ERROR *after* the
+    # checkpoint is already written -- risking the output not being published. os._exit skips that
+    # finalization entirely; the work and the ckpt are done.
+    os._exit(0)
 
 if __name__ == "__main__":
     print("torch", torch.__version__, "GPUs", torch.cuda.device_count(),
