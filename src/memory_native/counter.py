@@ -144,7 +144,12 @@ class _FusedCounterLinearFn(torch.autograd.Function):
             grad_x2 = torch.zeros((x2.shape[0], module.in_features), device=x.device, dtype=x.dtype)
 
         # The full weight-gradient never exists. Only [tile_rows, in_features] is live.
-        if (module.training and module.update_enabled) or not use_kernel:
+        # Adaptive decimation (memo M8): once a layer's flip-rate is tiny it is near-stable, so
+        # apply the update only every _dec_period steps with lr scaled to compensate. Decided once
+        # per backward; grad_x is always computed, only the update is skipped.
+        do_update = module.training and module.update_enabled
+        fire = module._decimation_apply() if do_update else False
+        if do_update or not use_kernel:
             for lo in range(0, module.out_features, module.tile_rows):
                 hi = min(lo + module.tile_rows, module.out_features)
                 t_i, c_i = module._decode_rows(lo, hi)
@@ -152,7 +157,7 @@ class _FusedCounterLinearFn(torch.autograd.Function):
                 if not use_kernel:
                     w_i = s_i.to(x.dtype) * t_i.to(x.dtype)
                     grad_x2.add_(go2[:, lo:hi] @ w_i)
-                if module.training and module.update_enabled:
+                if fire:
                     grad_w_i = (go2[:, lo:hi].transpose(0, 1) @ x2).float()
                     # Data-parallel: the counter optimizer lives in the state and is applied
                     # in-place here, so there is no Parameter .grad for DDP to all-reduce. Sync
@@ -161,6 +166,8 @@ class _FusedCounterLinearFn(torch.autograd.Function):
                     _allreduce_grad_w_(grad_w_i)
                     if not module._fused_update(lo, hi, grad_w_i):
                         module._update_tile(lo, hi, grad_w_i, t_i, c_i, s_i)
+            if fire:
+                module._decimation_observe()
 
         module._outstanding_forward = False
         # grads for (x, module, tap); tap's grad is unused.
@@ -188,6 +195,7 @@ class CompactCounterLinear(nn.Module):
         local_grad_clip: float = 0.0,
         pulse_mode: str = "direct",
         act_save_bits: int = 0,
+        decimate_updates: bool = False,
     ) -> None:
         super().__init__()
         if 3 * (2 * C - 1) > 256:
@@ -211,6 +219,13 @@ class CompactCounterLinear(nn.Module):
         self.pulse_mode = pulse_mode
         self.update_enabled = True
         self._outstanding_forward = False
+        # Adaptive update decimation (memo M8): when on, a near-stable layer (tiny flip-rate)
+        # updates only every _dec_period steps with lr scaled by the period to compensate.
+        self.decimate_updates = bool(decimate_updates)
+        self._dec_period = 1
+        self._dec_since = 0
+        self._dec_flip_rate = 1.0
+        self._lr_mult = 1.0
 
         t0 = torch.randint(-1, 2, (out_features, in_features), dtype=torch.int16)
         c0 = torch.zeros_like(t0)
@@ -256,6 +271,30 @@ class CompactCounterLinear(nn.Module):
         # the base path always returns False so the caller runs the torch tile update.
         return False
 
+    def _eff_lr(self) -> float:
+        return self.lr * self._lr_mult
+
+    def _decimation_apply(self) -> bool:
+        """Advance the per-layer decimation clock; return whether to apply the update this step.
+        Off (default) -> always fire at lr*1. On -> fire every _dec_period steps with lr scaled by
+        the period (sum of r similar grads ~ r*grad)."""
+        if not self.decimate_updates:
+            self._lr_mult = 1.0
+            return True
+        self._dec_since += 1
+        if self._dec_since >= self._dec_period:
+            self._lr_mult = float(self._dec_period)
+            self._dec_since = 0
+            return True
+        return False
+
+    def _decimation_observe(self) -> None:
+        """Set the next update period from the flip-rate just observed (smaller flips -> rarer)."""
+        if not self.decimate_updates:
+            return
+        r = self._dec_flip_rate
+        self._dec_period = 1 if r > 1e-3 else 2 if r > 1e-4 else 4 if r > 1e-5 else 8
+
     def _dense_weight(self, dtype: torch.dtype) -> torch.Tensor:
         t, _ = decode_state(self.state, self.C)
         return self.scale.to(dtype) * t.to(dtype)
@@ -281,7 +320,7 @@ class CompactCounterLinear(nn.Module):
         )
         # c stores a pending update in units of s/C; rebase it when the row scale changes.
         c_rebased = c_i.float() * (s_i / s_new)
-        ticks = (-self.lr * update_signal) * (self.C / s_new)
+        ticks = (-self._eff_lr() * update_signal) * (self.C / s_new)
         cc = stochastic_round(c_rebased + ticks)
 
         carry = torch.trunc(cc / self.C)
@@ -295,8 +334,10 @@ class CompactCounterLinear(nn.Module):
 
         self._write_rows(lo, hi, new_t, remainder)
         self.scale[lo:hi].copy_(s_new)
+        flips = int((new_t != t_i).sum().item())
+        self._dec_flip_rate = flips / max(new_t.numel(), 1)
         self.update_events.add_(int((cc != c_i).sum().item()))
-        self.weight_flips.add_(int((new_t != t_i).sum().item()))
+        self.weight_flips.add_(flips)
 
     @torch.no_grad()
     def state_statistics(self) -> dict[str, float]:
@@ -366,12 +407,12 @@ class RMSCounterLinear(CompactCounterLinear):
             # counter is calibrated to s_base; bring it to the current scale s_i, tick in s_i units
             # (no dependence on s_new), and record that the stored counter is now calibrated to s_i.
             c_cur = stochastic_round(c_i.float() * (self.s_base[lo:hi] / s_i))
-            ticks = (-self.lr * update_signal) * (self.C / s_i)
+            ticks = (-self._eff_lr() * update_signal) * (self.C / s_i)
             cc = stochastic_round(c_cur + ticks)
             self.s_base[lo:hi].copy_(s_i)
             return self._finish_update(lo, hi, cc, t_i, c_i, s_new)
         c_rebased = c_i.float() * (s_i / s_new)
-        ticks = (-self.lr * update_signal) * (self.C / s_new)
+        ticks = (-self._eff_lr() * update_signal) * (self.C / s_new)
         cc = stochastic_round(c_rebased + ticks)
         self._finish_update(lo, hi, cc, t_i, c_i, s_new)
 
@@ -390,5 +431,7 @@ class RMSCounterLinear(CompactCounterLinear):
 
         self._write_rows(lo, hi, new_t, remainder)
         self.scale[lo:hi].copy_(s_new)
+        flips = int((new_t != t_i).sum().item())
+        self._dec_flip_rate = flips / max(new_t.numel(), 1)
         self.update_events.add_(int((cc != c_i).sum().item()))
-        self.weight_flips.add_(int((new_t != t_i).sum().item()))
+        self.weight_flips.add_(flips)
