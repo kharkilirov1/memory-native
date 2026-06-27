@@ -209,6 +209,7 @@ class CompactCounterLinear(nn.Module):
         decimate_updates: bool = False,
         cache_mode: str = "none",
         update_compute: str = "fp",
+        forward_compute: str = "fp",
     ) -> None:
         super().__init__()
         if 3 * (2 * C - 1) > 256:
@@ -262,9 +263,17 @@ class CompactCounterLinear(nn.Module):
             raise ValueError("cache_mode must be 'none', 'fp16' or 'int8'")
         if update_compute not in {"fp", "int8"}:
             raise ValueError("update_compute must be 'fp' or 'int8'")
+        if forward_compute not in {"fp", "int8"}:
+            raise ValueError("forward_compute must be 'fp' or 'int8'")
         # "int8" forms grad_w with an unbiased int8 GEMM estimator (Tensor Cores on CUDA) instead
         # of the fp32 correlation. Unbiased -> training-neutral in expectation; opt-in, fp default.
         self.update_compute = update_compute
+        # forward_compute="int8" runs the forward Y=XT^T on the integer Tensor Cores (deterministic
+        # round-to-nearest activation quant, so reversible/eager stay valid); pairs with the int8
+        # visible cache. grad_x and the update stay fp -- straight-through past the forward quant.
+        self.forward_compute = forward_compute
+        if forward_compute == "int8" and cache_mode == "none":
+            cache_mode = "int8"            # the int8 forward needs the int8 T view
         self.cache_mode = cache_mode
         if cache_mode != "none":
             # Built lazily on first use -- subclasses (e.g. the packed layout) finish constructing
@@ -290,6 +299,14 @@ class CompactCounterLinear(nn.Module):
     def _forward_matmul(self, x: torch.Tensor) -> torch.Tensor:
         # y = x @ W^T. Base path materializes the dense weight; a kernel subclass (Triton)
         # may override this to decode the packed state inside the GEMM with no dense weight.
+        if self.forward_compute == "int8":
+            from .int8_compute import int8_forward_ternary
+            flat = x.reshape(-1, x.shape[-1])
+            # int8 GEMM on the Tensor Cores: (a_x q_x) T^T, then the per-output row scale s_o.
+            # Deterministic quant (round-to-nearest) keeps F/G reversible-safe.
+            y = int8_forward_ternary(flat, self._visible_t(torch.int8), stochastic=False)
+            y = y * self.scale.reshape(1, self.out_features)
+            return y.reshape(*x.shape[:-1], self.out_features).to(x.dtype)
         return F.linear(x, self._dense_weight(x.dtype))
 
     def _has_fast_grad_x(self) -> bool:
