@@ -55,6 +55,9 @@ def main(argv=None):
     torch.set_grad_enabled(False)                       # profile raw compute, not autograd bookkeeping
     rows = []
     rows.append(("forward (decode+GEMM)", _bench(lambda: lay._forward_matmul(x), dev)))
+    lay_c = PackedRMSCounterLinear(K, N, C=args.C, cache_mode="int8").to(dev)
+    lay_c.state.copy_(lay.state); lay_c.scale.copy_(lay.scale); lay_c._build_t_cache()
+    rows.append(("forward (int8 cache, no decode)", _bench(lambda: lay_c._forward_matmul(x), dev)))
     rows.append(("pure GEMM fwd  x@W^T", _bench(lambda: x @ W.t(), dev)))
     rows.append(("pure GEMM grad_x  go@W", _bench(lambda: go @ W, dev)))
     rows.append(("pure GEMM grad_w  go^T@x", _bench(lambda: go.t() @ x, dev)))
