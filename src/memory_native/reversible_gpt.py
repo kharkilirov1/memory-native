@@ -19,6 +19,7 @@ import torch.nn.functional as F
 
 from .baselines import make_linear
 from .counter import CompactCounterLinear
+from .fused_qkv import CounterQKVLinear
 from .models import GPTConfig
 from .reversible import ReversibleCouplingBlock, ReversibleSequence
 
@@ -26,23 +27,36 @@ __all__ = ["ReversibleGPT"]
 
 
 class _AttnSub(nn.Module):
-    """F: LayerNorm -> causal multi-head attention with counter q/k/v/proj. [B,T,d] -> [B,T,d]."""
+    """F: LayerNorm -> causal multi-head attention with counter q/k/v/proj. [B,T,d] -> [B,T,d].
 
-    def __init__(self, d: int, n_head: int, kind: str, counter_kw: dict) -> None:
+    fused_qkv=True replaces the three q/k/v counter layers with one CounterQKVLinear (d->3d):
+    identical math, one saved activation + one update + one larger GEMM (acceleration memo M2).
+    """
+
+    def __init__(self, d: int, n_head: int, kind: str, counter_kw: dict,
+                 fused_qkv: bool = False) -> None:
         super().__init__()
         self.ln = nn.LayerNorm(d)
-        self.q = make_linear(kind, d, d, 1.0, **counter_kw)
-        self.k = make_linear(kind, d, d, 1.0, **counter_kw)
-        self.v = make_linear(kind, d, d, 1.0, **counter_kw)
+        self.fused_qkv = fused_qkv
+        if fused_qkv:
+            self.qkv = CounterQKVLinear(d, kind, **counter_kw)
+        else:
+            self.q = make_linear(kind, d, d, 1.0, **counter_kw)
+            self.k = make_linear(kind, d, d, 1.0, **counter_kw)
+            self.v = make_linear(kind, d, d, 1.0, **counter_kw)
         self.proj = make_linear(kind, d, d, 1.0, **counter_kw)
         self.n_head = n_head
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         b, t, c = x.shape
         h = self.ln(x)
-        q = self.q(h).view(b, t, self.n_head, -1).transpose(1, 2)
-        k = self.k(h).view(b, t, self.n_head, -1).transpose(1, 2)
-        v = self.v(h).view(b, t, self.n_head, -1).transpose(1, 2)
+        if self.fused_qkv:
+            q, k, v = self.qkv(h)                       # one saved activation, one GEMM
+        else:
+            q, k, v = self.q(h), self.k(h), self.v(h)
+        q = q.view(b, t, self.n_head, -1).transpose(1, 2)
+        k = k.view(b, t, self.n_head, -1).transpose(1, 2)
+        v = v.view(b, t, self.n_head, -1).transpose(1, 2)
         a = F.scaled_dot_product_attention(q, k, v, is_causal=True)  # deterministic (no dropout)
         a = a.transpose(1, 2).contiguous().view(b, t, c)
         return self.proj(a)
@@ -68,7 +82,8 @@ class ReversibleGPT(nn.Module):
     kind defaults to 'counter_packed'; pass 'dense' to get a reversible *dense* baseline.
     """
 
-    def __init__(self, cfg: GPTConfig, kind: str = "counter_packed", **counter_kw) -> None:
+    def __init__(self, cfg: GPTConfig, kind: str = "counter_packed",
+                 fused_qkv: bool = False, **counter_kw) -> None:
         super().__init__()
         self.cfg = cfg
         d = cfg.n_embd
@@ -77,7 +92,7 @@ class ReversibleGPT(nn.Module):
         nn.init.normal_(self.tok.weight, std=0.02)
         nn.init.normal_(self.pos.weight, std=0.02)
         blocks = [ReversibleCouplingBlock(2 * d,
-                                          F=_AttnSub(d, cfg.n_head, kind, counter_kw),
+                                          F=_AttnSub(d, cfg.n_head, kind, counter_kw, fused_qkv),
                                           G=_MLPSub(d, kind, counter_kw))
                   for _ in range(cfg.n_layer)]
         self.rev = ReversibleSequence(blocks)
