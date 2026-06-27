@@ -29,6 +29,7 @@ from .reversible_gpt import ReversibleGPT
 from .fused_qkv import CounterQKVLinear
 from .int8_compute import (
     int8_correlation,
+    int8_correlation_presaved,
     int8_forward_ternary,
     int8_mm,
     quantize_int8_cols,
@@ -66,6 +67,7 @@ __all__ = [
     "ReversibleGPT",
     "CounterQKVLinear",
     "int8_correlation",
+    "int8_correlation_presaved",
     "int8_forward_ternary",
     "int8_mm",
     "quantize_int8_cols",
