@@ -85,6 +85,28 @@ is ~860× slower than cuBLAS — so the 16 MiB transient grad_w per layer is **n
 at that cost. The practical strict-enough path is cuBLAS grad_w (transient, or per-tile) + the fused
 update kernel. The from-IO kernel stays as the strict-memory bound for memory-constrained regimes.
 
+### Tiled cuBLAS grad + fused tile update — the practical bridge (T4-confirmed)
+
+`PackedRMSCounterLinear._fused_update` is now row-slice aware, so `tile_rows=R` materializes only an
+`[R, in]` grad tile (cuBLAS) and fuses the transition on that slice. Frontier on a T4
+(`gpu_tiled_update_frontier_T4.log`, d=2048 M=4096):
+
+```
+full-gw+fused   R=2048   10.86 ms   +17 MiB grad peak
+tile-gw+fused   R=128     9.45 ms    +4 MiB   = 0.87x full
+tile-gw+fused   R=256     8.96 ms    +8 MiB   = 0.83x full
+tile-gw+fused   R=512     8.58 ms   +17 MiB   = 0.79x full
+strict-from-IO   0      7381 ms     +512 B
+```
+
+The witness criterion (some R≤512 within 1.5× of full at ≤4 MiB grad tile) is **confirmed and then
+some**: the tiled path is *faster* than full while bounding the transient gradient — smaller tiles
+get a better GEMM shape and cache behavior. **Recommended: `tile_rows≈128–256`** (≈0.85× the full
+step time at 4–8 MiB transient grad instead of 16, and the smaller per-tile peak compounds across a
+deep model). This is the recommended fast-low-peak training mode; the default stays `tile_rows=0`
+(untiled) for back-compat. So the three-way picture resolves: tiled fast+low-peak for normal
+training, strict from-IO only when *zero* grad materialization is mandatory.
+
 **Still genuinely open (and now lower priority, given the above):**
 - int8 Tensor-Core forward is correct (`int8_forward_ternary`) but **not yet a built-in training
   forward path** on the layer;
