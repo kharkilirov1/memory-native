@@ -85,7 +85,8 @@ class ReversibleGPT(nn.Module):
         self.head = nn.Linear(d, cfg.vocab_size, bias=False)
         self.head.weight = self.tok.weight  # tie
 
-    def forward(self, idx: torch.Tensor, targets: torch.Tensor | None = None):
+    def forward(self, idx: torch.Tensor, targets: torch.Tensor | None = None,
+                loss_chunk: int = 0):
         _, t = idx.shape
         if t > self.cfg.block_size:
             raise ValueError(f"sequence length {t} exceeds block size {self.cfg.block_size}")
@@ -95,6 +96,20 @@ class ReversibleGPT(nn.Module):
         x = self.rev(x)
         d = self.cfg.n_embd
         h = self.lnf(x[..., :d] + x[..., d:])  # recombine the two streams
+
+        # At BPE vocab the logits tensor [B,T,V] (V~50k) is the dominant activation. When a loss
+        # is requested the full tensor is never needed, so chunk the head over rows and accumulate
+        # the token-weighted cross-entropy. loss_chunk=0 keeps the plain dense path (returns logits).
+        if targets is not None and loss_chunk > 0:
+            hf = h.reshape(-1, d)
+            tf = targets.reshape(-1)
+            total = hf.new_zeros(())
+            n = hf.shape[0]
+            for i in range(0, n, loss_chunk):
+                lg = self.head(hf[i:i + loss_chunk])
+                total = total + F.cross_entropy(lg, tf[i:i + loss_chunk], reduction="sum")
+            return None, total / n
+
         logits = self.head(h)
         loss = None
         if targets is not None:
