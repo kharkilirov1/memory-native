@@ -27,11 +27,12 @@ can't even allocate (18 GiB of state alone) trains with 12 GiB of headroom to sp
 | 1000 | 2.63 | 2.58 |
 | 1500 | 2.33 | 2.32 |
 | 2000 | **2.08** | **2.05** |
+| final eval | 2.08 | **2.10** |
 
-**No overfitting** — val tracks train the whole way and ends slightly *below* it (2.05 vs 2.08),
-exactly as expected when the corpus is large enough that 2000 steps is a fraction of one epoch
-(contrast the d=1024 tinyshakespeare run, where ~8 epochs gave a mild train/val gap). Loss is
-still descending at step 2000; the run was step-capped, not converged.
+**No overfitting** — val tracks train the whole way; the final held-out eval (2.10) sits right on
+top of train (2.08), no gap, exactly as expected when the corpus is large enough that 2000 steps
+is a fraction of one epoch (contrast the d=1024 tinyshakespeare run, where ~8 epochs gave a mild
+train/val gap). Loss is still descending at step 2000 — the run was step-capped, not converged.
 
 ## Cost
 
