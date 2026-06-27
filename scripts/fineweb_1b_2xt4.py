@@ -22,7 +22,12 @@ import torch, torch.multiprocessing as mp, torch.distributed as dist, torch.nn.f
 # ---------------- config ----------------
 D, L, H, BLK = 2048, 24, 16, 256        # 1.21B counter coeffs (same body as the enwik8 1B run)
 BATCH_GLOBAL = 128                       # effective batch; split across the 2 T4s
-LR, LR_SCALE, C, ABITS = 2e-3, 2e-4, 11, 4
+LR, LR_SCALE, C, ABITS = 2e-3, 2e-4, 11, 8   # int8 saved activation -> reusable by the int8 update
+# int8 Tensor-Core levers (the big win at d=2048): forward_compute=int8 runs Y=XT^T on the int8
+# cache (x2.05 isolated forward); update_compute=int8 + act_save_bits=8 reuses the saved activation
+# for the grad_w correlation (x1.45-2.16). Deterministic int8 forward keeps the reversible recompute
+# valid. Set INT8=False to fall back to the fp path (better loss curve, slower).
+INT8 = True
 LOSS_CHUNK = 4096                        # chunk the vocab-50257 head so [B,T,V] is never built
 VAL_TOKENS_PER_RANK = 600_000
 CKPT_EVERY = 100
@@ -81,7 +86,10 @@ def worker(rank, world):
 
     torch.manual_seed(0)                                   # identical init on every rank
     cfg = GPTConfig(vocab, BLK, L, H, D)
-    m = ReversibleGPT(cfg, "counter_packed", lr=LR, lr_scale=LR_SCALE, C=C, act_save_bits=ABITS).to(dev).train()
+    ckw = dict(lr=LR, lr_scale=LR_SCALE, C=C, act_save_bits=ABITS)
+    if INT8:
+        ckw.update(forward_compute="int8", update_compute="int8")   # cache_mode int8 is auto-set
+    m = ReversibleGPT(cfg, "counter_packed", **ckw).to(dev).train()
     opt = build_optimizer("adamw", m.trainable_parameters(), LR)
 
     start_step = 0
