@@ -167,18 +167,80 @@ class _ReversibleSequenceFn(torch.autograd.Function):
         return (grad_y, None, None, None) + tuple(grad_params)
 
 
+class _AnchoredReversibleSequenceFn(torch.autograd.Function):
+    # Speed/memory knob (acceleration memo M7): store the activation at every A-th block (an
+    # "anchor") and, in backward, recompute each chunk forward FROM its anchor with grad
+    # (checkpoint-style) instead of reconstructing via the inverse. That drops the inverse pass
+    # (~1 forward/block faster) and is exact (no float-inverse error), at O(L/A + A) activation
+    # memory. A=L is one whole-chain checkpoint; A=1 stores every block. Counter contract is the
+    # same as the reversible path: a no-grad forward walk, then an enable_grad recompute that
+    # fires each inner counter exactly once.
+    @staticmethod
+    def forward(ctx, x, blocks, meta, anchor_every, tap, *all_params):
+        ctx.blocks, ctx.meta, ctx.A = blocks, meta, anchor_every
+        anchors = []
+        with torch.no_grad():
+            xi = x
+            for i, b in enumerate(blocks):
+                if i % anchor_every == 0:
+                    anchors.append(xi)
+                xi = _couple_fwd(b, xi)
+        ctx.n_anchors = len(anchors)
+        ctx.save_for_backward(*[a.detach() for a in anchors], *all_params)
+        return xi
+
+    @staticmethod
+    def backward(ctx, grad_out):
+        saved = ctx.saved_tensors
+        anchors, all_params = saved[:ctx.n_anchors], saved[ctx.n_anchors:]
+        grad_params = [None] * len(all_params)
+        offsets, off = [], 0
+        for (nf, ng) in ctx.meta:
+            offsets.append(off)
+            off += nf + ng
+        blocks, A, L = ctx.blocks, ctx.A, len(ctx.blocks)
+        grad_y = grad_out
+        for c in range((L + A - 1) // A - 1, -1, -1):       # chunks, last to first
+            start, end = c * A, min((c + 1) * A, L)
+            xin = anchors[c].detach().requires_grad_(True)
+            with torch.enable_grad():                        # recompute the chunk forward (no inverse)
+                h = xin
+                for i in range(start, end):
+                    h = _couple_fwd(blocks[i], h)
+            chunk_params = []
+            for i in range(start, end):
+                chunk_params.extend(tuple(blocks[i].F.parameters()))
+                chunk_params.extend(tuple(blocks[i].G.parameters()))
+            grads = torch.autograd.grad(h, (xin,) + tuple(chunk_params), grad_y)
+            grad_y = grads[0]
+            k = 1
+            for i in range(start, end):
+                base, (nf, ng) = offsets[i], ctx.meta[i]
+                for j in range(nf + ng):
+                    grad_params[base + j] = grads[k]
+                    k += 1
+        return (grad_y, None, None, None, None) + tuple(grad_params)
+
+
 class ReversibleSequence(nn.Module):
-    """A reversible stack with **O(1)-in-depth** activation memory: the whole chain is a single
-    autograd Function that stores ONLY the final output. Backward walks the chain in reverse,
-    reconstructing each block's input from its output and recomputing locally (classic RevNet).
-    Inner self-updating counter layers fire once per block during that walk.
+    """A reversible stack with **O(1)-in-depth** activation memory (default): the whole chain is a
+    single autograd Function that stores ONLY the final output. Backward walks the chain in
+    reverse, reconstructing each block's input from its output and recomputing locally (classic
+    RevNet). Inner self-updating counter layers fire once per block during that walk.
 
-    Note: the float inverse accumulates a little reconstruction error with depth (~3e-3 over
-    ~12 blocks); training-neutral at modest depth, but very deep stacks may want anchors."""
+    `anchor_every=A > 0` switches to anchored mode (acceleration memo M7): store the activation
+    every A blocks and recompute each chunk forward from its anchor instead of inverting. This is
+    the speed/memory knob — O(1) reversible is the minimum-memory extreme, not the fastest point;
+    anchors spend O(L/A + A) memory to skip the inverse pass (and avoid float-inverse error).
 
-    def __init__(self, blocks: Sequence[ReversibleCouplingBlock]) -> None:
+    Note: the float inverse (anchor_every=0) accumulates a little reconstruction error with depth
+    (~3e-3 over ~12 blocks); training-neutral at modest depth, but very deep stacks may want
+    anchors, which reconstruct exactly."""
+
+    def __init__(self, blocks: Sequence[ReversibleCouplingBlock], anchor_every: int = 0) -> None:
         super().__init__()
         self.blocks = nn.ModuleList(blocks)
+        self.anchor_every = int(anchor_every)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         all_params, meta = [], []
@@ -190,4 +252,7 @@ class ReversibleSequence(nn.Module):
             all_params.extend(gp)
         tap = (torch.zeros((), device=x.device, dtype=x.dtype, requires_grad=True)
                if torch.is_grad_enabled() else x.new_zeros(()))
+        if self.anchor_every > 0:
+            return _AnchoredReversibleSequenceFn.apply(
+                x, tuple(self.blocks), tuple(meta), self.anchor_every, tap, *all_params)
         return _ReversibleSequenceFn.apply(x, tuple(self.blocks), tuple(meta), tap, *all_params)

@@ -14,7 +14,7 @@ cache and the counter transition as a fused epilogue. Strict sub-byte memory sta
 | M4 | Lagged RMS one-pass + lazy scale rebase | **done** — `rms_mode={exact,lagged}`, `scale_rebase={eager,lazy}` on RMSCounterLinear. lagged uses last step's v, lazy rebases the counter at the next read via a per-row `s_base`, so the tick needs no row-stat of the current grad → one pass. Parity gate: all 4 combos recover the teacher to MSE 0.00000 (`test_lagged_rms`). Fused kernel stays exact/eager-only; other modes use the torch path. (`proxy` RMS = M7, needs grad_out/x plumbing) |
 | M5 | Derived visible cache (`cache_mode={none,fp16,int8}`) | open — the central pivot; keep the cache outside truth state, refresh on visible flips |
 | M6 | int8 Tensor-Core compute path | open — `Q(Δ)^T Q(X)` unbiased; needs GPU + a parity gate (numerics change) |
-| M7 | Reversible anchors (`anchor_every`) | open — speed/memory knob; O(1) is the memory extreme, not the speed optimum |
+| M7 | Reversible anchors (`anchor_every`) | **done** — `ReversibleSequence(anchor_every=A)` / `ReversibleGPT(anchor_every=A)`. Stores the activation every A blocks and recomputes each chunk forward from its anchor instead of inverting: skips the inverse pass (~1 fwd/block faster) and is *exact* (no float-inverse error), at O(L/A + A) memory. Gradient parity vs plain autograd verified for A∈{1,2,3,5,8} (`test_anchors`); model trains, counters fire. (the peak-memory/speed frontier number is a GPU benchmark, queued with M5/M6.) `proxy` RMS still open (needs grad_out/x plumbing) |
 | M8 | Adaptive update decimation by flip-rate | open — late-training speed mode |
 
 ## Profiler reading (illustrative, CPU d=256 M=512)
