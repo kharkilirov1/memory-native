@@ -163,13 +163,18 @@ class _FusedCounterLinearFn(torch.autograd.Function):
                         grad_w_i = int8_correlation(go2[:, lo:hi], x2)
                     else:
                         grad_w_i = (go2[:, lo:hi].transpose(0, 1) @ x2).float()
+                    # proxy RMS: take the row second-moment from grad_out norms (* activation
+                    # energy) instead of the full ||G_o||^2 reduction (post-LN E[r_o^2]~||D_o||^2).
+                    proxy_gsq = None
+                    if getattr(module, "rms_mode", "exact") == "proxy":
+                        proxy_gsq = go2[:, lo:hi].pow(2).mean(dim=0, keepdim=True).t() * x2.pow(2).mean()
                     # Data-parallel: the counter optimizer lives in the state and is applied
                     # in-place here, so there is no Parameter .grad for DDP to all-reduce. Sync
                     # the counter gradient itself across ranks -> every replica applies the same
                     # update (same SR seed) and the packed state stays bit-identical everywhere.
                     _allreduce_grad_w_(grad_w_i)
                     if not module._fused_update(lo, hi, grad_w_i):
-                        module._update_tile(lo, hi, grad_w_i, t_i, c_i, s_i)
+                        module._update_tile(lo, hi, grad_w_i, t_i, c_i, s_i, proxy_gsq=proxy_gsq)
             if fire:
                 module._decimation_observe()
 
@@ -356,7 +361,7 @@ class CompactCounterLinear(nn.Module):
         self._refresh_t_cache(lo, hi, t)
 
     @torch.no_grad()
-    def _update_tile(self, lo, hi, grad_w, t_i, c_i, s_i) -> None:
+    def _update_tile(self, lo, hi, grad_w, t_i, c_i, s_i, proxy_gsq=None) -> None:
         if self.local_grad_clip > 0:
             row_norm = grad_w.norm(dim=1, keepdim=True).clamp_min(1e-30)
             grad_w = grad_w * (self.local_grad_clip / row_norm).clamp_max(1.0)
@@ -421,7 +426,9 @@ class RMSCounterLinear(CompactCounterLinear):
         # scale_rebase: "eager" rebases the counter to s_new before ticking (needs s_new first);
         #   "lazy" keeps a per-row calibration scale s_base and rebases at the next step's read,
         #   so the tick uses the current scale only. lagged+lazy together are the one-pass update.
-        assert rms_mode in ("exact", "lagged")
+        # "proxy": post-LayerNorm E[r_o^2|D] ~ ||D_o||^2, so the RMS denominator comes from cheap
+        #   grad_out row-norms (x a scalar activation-energy) instead of the full ||G_o||^2 stat.
+        assert rms_mode in ("exact", "lagged", "proxy")
         assert scale_rebase in ("eager", "lazy")
         self.rms_mode = rms_mode
         self.scale_rebase = scale_rebase
@@ -429,9 +436,12 @@ class RMSCounterLinear(CompactCounterLinear):
         self.register_buffer("s_base", self.scale.clone())  # scale the counter is calibrated to
 
     @torch.no_grad()
-    def _update_tile(self, lo, hi, grad_w, t_i, c_i, s_i) -> None:
+    def _update_tile(self, lo, hi, grad_w, t_i, c_i, s_i, proxy_gsq=None) -> None:
         if self.use_rms:
-            g_sq = grad_w.pow(2).mean(dim=1, keepdim=True)
+            # proxy mode takes the row second-moment from grad_out norms (passed in) instead of
+            # the full ||G_o||^2 reduction; lagged uses the previous v, else the freshly-updated v.
+            g_sq = proxy_gsq if (self.rms_mode == "proxy" and proxy_gsq is not None) \
+                else grad_w.pow(2).mean(dim=1, keepdim=True)
             if self.rms_mode == "lagged":
                 denom = self.v[lo:hi].sqrt().clamp_min(self.rms_eps)          # previous v
                 self.v[lo:hi].mul_(self.rms_beta).add_(g_sq, alpha=1.0 - self.rms_beta)
