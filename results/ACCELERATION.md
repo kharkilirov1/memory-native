@@ -99,13 +99,33 @@ tile-gw+fused   R=512     8.58 ms   +17 MiB   = 0.79x full
 strict-from-IO   0      7381 ms     +512 B
 ```
 
-The witness criterion (some R≤512 within 1.5× of full at ≤4 MiB grad tile) is **confirmed and then
-some**: the tiled path is *faster* than full while bounding the transient gradient — smaller tiles
-get a better GEMM shape and cache behavior. **Recommended: `tile_rows≈128–256`** (≈0.85× the full
-step time at 4–8 MiB transient grad instead of 16, and the smaller per-tile peak compounds across a
-deep model). This is the recommended fast-low-peak training mode; the default stays `tile_rows=0`
-(untiled) for back-compat. So the three-way picture resolves: tiled fast+low-peak for normal
-training, strict from-IO only when *zero* grad materialization is mandatory.
+The witness criterion (some R≤512 within 1.5× of full at ≤4 MiB grad tile) is met *for this large
+isolated layer*: tiled is even faster than full here, at a fraction of the transient gradient.
+
+**But the full-training-step measurement refutes making it the default** (`gpu_training_throughput_T4.log`,
+s512 d=512, B·T=4096):
+
+```
+dense + AdamW                        19190 tok/s   (1.00x)
+counter_packed untiled               17089 tok/s   (0.89x dense)   <-- fastest counter config
+counter_packed tile_rows=256         14235 tok/s   (0.74x dense)
+counter_packed tile_rows=128         10817 tok/s   (0.56x dense)
+```
+
+For a *real* model the layers are small (512², 2048×512) and tiling turns each into several tiny
+fused-kernel launches whose overhead dominates — so untiled is faster end-to-end. The frontier win
+was specific to one big 2048² layer. **Verdict: `tile_rows=0` (untiled) stays the default**; tiling
+is a *memory* knob (bounds the transient grad to R·in·4 bytes) worth it only for very large layers
+or a tight VRAM budget, not a speed default. Three-way: untiled fast for normal training, tiled for
+large-layer/low-VRAM, strict from-IO only when *zero* grad materialization is mandatory.
+
+## Training speed (the bottom line)
+
+At s512 the counter method now trains at **17.1k tok/s — 0.89× of dense+AdamW (19.2k)**, i.e. ~12%
+slower than dense while using a fraction of the memory (no FP master, no Adam moments, 0.75 B/weight
+state). That is up from ~0.48× before the fused update kernel (the old torch-tile update was the
+wall). This lands inside the memo's "1.1–1.4× dense" target. The big remaining speed lever not yet
+wired into the *training* forward is the int8 Tensor-Core path (×2.05 on forward in isolation).
 
 **Still genuinely open (and now lower priority, given the above):**
 - int8 Tensor-Core forward is correct (`int8_forward_ternary`) but **not yet a built-in training
