@@ -36,6 +36,7 @@ def _recover(rms_mode, scale_rebase, steps=500):
     ("lagged", "eager"),    # one-pass RMS
     ("exact", "lazy"),      # lazy scale rebase
     ("lagged", "lazy"),     # full one-pass update
+    ("proxy", "eager"),     # grad_out-norm proxy denominator
 ])
 def test_one_pass_modes_recover_teacher(rms_mode, scale_rebase):
     mse = _recover(rms_mode, scale_rebase)
