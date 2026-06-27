@@ -67,17 +67,27 @@ single-T4 evidence. Each numerics-changing mode is behind a teacher parity gate 
 so `strict6` / exact-eager / fp / no-decimation stay the default and the memory + dynamics claims
 hold.
 
-**Not yet closed:**
-- the strict PyTorch **update-from-IO** (form grad_w in registers, no materialized dense gradient);
+**Strict update-from-IO — built and validated, and it settles the question.**
+`update_from_io.triton_counter_update_from_io` forms grad_w in-kernel (one program/output-row
+streams M, accumulates the four packed-lane grad_w vectors) and applies the exact RMS+SR update in
+one launch — the dense gradient is never materialized. T4 (`gpu_update_from_io_T4.log`):
+
+```
+correctness   bit-EXACT vs the reference (0 mismatches, all sizes)
+memory        from-IO kernel        +0.00 MiB   (no dense grad_w)
+              cuBLAS grad_w + fused +16.00 MiB  (the [2048x2048] grad_w)
+speed         from-IO one launch    7386 ms     <-- ~860x SLOWER
+              cuBLAS grad_w + fused    8.6 ms
+```
+
+Verdict: zero grad_w materialization is *achievable and correct*, but a hand-written GEMM-in-kernel
+is ~860× slower than cuBLAS — so the 16 MiB transient grad_w per layer is **not worth eliminating**
+at that cost. The practical strict-enough path is cuBLAS grad_w (transient, or per-tile) + the fused
+update kernel. The from-IO kernel stays as the strict-memory bound for memory-constrained regimes.
+
+**Still genuinely open (and now lower priority, given the above):**
 - int8 Tensor-Core forward is correct (`int8_forward_ternary`) but **not yet a built-in training
   forward path** on the layer;
 - `cache_mode` accelerates but **adds live memory** (≈1.75 B/weight at int8) — a speed mode;
 - the int8 **update** correlation re-quantizes x/Δ each call, so it can lose to fp32 cuBLAS until
   it reuses the already-int8-saved activation.
-
-**The next kernel** that closes update-from-IO + cache + memory at once:
-
-    counter_update_from_io_cached(state6_packed, T_cache_int8?, scale, v,
-                                  x_saved_codes_or_x, grad_out, mode={exact,lagged,proxy})
-    # one pass: form grad_w[o,i] = sum_m grad_out[m,o] x[m,i] locally; update RMS/scale/counter;
-    # write packed state6; refresh T_cache only where t actually flipped; never materialize grad_w.
