@@ -15,8 +15,9 @@ Scope / status (verified on a Tesla T4 -- see results/SUMMARY.md, results/KERNEL
     peak is activation-bound, not weight-bound, so these two kernels buy no real memory/speed win.
     They are kept as a reference decode-in-GEMM implementation, not a recommended path.
   * The counter UPDATE: the one kernel that does pay off. memory_native.fused_update collapses
-    the per-element RMS+stochastic-rounding update into one launch -- T4-VERIFIED bit-quantified
-    against a CPU reference and benchmarked at x45.9 on the update / x1.26 on the full step; it is
+    the per-element RMS+stochastic-rounding update into one launch -- T4-VERIFIED against a CPU
+    reference to within one SR quantum (chunked fp reduction, not bit-exact; the training dynamics
+    match) and benchmarked at x45.9 on the update / x1.26 on the full step; it is
     wired into PackedRMSCounterLinear._fused_update. It still CONSUMES a materialized grad_w tile,
     though. The strict-memory analogue of the engine's OpenCL counter_*_fused -- an update kernel
     that takes (state, scale, v, x_or_Q(x), grad_out) and forms grad_w in registers so no dense

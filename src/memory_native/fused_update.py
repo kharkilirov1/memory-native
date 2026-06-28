@@ -5,9 +5,14 @@ rounding tick + carry/remainder + re-encode), today ~15 small torch ops. Untilin
 the launch overhead 2.9x; a single fused kernel collapses the rest into one launch.
 
 The stochastic rounding here is DETERMINISTIC (a hash of seed^element index, like the engine's
-OpenCL kernel), not torch.rand. That makes the update bit-for-bit reproducible, so:
+OpenCL kernel), not torch.rand. That makes the update REPRODUCIBLE (same inputs+seed -> same
+output every run, kernel-vs-kernel bit-for-bit), so:
   * counter_update_hashsr() is a pure-torch reference of exactly what the kernel computes;
-  * triton_counter_update() (the kernel) must match the reference bit-for-bit on GPU.
+  * triton_counter_update() (the kernel) matches the reference up to ONE SR quantum on an O(1)
+    fraction of weights -- NOT bit-for-bit: the kernel reduces the per-row RMS stats (g_sq, grad_s)
+    in BLOCK_I chunks, and fp addition is non-associative, so the denominator differs by ~1e-7 and
+    can tip a stochastic-rounding boundary. The dynamics are identical; individual codes can differ
+    by 1. (To make it truly bit-exact, reduce each row in a single pass.)
 This module ships the verified reference now; the Triton kernel is validated against it on a GPU.
 """
 from __future__ import annotations
@@ -185,8 +190,8 @@ def triton_counter_update(state_packed: torch.Tensor, scale: torch.Tensor, v: to
                           grad_w: torch.Tensor, *, C: int, lr: float, lr_scale: float,
                           rms_beta: float, rms_eps: float, seed: int) -> None:
     """One-launch fused RMS + stochastic-rounding counter update on packed state. Mutates
-    state_packed, scale, v in place. Requires CUDA + triton; bit-for-bit equal to
-    counter_update_hashsr (verify on GPU)."""
+    state_packed, scale, v in place. Requires CUDA + triton; matches counter_update_hashsr up to
+    one SR quantum on an O(1) fraction of weights (chunked fp reduction, not bit-exact)."""
     if not HAS_TRITON:
         raise RuntimeError("triton not available")
     out = scale.numel()
