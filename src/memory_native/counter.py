@@ -152,6 +152,9 @@ class _FusedCounterLinearFn(torch.autograd.Function):
         # per backward; grad_x is always computed, only the update is skipped.
         do_update = module.training and module.update_enabled
         fire = module._decimation_apply() if do_update else False
+        if fire:
+            module._dec_flips_step = 0   # reset per-step flip accumulators (summed across tiles)
+            module._dec_elems_step = 0
         if do_update or not use_kernel:
             for lo in range(0, module.out_features, module.tile_rows):
                 hi = min(lo + module.tile_rows, module.out_features)
@@ -185,9 +188,18 @@ class _FusedCounterLinearFn(torch.autograd.Function):
                     # the counter gradient itself across ranks -> every replica applies the same
                     # update (same SR seed) and the packed state stays bit-identical everywhere.
                     _allreduce_grad_w_(grad_w_i)
+                    # proxy RMS is built from this rank's raw grad_out/x, not the averaged grad_w,
+                    # so it must be reduced too -- otherwise the denominator differs per rank and
+                    # the packed states diverge across ranks. (exact/lagged read g_sq from the
+                    # already-averaged grad_w, so they need no extra reduce.)
+                    if proxy_gsq is not None:
+                        _allreduce_grad_w_(proxy_gsq)
                     if not module._fused_update(lo, hi, grad_w_i):
                         module._update_tile(lo, hi, grad_w_i, t_i, c_i, s_i, proxy_gsq=proxy_gsq)
             if fire:
+                # per-layer flip-rate = flips summed over ALL tiles / elements over all tiles
+                # (a single tile's rate would mis-drive decimation when tile_rows < out_features).
+                module._dec_flip_rate = module._dec_flips_step / max(module._dec_elems_step, 1)
                 module._decimation_observe()
 
         module._outstanding_forward = False
@@ -251,6 +263,8 @@ class CompactCounterLinear(nn.Module):
         self._dec_period = 1
         self._dec_since = 0
         self._dec_flip_rate = 1.0
+        self._dec_flips_step = 0   # flips accumulated across tiles THIS step (per-layer rate)
+        self._dec_elems_step = 0
         self._lr_mult = 1.0
 
         t0 = torch.randint(-1, 2, (out_features, in_features), dtype=torch.int16)
@@ -354,6 +368,16 @@ class CompactCounterLinear(nn.Module):
         if not self.decimate_updates:
             return
         r = self._dec_flip_rate
+        # Data-parallel lockstep guard. Flips are counted on the ALREADY-averaged grad_w (and, in
+        # proxy mode, an averaged proxy_gsq), so the per-rank flip-rate is normally identical and
+        # the period stays synced on its own -> the `if fire` collective is symmetric. This MAX
+        # all-reduce makes that invariant explicit (follow the most-active rank) so the period can
+        # never desync even if a future change reintroduces a per-rank term into the flip count.
+        # Cheap: one scalar, only on a `fire` step (itself symmetric) under world_size>1.
+        if dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1:
+            rt = torch.tensor(float(r), device=self.state.device, dtype=torch.float32)
+            dist.all_reduce(rt, op=dist.ReduceOp.MAX)
+            r = float(rt.item())
         self._dec_period = 1 if r > 1e-3 else 2 if r > 1e-4 else 4 if r > 1e-5 else 8
 
     def _build_t_cache(self) -> None:
@@ -421,7 +445,8 @@ class CompactCounterLinear(nn.Module):
         self._write_rows(lo, hi, new_t, remainder)
         self.scale[lo:hi].copy_(s_new)
         flips = int((new_t != t_i).sum().item())
-        self._dec_flip_rate = flips / max(new_t.numel(), 1)
+        self._dec_flips_step += flips           # accumulate across tiles -> per-layer flip-rate
+        self._dec_elems_step += new_t.numel()
         self.update_events.add_(int((cc != c_i).sum().item()))
         self.weight_flips.add_(flips)
 
@@ -523,6 +548,7 @@ class RMSCounterLinear(CompactCounterLinear):
         self._write_rows(lo, hi, new_t, remainder)
         self.scale[lo:hi].copy_(s_new)
         flips = int((new_t != t_i).sum().item())
-        self._dec_flip_rate = flips / max(new_t.numel(), 1)
+        self._dec_flips_step += flips           # accumulate across tiles -> per-layer flip-rate
+        self._dec_elems_step += new_t.numel()
         self.update_events.add_(int((cc != c_i).sum().item()))
         self.weight_flips.add_(flips)
