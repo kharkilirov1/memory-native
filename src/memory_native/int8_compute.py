@@ -23,13 +23,31 @@ __all__ = ["quantize_int8_cols", "quantize_int8_rows", "int8_mm", "int8_correlat
            "int8_correlation_presaved", "int8_forward_ternary"]
 
 
-def _srq(u: torch.Tensor, stochastic: bool) -> torch.Tensor:
+def _srq(u: torch.Tensor, stochastic: bool, levels: int = 127) -> torch.Tensor:
     if stochastic:
         fl = torch.floor(u)
         q = fl + (torch.rand_like(u) < (u - fl)).to(u.dtype)
     else:
         q = torch.round(u)
-    return q.clamp_(-127, 127).to(torch.int8)
+    return q.clamp_(-levels, levels).to(torch.int8)
+
+
+def quantize_int4_cols(x: torch.Tensor, stochastic: bool = True):
+    """Per-COLUMN symmetric int4 of [M, D] (values in [-7,7], stored in int8). The update flip only
+    needs the SIGN and in-row RANK of G=Delta^T X, not fp32 precision -- so the correlation can run
+    in int4 (INT4 IMMA on Turing+, ~4x fp16 / ~2x int8). Unbiased when stochastic."""
+    amax = x.abs().amax(dim=0, keepdim=True).clamp_min(1e-12)
+    scale = amax / 7.0
+    return _srq(x / scale, stochastic, levels=7), scale
+
+
+def int4_correlation(delta: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+    """Unbiased int4 estimate of the update correlation G = delta^T x. On CPU the int4 GEMM is
+    emulated with int32 matmul (correctness); on a GPU it maps to the INT4 Tensor Cores."""
+    dq, da = quantize_int4_cols(delta)
+    xq, xa = quantize_int4_cols(x)
+    acc = (dq.t().to(torch.int32) @ xq.to(torch.int32)).to(torch.float32)
+    return acc * da.t() * xa
 
 
 def quantize_int8_cols(x: torch.Tensor, stochastic: bool = True):

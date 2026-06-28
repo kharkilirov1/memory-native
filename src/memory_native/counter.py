@@ -168,6 +168,9 @@ class _FusedCounterLinearFn(torch.autograd.Function):
                     elif module.update_compute == "int8":
                         from .int8_compute import int8_correlation
                         grad_w_i = int8_correlation(go2[:, lo:hi], x2)
+                    elif module.update_compute == "int4":
+                        from .int8_compute import int4_correlation
+                        grad_w_i = int4_correlation(go2[:, lo:hi], x2)
                     else:
                         grad_w_i = (go2[:, lo:hi].transpose(0, 1) @ x2).float()
                     # proxy RMS: take the row second-moment from grad_out norms (* activation
@@ -268,8 +271,8 @@ class CompactCounterLinear(nn.Module):
         # (not truth, not optimizer state): rebuilt from the state, refreshed on visible flips.
         if cache_mode not in {"none", "fp16", "int8"}:
             raise ValueError("cache_mode must be 'none', 'fp16' or 'int8'")
-        if update_compute not in {"fp", "int8"}:
-            raise ValueError("update_compute must be 'fp' or 'int8'")
+        if update_compute not in {"fp", "int8", "int4"}:
+            raise ValueError("update_compute must be 'fp', 'int8' or 'int4'")
         if forward_compute not in {"fp", "int8"}:
             raise ValueError("forward_compute must be 'fp' or 'int8'")
         # "int8" forms grad_w with an unbiased int8 GEMM estimator (Tensor Cores on CUDA) instead
