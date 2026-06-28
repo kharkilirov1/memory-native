@@ -25,8 +25,11 @@ from memory_native.stack_linear import StackCounterLinear
 torch.manual_seed(0)
 torch.set_num_threads(4)
 DEV = "cpu"
-D, NL, NH, BLK = 128, 3, 4, 64
-STEPS, BATCH, EVAL = 800, 32, 60
+# Small enough to finish on CPU (the 2:4 group-counter does a Python decode+mask+update per linear
+# per step, so the stack arm is the bottleneck). The dense/counter/stack comparison stays fair as
+# long as all arms share the config; absolute losses differ from the larger config.
+D, NL, NH, BLK = 96, 2, 4, 48
+STEPS, BATCH, EVAL = 400, 32, 40
 
 
 def make_linear(kind, i, o, gain=1.0):
