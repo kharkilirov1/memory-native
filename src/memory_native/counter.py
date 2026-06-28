@@ -3,8 +3,13 @@
 A weight is a per-synapse finite-state automaton: a ternary visible weight t in {-1,0,+1}
 plus a residual counter c, packed into one small state. The optimizer state lives *inside*
 that state (plus a per-row scale and a per-row RMS second moment), so there is no FP master
-weight and no per-weight Adam moment. The update is fused into the layer's backward at row-
-tile granularity, so a full-model gradient buffer is never retained.
+weight and no per-weight Adam moment. The update is fused into the layer's backward, so no
+full-MODEL gradient buffer is ever retained (only one layer's grad_w is live at a time).
+NOTE: by default (tile_rows=0 -> out_features) that one layer's grad_w is still a full
+[out,in] tile, materialized transiently and freed after the update; tile_rows>0 bounds it to
+[R,in], and the Triton update kernel forms it in registers (no dense grad_w at all). The
+FP-master/Adam-free property holds in every case; the "no dense grad_w" property is the
+kernel/tiled path, not the dense-PyTorch default.
 
 This is pure PyTorch: it runs on CPU and CUDA with stock torch, no custom engine. It is a
 *correctness / dynamics* implementation — it decodes states to ordinary tensors around the
@@ -185,8 +190,16 @@ class _FusedCounterLinearFn(torch.autograd.Function):
                         proxy_gsq = go2[:, lo:hi].pow(2).sum(dim=0, keepdim=True).t() * x2.pow(2).mean()
                     # Data-parallel: the counter optimizer lives in the state and is applied
                     # in-place here, so there is no Parameter .grad for DDP to all-reduce. Sync
-                    # the counter gradient itself across ranks -> every replica applies the same
-                    # update (same SR seed) and the packed state stays bit-identical everywhere.
+                    # the counter gradient itself across ranks so every replica applies the same
+                    # update. Packed states then stay bit-identical -- VERIFIED empirically with
+                    # different data per rank and no per-step reseed (test_ddp_decimation; even
+                    # act_save_bits>0 gives 0 differing bytes). This holds because (a) grad_w is
+                    # averaged here, and (b) the torch SR (stochastic_round -> global torch.rand)
+                    # draws a SHAPE-determined, rank-symmetric number of samples each step, so the
+                    # global RNG stays phase-aligned. It is therefore CONDITIONAL: a data-dependent
+                    # random op (e.g. dropout with per-rank masks) would desync the torch.rand
+                    # stream and break bit-identity silently. The Triton kernel's hash-SR path
+                    # (per-element deterministic, no global RNG) is unconditionally DDP-safe.
                     _allreduce_grad_w_(grad_w_i)
                     # proxy RMS is built from this rank's raw grad_out/x, not the averaged grad_w,
                     # so it must be reduced too -- otherwise the denominator differs per rank and
@@ -352,7 +365,13 @@ class CompactCounterLinear(nn.Module):
     def _decimation_apply(self) -> bool:
         """Advance the per-layer decimation clock; return whether to apply the update this step.
         Off (default) -> always fire at lr*1. On -> fire every _dec_period steps with lr scaled by
-        the period (sum of r similar grads ~ r*grad)."""
+        the period (sum of r similar grads ~ r*grad).
+
+        BIAS NOTE: dropping r-1 gradients and applying r*lr on the firing step is unbiased ONLY
+        under stationarity (E[G] constant over the window); under non-stationary grads it is
+        biased. Also the RMS-EMA (v) sees one update per period instead of per step, so its
+        effective time-constant silently lengthens with _dec_period. Tested only on a stationary
+        teacher, where both effects are invisible. Off by default; opt-in for near-stable layers."""
         if not self.decimate_updates:
             self._lr_mult = 1.0
             return True

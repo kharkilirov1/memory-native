@@ -42,6 +42,16 @@ per layer (capacity loss), and the merge folds an fp residual through ternary *a
 that would justify the stack **cannot be closed without the sparse-Tensor-Core kernel and a real-
 scale run**; until then, the stack is a validated *composition mechanism*, not a recommended path.
 
+## Update — merge consistency fix (review round 2)
+
+The witness table above PREDATES a fix: the merge was folding the UNMASKED base weight while the
+forward used the 2:4-MASKED weight, so the residual A,B (trained against the masked forward) were
+folded into a fuller base and re-masked — wasting residual capacity. Fixed to fold the masked
+`(s·T)·vis + A@Bᵀ`. On a teacher this dropped MSE 0.188 → **0.113** (~40%). The GPT witness (+31% vs
+counter) was measured before the fix, so it is now a **pessimistic upper bound**; a re-run on GPU
+(queued) will give the corrected gap. The qualitative conclusion (composes, but 2:4 + lossy merge
+cost quality vs plain counter; speedup kernel-gated) stands.
+
 ## Module / tests
 `src/memory_native/stack_linear.py`; `tests/test_stack_linear.py` (5 pass): only-A,B-are-fp,
 base-stays-2:4, merge-fires-on-schedule, rank-0-is-plain-group-counter, recovers-a-teacher.

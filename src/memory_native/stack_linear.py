@@ -78,7 +78,12 @@ class StackCounterLinear(nn.Module):
         b = self.base
         C = b.C
         t, c = b._decode()
-        w = b.scale * t + (b.scale * c / C) + self.A @ self.B.t()      # effective weight (+ residual)
+        # Fold the weight the forward ACTUALLY used: the 2:4-MASKED visible base + the residual.
+        # (Earlier this used the UNMASKED b.scale*t, so A,B -- trained against the masked forward
+        # base(x)=(s*t)*vis + A@B^T -- were folded into a different, fuller base and then re-masked,
+        # a mismatch that wasted residual capacity. c is omitted: the frozen base's forward uses only
+        # the visible ternary, never c, so including it would re-introduce the same inconsistency.)
+        w = (b.scale * t) * b.vis + self.A @ self.B.t()              # masked effective weight
         scale_new = w.abs().mean(dim=1, keepdim=True).clamp_(1e-5, 10.0)
         q = w / scale_new
         t_new = q.round().clamp_(-1, 1)
