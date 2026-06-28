@@ -26,7 +26,10 @@ from memory_native.moe_ffn import CounterMoEFFN
 torch.manual_seed(0)
 DEV = "cpu"
 D, NL, NH, BLK = 128, 3, 4, 64
-STEPS, BATCH, EVAL = 1500, 32, 80
+# MoE arms run E experts x 2 counter layers x NL blocks in a Python gather loop, so they are much
+# slower per step than a dense FFN. Keep the step count modest so the CPU witness finishes; the
+# comparison (val-loss vs active-compute at equal active MACs) is fair as long as all arms match.
+STEPS, BATCH, EVAL = 500, 32, 40
 
 
 class DenseFFN(nn.Module):
@@ -163,13 +166,12 @@ def main():
     # counter-MoE sweep: E (capacity) grows; a token still visits only top_k experts so the expert
     # active MACs stay ~ the dense reference (h = 4d/top_k). aux loss on to avoid routing collapse.
     AUX = 1e-2
-    for E in (4, 8, 16):
-        for k in (1, 2):
-            run(f"counter-MoE E={E} k={k}",
-                lambda E=E, k=k: CounterMoEFFN(D, n_experts=E, top_k=k, C=11, lr=0.04,
-                                               lr_scale=2e-4, aux_loss_weight=AUX),
-                train, val, vocab, aux_weight=AUX)
-        print()
+    for E in (4, 8, 16):                          # capacity sweep at top_k=2 (the gate's point)
+        run(f"counter-MoE E={E} k=2",
+            lambda E=E: CounterMoEFFN(D, n_experts=E, top_k=2, C=11, lr=0.04,
+                                      lr_scale=2e-4, aux_loss_weight=AUX),
+            train, val, vocab, aux_weight=AUX)
+    print()
 
     print("GATE (M4): counter-MoE reaches <= dense val-loss at <= dense active MACs, capacity (E)")
     print(f"           grows persistent bytes without raising expert active compute, and routing")
