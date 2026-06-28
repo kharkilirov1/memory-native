@@ -54,3 +54,26 @@ better at toy scale.
   MACs (not wall-clock) are the FLOPs-to-loss signal. A GPU gather/scatter kernel is future work.
 - Single memory head; multi-head retrieval and a real-corpus / longer-step sweep are the next gate
   to test the scaling claim properly (default OFF; opt-in like every numerics-changing mode).
+
+## Scaling re-test — the non-monotonicity is a TOY-DATA artifact (`scripts/scaling_retest.py`)
+
+To check whether E=65536 was merely undertrained, the E-sweep was re-run at 1500 / 4000 / 8000 steps:
+
+| steps | dense FFN | mem E=4096 | mem E=16384 | mem E=65536 |
+|---|---|---|---|---|
+| 1500 | 0.959 | 0.965 | 0.960 | 0.963 |
+| 4000 | 1.226 | 0.961 | 0.965 | 0.971 |
+| 8000 | 1.800 | … | … | … |
+
+**More steps does NOT help — it overfits.** The dense FFN val-loss *rises* 0.959 → 1.226 → 1.800 as
+steps grow: the tiny synthetic corpus (120k chars, vocab 30) is memorized. So "more training" can't
+test the capacity-scaling claim — the data saturates first. The M1 non-monotonicity at 1500 steps is
+a **small-data / overfit artifact, not a real capacity ceiling**.
+
+**Side finding in M1's favour:** the **memory-FFN barely overfits** — it holds val ~0.96–0.97 while
+the dense FFN blows up to 1.80. The retrieval memory regularizes far better than a dense layer. This
+is a point *for* the architecture that 1500 steps didn't reveal.
+
+**Honest conclusion:** the capacity-scaling claim is **inconclusive on toy data** and needs a **real
+corpus** (FineWeb/shakespeare, many tokens) — not more steps. That is the proper Phase-2 gate. What
+IS established: retrieval matches dense at ~5× less active compute, and resists overfitting.
