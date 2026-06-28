@@ -112,7 +112,13 @@ def int8_correlation_presaved(delta: torch.Tensor, qx_int8: torch.Tensor,
         G_ok = sum_m delta_mo (ax_m qx_mk) = sum_m (delta_mo ax_m) qx_mk.
     So scale delta's rows by ax, quantize that per output column, and int8-GEMM against the saved
     qx -- no re-quantization of X (the part that made int8_correlation lose to cuBLAS).
-    delta [M,N], qx_int8 [M,K], ax_row [M,1] -> G [N,K]. Unbiased (two independent quant stages)."""
+    delta [M,N], qx_int8 [M,K], ax_row [M,1] -> G [N,K].
+
+    Bias note: this is unbiased w.r.t. the SAVED activation X_hat = ax*qx, not the original X --
+    only delta is re-randomized per call, qx is frozen. So a SINGLE step's estimate carries the
+    forward's activation-quant error (a per-step bias). It is unbiased OVER TRAINING because the
+    forward re-saves X stochastically each step (a fresh qx), and the counter's error-feedback
+    accumulates the residual. 'Unbiased' here means in-expectation-over-steps, not per-step."""
     dq, db = quantize_int8_cols(delta * ax_row)   # fold row scale into delta, then per-N-col quant
     acc = int8_mm(dq.t().contiguous(), qx_int8)   # [N,K] int32 -- qx is the SAVED int8 activation
     return acc.to(torch.float32) * db.t()         # [N,K] * [N,1]

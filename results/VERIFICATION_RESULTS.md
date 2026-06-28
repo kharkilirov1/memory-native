@@ -16,7 +16,7 @@ stated as plainly as the passes.
 | M6 | int4-wgrad | per-step (wgrad) | **math PASS / HW rejected on T4** (Amdahl) | `INT4_WGRAD.md` |
 | M-STACK | 2:4 + slow-fast compose | per-step (integration) | **PARTIAL** — compose mechanically (train, no divergence) but at a quality cost (+31% vs plain counter); speedup unmeasured (kernel-gated) | `MSTACK.md` |
 | M9 | Multi-Token Prediction | tokens-to-loss | **IMPLEMENTED / toy-scale FAIL** — n_pred=1 exact parity, unit-correct (8 tests); but toy witness REGRESSES (tied small-embedding heads pull the next-token head: +0.57 at n_pred=2, +1.13 at n_pred=4). Real gains need scale + untied heads | `mtp.py` |
-| M10 | Mixture-of-Depths | FLOPs/token | **IMPLEMENTED** — top-capacity routing, capacity=1.0 exact parity, skipped tokens bit-identical; witness on GPU | `mod.py` |
+| M10 | Mixture-of-Depths | FLOPs/token | **IMPLEMENTED / UNMEASURED** — capacity=1.0 exact parity + skipped-token identity unit-tested, but NO witness number yet, and the witness has two confounds (non-causal top-k routing; attention causality among gathered tokens) to fix before it measures anything | `mod.py` |
 | — | Triton/CUDA kernels | (correctness) | **PASS on T4** — all kernel tests execute & pass (closed the CI gap) | `GPU_KERNEL_VERIFICATION.md` |
 | M8 | prototype-stat | wgrad | not attempted — stays behind its bias-gate (biased; M1 is strictly better) | — |
 | M11 | int4-IMMA kernel | M6 realization | Blackwell-only — not buildable/runnable on T4; spec only | — |
@@ -61,6 +61,38 @@ The core method is deployed. Deploying the *new levers* is gated, in order:
 
 Phase 3 (int4-IMMA on Blackwell, native Metal) is hardware-gated and out of scope for this
 environment.
+
+## Review round 2 — external findings & dispositions
+
+A second external review raised 9 points. Verified each; dispositions (honest, evidence-based):
+
+- **[HIGH] DDP torch-path bit-identity overstated.** Partly refuted, partly valid. The stated
+  mechanism (RNG streams diverge with different data → silent divergence) is **empirically false**
+  here: a 2-rank gloo run with different data per rank, NO per-step reseed, even act_save_bits=8,
+  gives **0 differing bytes** (the averaged grad_w + shape-symmetric rand draws keep torch.rand
+  phase-aligned). BUT the invariant is genuinely **fragile** (a data-dependent random op like
+  dropout would break it), and the docstring claimed it unconditionally. **Fixed** the docstring to
+  state the exact condition and that the Triton hash-SR path is the unconditionally-safe one.
+- **[MED] "dense grad_w never exists" overstated.** Valid: default tile_rows=0→out_features forms a
+  full [out,in] grad_w tile. **Fixed** the docstring — no full-MODEL buffer is retained (one layer
+  at a time), but the per-layer tile is full-size by default; "no dense grad_w" is the kernel/tiled
+  path only. FP-master/Adam-free holds regardless.
+- **[MED] StackCounterLinear merge used the unmasked weight while forward is masked.** Valid and real
+  — **Fixed**: merge now folds the masked `(s·T)·vis + A@Bᵀ` (what the forward actually computed).
+  Teacher MSE improved 0.188 → **0.113** (~40%), confirming the wasted-residual-capacity diagnosis.
+- **[MED] MoD witness confounded + never run.** Valid: M10 has **no measured number** and the witness
+  has two confounds (non-causal top-k; attention causality among gathered tokens). **Recorded** —
+  M10 downgraded to IMPLEMENTED/UNMEASURED above; the witness needs a causal-safe redesign.
+- **[MED] Decimation unbiased only under stationarity; RMS time-constant drifts with period.** Valid.
+  **Documented** in `_decimation_apply` (off by default; tested only on a stationary teacher).
+- **[MED/HIGH] C++/OpenCL engine: memory-truth gate instrumental, OpenCL fused unverified, RX580
+  numbers unsupported.** These concern the separate C++/OpenCL engine at the repo root
+  (`src/runtime/*.cpp`, `kernels/*.cl`), NOT this pytorch package. Not audited or fixed here — they
+  are plausible and warrant a separate engine review; the pytorch package makes none of those claims.
+- **[LOW] int8-presaved per-step bias.** Valid. **Documented** in `int8_correlation_presaved`:
+  unbiased over training (re-saved stochastically each step), biased within a single step.
+- **[LOW] int4 "VALIDATED" = CPU emulation + int8 Amdahl projection.** Already honest in
+  `INT4_WGRAD.md` prose; the scoreboard label reads "math PASS / HW rejected on T4" to avoid overread.
 
 ## Test status
 93 tests pass on CPU (10 GPU-gated skipped); all kernel tests pass on T4. New since the review:
