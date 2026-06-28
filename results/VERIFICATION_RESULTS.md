@@ -15,7 +15,7 @@ stated as plainly as the passes.
 | M5 | int8 forward | per-step | **PASS** (prior) — ×2.05 isolated, T4-verified | `ACCELERATION.md` |
 | M6 | int4-wgrad | per-step (wgrad) | **math PASS / HW rejected on T4** (Amdahl) | `INT4_WGRAD.md` |
 | M-STACK | 2:4 + slow-fast compose | per-step (integration) | **PARTIAL** — compose mechanically (train, no divergence) but at a quality cost (+31% vs plain counter); speedup unmeasured (kernel-gated) | `MSTACK.md` |
-| M9 | Multi-Token Prediction | tokens-to-loss | **IMPLEMENTED** — k-head predict, n_pred=1 exact parity, unit-correct; training witness on GPU (CPU too slow) | `mtp.py` |
+| M9 | Multi-Token Prediction | tokens-to-loss | **IMPLEMENTED / toy-scale FAIL** — n_pred=1 exact parity, unit-correct (8 tests); but toy witness REGRESSES (tied small-embedding heads pull the next-token head: +0.57 at n_pred=2, +1.13 at n_pred=4). Real gains need scale + untied heads | `mtp.py` |
 | M10 | Mixture-of-Depths | FLOPs/token | **IMPLEMENTED** — top-capacity routing, capacity=1.0 exact parity, skipped tokens bit-identical; witness on GPU | `mod.py` |
 | — | Triton/CUDA kernels | (correctness) | **PASS on T4** — all kernel tests execute & pass (closed the CI gap) | `GPU_KERNEL_VERIFICATION.md` |
 | M8 | prototype-stat | wgrad | not attempted — stays behind its bias-gate (biased; M1 is strictly better) | — |
