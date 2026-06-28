@@ -125,7 +125,7 @@ class SlowFastCounterLinear(nn.Module):
     # -- merge -----------------------------------------------------------------
     @torch.no_grad()
     def merge(self) -> None:
-        """Fold the fast residual A@B^T into the base counter state, then reset A,B<-0.
+        """Fold the fast residual A@B^T into the base counter state, then restart A,B at parity.
 
         Re-encodes W_merged = s*T + A@B^T directly into (ternary T, residual counter c, per-row
         scale s): per-row absmean scale (BitNet-style, the best ternary scale), ternary sign by
