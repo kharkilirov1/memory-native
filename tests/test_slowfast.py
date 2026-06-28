@@ -58,8 +58,8 @@ def test_teacher_recovery_within_2x_of_exact():
 
     torch.manual_seed(0)
     sf = SlowFastCounterLinear(n, n, rank=16, merge_every=16, C=C, lr=0.02, lr_scale=2e-4,
-                               init_gain=ts / base_scale).train()
-    opt = torch.optim.SGD(sf.fast_parameters(), lr=0.05)
+                               init_gain=ts / base_scale, fast_init=0.2).train()
+    opt = torch.optim.SGD(sf.fast_parameters(), lr=2.0)
     for _ in range(steps):
         opt.zero_grad()
         loss = (sf(x) - y).pow(2).mean()
@@ -82,8 +82,8 @@ def test_merge_does_not_spike_loss():
     torch.manual_seed(0)
     K = 8
     sf = SlowFastCounterLinear(n, n, rank=16, merge_every=K, C=C, lr=0.02, lr_scale=2e-4,
-                               init_gain=ts / base_scale).train()
-    opt = torch.optim.SGD(sf.fast_parameters(), lr=0.05)
+                               init_gain=ts / base_scale, fast_init=0.2).train()
+    opt = torch.optim.SGD(sf.fast_parameters(), lr=2.0)
 
     worst = 0.0
     for step in range(1, 401):
