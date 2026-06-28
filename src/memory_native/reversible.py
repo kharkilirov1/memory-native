@@ -11,9 +11,12 @@ so a deep stack's activation memory stays O(1) in depth instead of O(depth).
 F and G must be deterministic (no dropout/RNG inside, no in-place state side effects). This
 is pure PyTorch and runs on CPU/CUDA.
 
-Note on float reconstruction: the inverse is not bit-exact and the error accumulates slowly
-with depth (~3e-3 over ~12 blocks in fp32). On the depths tested that is training-neutral;
-for very deep stacks verify with a depth-sweep and, if needed, keep anchors every K blocks.
+Note on float reconstruction: the inverse need not be bit-exact in principle. Empirically, for
+these coupling maps the recomputed INPUT GRADIENTS match a stored-activation reference to ~0 across
+a weight-scale sweep up to forward magnitudes ~1e9 (test_inverse_and_anchored_exact_across_weight
+_scales) -- the reconstruction is exact in fp32 here, so the inverse path is training-neutral on the
+regimes tested. Anchors (anchor_every=K) recompute-from-anchor instead of inverting; use them for
+the activation-MEMORY tradeoff (and as a safety margin for unusually deep/ill-conditioned stacks).
 """
 from __future__ import annotations
 

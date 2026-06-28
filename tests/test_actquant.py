@@ -25,9 +25,12 @@ def test_pack_int4_roundtrip_and_halves_bytes():
 def test_quantizer_is_unbiased():
     torch.manual_seed(0)
     x = torch.randn(500, 32)
-    # average many stochastic quantizations -> should converge to x (E[Q(x)|x]=x)
-    avg = torch.stack([stochastic_quantize(x, 4) for _ in range(600)]).mean(0)
-    assert (avg - x).abs().mean().item() < 0.02
+    # average many stochastic quantizations -> should converge to x (E[Q(x)|x]=x). 2000 draws put
+    # the Monte-Carlo noise floor at ~2.3e-3, so a 5e-3 bound actually bites: a small systematic
+    # bias (e.g. a rounding-direction or clamp error) would push this well past it. (The old 0.02
+    # bound was ~5x the noise floor and would have passed a biased quantizer.)
+    avg = torch.stack([stochastic_quantize(x, 4) for _ in range(2000)]).mean(0)
+    assert (avg - x).abs().mean().item() < 5e-3
 
 
 def test_codes_fit_bit_width():

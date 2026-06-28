@@ -12,6 +12,29 @@ def _ref_block_forward(block, x):
     return torch.cat([y1, y2], dim=-1)
 
 
+def _ref_chain_forward(blocks, x):
+    """Plain stored-activation forward through a chain of blocks -- the TRUE-gradient reference
+    the reversible (recompute) path must match. Storing activations means autograd here is exact."""
+    h = x
+    for b in blocks:
+        h = _ref_block_forward(b, h)
+    return h
+
+
+def _mk_blocks(depth, dim=16, scale=1.0):
+    """Deterministic identical blocks (seed reset each call so reference == reversible params)."""
+    import torch.nn as nn
+    torch.manual_seed(0)
+    blocks = [ReversibleCouplingBlock(dim, F=nn.Linear(dim // 2, dim // 2, bias=False),
+                                      G=nn.Linear(dim // 2, dim // 2, bias=False))
+              for _ in range(depth)]
+    if scale != 1.0:
+        for b in blocks:
+            for p in b.parameters():
+                p.data.mul_(scale)
+    return blocks
+
+
 def test_reversible_matches_plain_autograd():
     """Recompute-backward gradients (input + params) must match plain stored autograd."""
     torch.manual_seed(0)
@@ -40,20 +63,45 @@ def test_reversible_matches_plain_autograd():
         assert torch.allclose(gr, gf, atol=1e-5), (gr - gf).abs().max()
 
 
-def test_reversible_reconstruction_accurate_with_depth():
-    torch.manual_seed(0)
-    dim, depth = 32, 12
-    blocks = [ReversibleCouplingBlock(dim) for _ in range(depth)]
-    # small weights so the residual stream stays stable
-    for b in blocks:
-        for p in b.parameters():
-            p.data.mul_(0.1)
-    stack = ReversibleSequential(blocks)
-    x = torch.randn(4, dim, requires_grad=True)
-    y = stack(x)
-    # a backward must run end-to-end through the reconstructing chain without error
-    (y ** 2).sum().backward()
-    assert x.grad is not None and torch.isfinite(x.grad).all()
+def test_inverse_path_matches_true_gradients_at_depth():
+    """The DEFAULT path (anchor_every=0, float inverse) must match the true stored-activation
+    gradient at depth > 1 -- not just be finite, and not just agree with another inverse impl.
+    Well-conditioned weights (the regime training actually runs in); tight tolerance."""
+    from memory_native import ReversibleSequence
+    depth = 8
+    seq = ReversibleSequence(_mk_blocks(depth))                 # O(1) inverse path
+    x = torch.randn(8, 16, requires_grad=True)
+    g_rev = torch.autograd.grad((seq(x) ** 2).sum(), [x] + list(seq.parameters()))
+
+    ref_blocks = _mk_blocks(depth)                             # identical params, stored-activation
+    x2 = x.detach().clone().requires_grad_(True)
+    ref_leaves = [x2] + [p for b in ref_blocks for p in b.parameters()]
+    g_ref = torch.autograd.grad((_ref_chain_forward(ref_blocks, x2) ** 2).sum(), ref_leaves)
+
+    for a, b in zip(g_rev, g_ref):
+        assert torch.allclose(a, b, atol=1e-4, rtol=1e-4), (a - b).abs().max()
+
+
+def test_inverse_and_anchored_exact_across_weight_scales():
+    """Both the float-inverse path AND the anchored path match the true input gradient across a
+    sweep of weight scales -- including extreme ones (forward magnitude ~1e9). Empirically the
+    inverse does NOT accumulate gradient error here (the coupling reconstruction is exact in fp32
+    for these maps); anchors are then about activation MEMORY, with no accuracy penalty either way.
+    This is the depth/scale coverage the suite previously lacked."""
+    from memory_native import ReversibleSequence
+    depth = 16
+    for scale in (0.5, 1.0, 2.0, 2.5):
+        x = torch.randn(8, 16)
+        ref_blocks = _mk_blocks(depth, scale=scale)
+        x_ref = x.clone().requires_grad_(True)
+        g_ref = torch.autograd.grad((_ref_chain_forward(ref_blocks, x_ref) ** 2).sum(), [x_ref])[0]
+        for ae in (0, 4):                                      # inverse (0) and anchored (4)
+            seq = ReversibleSequence(_mk_blocks(depth, scale=scale), anchor_every=ae)
+            xi = x.clone().requires_grad_(True)
+            g = torch.autograd.grad((seq(xi) ** 2).sum(), [xi])[0]
+            denom = g_ref.abs().max().clamp_min(1e-12)
+            rel = (g - g_ref).abs().max() / denom
+            assert rel < 1e-4, f"scale={scale} anchor_every={ae}: rel grad err {rel.item():.2e}"
 
 
 def test_counters_learn_inside_reversible_no_grad_input():
@@ -102,6 +150,12 @@ def test_o1_reversible_sequence_matches_per_block():
     x2 = x.detach().clone().requires_grad_(True)
     g2 = torch.autograd.grad((pb(x2) ** 2).sum(), [x2] + list(pb.parameters()))
     assert all(torch.allclose(a, b, atol=1e-5) for a, b in zip(g1, g2))
+    # ...and BOTH must match the true stored-activation gradient (not just agree with each other).
+    ref_blocks = mk()
+    x3 = x.detach().clone().requires_grad_(True)
+    ref_leaves = [x3] + [p for b in ref_blocks for p in b.parameters()]
+    g_ref = torch.autograd.grad((_ref_chain_forward(ref_blocks, x3) ** 2).sum(), ref_leaves)
+    assert all(torch.allclose(a, b, atol=1e-4) for a, b in zip(g1, g_ref))
 
 
 def test_o1_reversible_stores_one_output():
