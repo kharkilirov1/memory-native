@@ -31,6 +31,7 @@ from .fused_qkv import CounterQKVLinear
 from .memory_ffn import CounterMemoryFFN, CounterValueMemory
 from .moe_ffn import CounterMoEFFN
 from .group_counter import GroupCounterLinear
+from .stack_linear import StackCounterLinear
 from .int8_compute import (
     int4_correlation,
     int8_correlation,
@@ -76,6 +77,8 @@ __all__ = [
     "CounterMemoryFFN",
     "CounterValueMemory",
     "CounterMoEFFN",
+    "GroupCounterLinear",
+    "StackCounterLinear",
     "int4_correlation",
     "int8_correlation",
     "int8_correlation_presaved",
