@@ -29,6 +29,8 @@ from .models import CONFIGS, GPT, GPTConfig
 from .reversible_gpt import ReversibleGPT
 from .fused_qkv import CounterQKVLinear
 from .memory_ffn import CounterMemoryFFN, CounterValueMemory
+from .moe_ffn import CounterMoEFFN
+from .group_counter import GroupCounterLinear
 from .int8_compute import (
     int4_correlation,
     int8_correlation,
@@ -73,6 +75,7 @@ __all__ = [
     "CounterQKVLinear",
     "CounterMemoryFFN",
     "CounterValueMemory",
+    "CounterMoEFFN",
     "int4_correlation",
     "int8_correlation",
     "int8_correlation_presaved",
