@@ -22,11 +22,13 @@ from .counter import (
 )
 from .reversible import ReversibleCouplingBlock, ReversibleSequence, ReversibleSequential
 from .packed import PackedRMSCounterLinear, pack_codes, unpack_codes
+from .slowfast import SlowFastCounterLinear
 from .triton_counter import HAS_TRITON, TritonCounterLinear, triton_decode_matmul, triton_grad_x
 from .baselines import TernaryQATLinear, make_linear
 from .models import CONFIGS, GPT, GPTConfig
 from .reversible_gpt import ReversibleGPT
 from .fused_qkv import CounterQKVLinear
+from .memory_ffn import CounterMemoryFFN, CounterValueMemory
 from .int8_compute import (
     int4_correlation,
     int8_correlation,
@@ -49,6 +51,7 @@ __all__ = [
     "C_DEFAULT",
     "CompactCounterLinear",
     "RMSCounterLinear",
+    "SlowFastCounterLinear",
     "PackedRMSCounterLinear",
     "pack_codes",
     "unpack_codes",
@@ -68,6 +71,8 @@ __all__ = [
     "GPT",
     "ReversibleGPT",
     "CounterQKVLinear",
+    "CounterMemoryFFN",
+    "CounterValueMemory",
     "int4_correlation",
     "int8_correlation",
     "int8_correlation_presaved",
