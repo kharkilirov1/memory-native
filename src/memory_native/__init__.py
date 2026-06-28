@@ -28,10 +28,12 @@ from .models import CONFIGS, GPT, GPTConfig
 from .reversible_gpt import ReversibleGPT
 from .fused_qkv import CounterQKVLinear
 from .int8_compute import (
+    int4_correlation,
     int8_correlation,
     int8_correlation_presaved,
     int8_forward_ternary,
     int8_mm,
+    quantize_int4_cols,
     quantize_int8_cols,
     quantize_int8_rows,
 )
@@ -66,10 +68,12 @@ __all__ = [
     "GPT",
     "ReversibleGPT",
     "CounterQKVLinear",
+    "int4_correlation",
     "int8_correlation",
     "int8_correlation_presaved",
     "int8_forward_ternary",
     "int8_mm",
+    "quantize_int4_cols",
     "quantize_int8_cols",
     "quantize_int8_rows",
     "GPTConfig",
