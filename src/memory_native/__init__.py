@@ -30,8 +30,10 @@ from .reversible_gpt import ReversibleGPT
 from .fused_qkv import CounterQKVLinear
 from .memory_ffn import CounterMemoryFFN, CounterValueMemory
 from .moe_ffn import CounterMoEFFN
+from .mtp import MultiTokenHead, MTPGPT, mtp_loss, shift_targets
 from .group_counter import GroupCounterLinear
 from .stack_linear import StackCounterLinear
+from .mod import MoDBlock
 from .int8_compute import (
     int4_correlation,
     int8_correlation,
@@ -77,8 +79,13 @@ __all__ = [
     "CounterMemoryFFN",
     "CounterValueMemory",
     "CounterMoEFFN",
+    "MultiTokenHead",
+    "MTPGPT",
+    "mtp_loss",
+    "shift_targets",
     "GroupCounterLinear",
     "StackCounterLinear",
+    "MoDBlock",
     "int4_correlation",
     "int8_correlation",
     "int8_correlation_presaved",
