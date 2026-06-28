@@ -199,3 +199,8 @@ class CounterMemoryFFN(nn.Module):
                 + 2 * self.m * self.dk        # sub-key scores (the sqrt(E) term)
                 + ks * ks                      # candidate combine
                 + self.k * self.d)            # value readout
+
+    def persistent_bytes(self) -> int:
+        """Counter value table (the bulk) + the small fp router (query proj + the two sub-key sets)."""
+        router = (self.query.weight.numel() + self.k1.numel() + self.k2.numel()) * 4
+        return self.values.persistent_bytes() + router
