@@ -15,10 +15,18 @@ stated as plainly as the passes.
 | M5 | int8 forward | per-step | **PASS** (prior) — ×2.05 isolated, T4-verified | `ACCELERATION.md` |
 | M6 | int4-wgrad | per-step (wgrad) | **math PASS / HW rejected on T4** (Amdahl) | `INT4_WGRAD.md` |
 | M-STACK | 2:4 + slow-fast compose | per-step (integration) | **PARTIAL** — compose mechanically (train, no divergence) but at a quality cost (+31% vs plain counter); speedup unmeasured (kernel-gated) | `MSTACK.md` |
+| M9 | Multi-Token Prediction | tokens-to-loss | **IMPLEMENTED** — k-head predict, n_pred=1 exact parity, unit-correct; training witness on GPU (CPU too slow) | `mtp.py` |
+| M10 | Mixture-of-Depths | FLOPs/token | **IMPLEMENTED** — top-capacity routing, capacity=1.0 exact parity, skipped tokens bit-identical; witness on GPU | `mod.py` |
 | — | Triton/CUDA kernels | (correctness) | **PASS on T4** — all kernel tests execute & pass (closed the CI gap) | `GPU_KERNEL_VERIFICATION.md` |
-| M8 | prototype-stat | wgrad | not attempted — stays behind its bias-gate | — |
-| M11 | int4-IMMA kernel | M6 realization | Blackwell-only, not built | — |
-| M12 | Metal port | energy | hardware-gated, out of scope here | — |
+| M8 | prototype-stat | wgrad | not attempted — stays behind its bias-gate (biased; M1 is strictly better) | — |
+| M11 | int4-IMMA kernel | M6 realization | Blackwell-only — not buildable/runnable on T4; spec only | — |
+| M12 | Metal port | energy | different runtime — out of scope for this environment; spec only | — |
+
+## Queued for the new Kaggle GPU account (`scratchpad/build_gpu_realdata.py <username>`)
+One T4 job runs everything that needs proof: full pytest (kernels + new tests), the **real-data
+scaling gate** (`realdata_scaling.py` — M1/M4 on real tinyshakespeare, the experiment toy data
+couldn't be), and the M9/M10/M-STACK training witnesses (too slow on CPU). This closes the open
+proofs in one run.
 
 ## The honest shape of the result
 
