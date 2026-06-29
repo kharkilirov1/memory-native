@@ -84,6 +84,19 @@ class CounterValueMemory(nn.Module):
         if value_compute == "fp":   # diagnostic arm: fp values (isolates architecture from quant)
             self.fp_values = nn.Parameter(torch.randn(self.E, self.d) * s0)
         self.register_buffer("rows_touched", torch.zeros((), dtype=torch.int64), persistent=False)
+        # cell-utilization diagnostics (the M2-style 'ever visible' for the memory): which cells are
+        # EVER retrieved, and how often. Reveals router starvation (dead cells) at large E.
+        self.register_buffer("ever_retrieved", torch.zeros(self.E, dtype=torch.bool), persistent=False)
+        self.register_buffer("retrieval_count", torch.zeros(self.E, dtype=torch.int64), persistent=False)
+
+    @torch.no_grad()
+    def _note_use(self, flat_ids: torch.Tensor) -> None:
+        self.ever_retrieved[flat_ids] = True
+        self.retrieval_count.index_add_(0, flat_ids, torch.ones_like(flat_ids))
+
+    def live_fraction(self) -> float:
+        """Fraction of cells ever retrieved (1.0 = all used; low = router starves most cells)."""
+        return float(self.ever_retrieved.float().mean())
 
     @torch.no_grad()
     def _decode_rows(self, flat_ids: torch.Tensor) -> torch.Tensor:
@@ -93,6 +106,7 @@ class CounterValueMemory(nn.Module):
         return self.scale[flat_ids] * t.to(self.scale.dtype)
 
     def read(self, flat_ids: torch.Tensor, tap: torch.Tensor) -> torch.Tensor:
+        self._note_use(flat_ids)
         if self.value_compute == "fp":
             return self.fp_values[flat_ids]   # plain autograd updates fp values
         return _CounterValueRead.apply(self, flat_ids, tap)
@@ -199,6 +213,10 @@ class CounterMemoryFFN(nn.Module):
                 + 2 * self.m * self.dk        # sub-key scores (the sqrt(E) term)
                 + ks * ks                      # candidate combine
                 + self.k * self.d)            # value readout
+
+    def live_fraction(self) -> float:
+        """Fraction of cells ever retrieved -- router-starvation diagnostic (low = many dead cells)."""
+        return self.values.live_fraction()
 
     def persistent_bytes(self) -> int:
         """Counter value table (the bulk) + the small fp router (query proj + the two sub-key sets)."""
