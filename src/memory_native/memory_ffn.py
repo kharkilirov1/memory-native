@@ -186,8 +186,9 @@ class CounterMemoryFFN(nn.Module):
         starvation that kills large-E memory). Computed on the m=sqrt(E) sub-keys (cheap)."""
         prob = torch.softmax(scores, dim=1).mean(0)            # [m] mean router prob per sub-key
         onehot = torch.zeros_like(scores).scatter_(1, idx, 1.0)
-        frac = onehot.mean(0)                                  # [m] fraction of tokens selecting it
-        return m * (frac * prob).sum()
+        frac = onehot.mean(0)
+        frac = frac / frac.sum().clamp_min(1e-9)               # normalize to a distribution (sum 1)
+        return m * (frac * prob).sum()                         # == 1 at uniform usage, >1 imbalanced
 
     def _retrieve(self, q: torch.Tensor):
         """q: [N, 2*dk] -> (weights [N,k], flat_ids [N,k]) via product-key top-k."""
