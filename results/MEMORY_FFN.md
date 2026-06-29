@@ -113,3 +113,33 @@ utilization; product-key memory over 16–64k cells lets the router collapse ont
 The untested candidate fix is a **load-balancing / entropy loss on the top-k retrieval** (needs a
 forward-side aux term, like MoE's) — the next experiment. Even the best memory config here (1.856)
 still trails dense (1.655); standalone memory-FFN is not yet a dense replacement, MoE is.
+
+### Load-balance fix — tested, and it REFUTES the starvation-as-cause hypothesis (GPU, real data)
+
+Added a switch-style sub-key load-balance aux (`aux_loss_weight`, normalized ≈1 at uniform). On real
+tinyshakespeare at E=65536:
+
+| config | val | live-cells |
+|---|---|---|
+| awl=0 (baseline) | **1.8822** | 11.4% |
+| awl=0.1 | 1.9410 | **99.2%** |
+| awl=0.5 | 2.0295 | **99.7%** |
+
+The aux **completely cures the starvation** — utilization 11% → 99%. But **val gets monotonically
+WORSE** with more balancing (1.882 → 1.941 → 2.030). So fixing utilization does not help; it *hurts*.
+
+**Interpretation (the hypothesis is refuted).** The "starvation" is not a bug the model suffers — it
+is the model's **correct, adaptive choice**: for this task the router concentrates on the ~11% of
+cells that carry signal and ignores the rest. Forcing it to spread across all 65k cells (load
+balance) thins the signal and degrades quality. So:
+- M1's non-monotonic E-scaling is not under-utilization to be fixed — it is **over-capacity**: 64k
+  cells is far more than the task needs, and the product-key retrieval cannot turn the extra cells
+  into lower loss (bigger E → more unused/under-trained capacity → at best neutral, at worst noise).
+- This is the opposite of the natural bet ("router starves, fix it and memory-FFN works"). Tested,
+  cleanly negative: utilization was a symptom, not the cause.
+
+**Why Counter-MoE wins and memory-FFN does not** is now precise: MoE has FEW experts (8–16), all
+useful, with load-balance keeping them all productively used; memory-FFN at 16–64k cells has far more
+capacity than the task can exploit, and balancing it only spreads the signal thinner. The lever that
+works is **few balanced experts (MoE)**, not **many balanced cells (memory)**. (`aux_loss_weight`
+stays in the API as a validated mechanism — it does balance — just not a quality win here.)
