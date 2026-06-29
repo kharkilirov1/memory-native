@@ -8,6 +8,16 @@ from memory_native.triton_counter import HAS_TRITON, TritonCounterLinear
 CUDA = torch.cuda.is_available()
 
 
+def _matmul_tol():
+    """The decode-in-GEMM kernel uses tl.dot (Tensor Cores). On Ampere+ (sm>=80) that means TF32
+    accumulation -> ~1e-3 vs the fp32 reference (NOT a kernel bug; the dynamics are unaffected).
+    On T4 (sm_75, no TF32 for this path) it matches to ~1e-6. So gate fp32-tight on pre-Ampere and
+    TF32-tight on Ampere+. (Verified: T4 max err 7e-7; Blackwell RTX PRO 6000 1.7e-3.)"""
+    if CUDA and torch.cuda.get_device_capability()[0] >= 8:
+        return dict(atol=3e-3, rtol=3e-3)
+    return dict(atol=1e-4, rtol=1e-4)
+
+
 def test_cpu_fallback_trains():
     """Without CUDA/triton, TritonCounterLinear must transparently fall back to the packed
     PyTorch forward and still learn (so the class is safe to use anywhere)."""
@@ -40,7 +50,7 @@ def test_triton_forward_matches_reference():
         ref = torch.nn.functional.linear(x, layer._dense_weight(torch.float32))
         from memory_native.triton_counter import triton_decode_matmul
         got = triton_decode_matmul(x, layer.state, layer.scale, C, n_in, n_out)
-    assert torch.allclose(got, ref, atol=1e-4, rtol=1e-4), (got - ref).abs().max()
+    assert torch.allclose(got, ref, **_matmul_tol()), (got - ref).abs().max()
 
 
 @pytest.mark.skipif(not (CUDA and HAS_TRITON), reason="needs CUDA + triton")
@@ -54,7 +64,7 @@ def test_triton_grad_x_matches_reference():
         ref = grad_out @ layer._dense_weight(torch.float32)        # [M, n_in]
         from memory_native.triton_counter import triton_grad_x
         got = triton_grad_x(grad_out, layer.state, layer.scale, C, n_in, n_out)
-    assert torch.allclose(got, ref, atol=1e-4, rtol=1e-4), (got - ref).abs().max()
+    assert torch.allclose(got, ref, **_matmul_tol()), (got - ref).abs().max()
 
 
 @pytest.mark.skipif(not (CUDA and HAS_TRITON), reason="needs CUDA + triton")
