@@ -77,3 +77,39 @@ is a point *for* the architecture that 1500 steps didn't reveal.
 **Honest conclusion:** the capacity-scaling claim is **inconclusive on toy data** and needs a **real
 corpus** (FineWeb/shakespeare, many tokens) — not more steps. That is the proper Phase-2 gate. What
 IS established: retrieval matches dense at ~5× less active compute, and resists overfitting.
+
+## Why M1 underperforms — ROUTER STARVATION (GPU diagnosis, real tinyshakespeare)
+
+The non-monotonic E-scaling is not "bad memory" — it is the **product-key router starving cells**:
+most cells are never retrieved, so they never train. New `live_fraction()` instrument (fraction of
+cells ever retrieved) + a GPU sweep on real data (ZeroGPU, d=256/4L/1500 steps):
+
+| config | val | live-cells | MACs/tok |
+|---|---|---|---|
+| dense FFN (ref) | **1.655** | — | 524288 |
+| mem E=16384 k=16 LR×1 | 1.8559 | 27.0% | 41216 |
+| mem E=16384 k=16 LR×10 | 1.9020 | 29.3% | 41216 |
+| mem E=16384 k=32 LR×1 | 1.8615 | **41.1%** | 46080 |
+| mem E=65536 k=16 LR×1 | 1.8805 | 11.9% | 53504 |
+| mem E=65536 k=16 LR×10 | 1.9227 | 11.2% | 53504 |
+
+**Starvation confirmed and severe, scaling with E**: only **27% of cells live at E=16k, 11.9% at
+E=64k** (73–88% dead). This is exactly the M1 non-monotonicity mechanism — bigger E → each cell is
+retrieved more rarely → undertrained → worse. (CPU pre-check agreed: 97% / 72% / 37% live at
+4k/16k/64k.)
+
+**But the cheap fixes do NOT recover quality:**
+- **Router LR×10 fails** — barely moves utilization (27→29% at 16k; 11.9→11.2% at 64k) and *hurts*
+  val (1.856→1.902; 1.881→1.923). Faster router learning makes it commit/collapse earlier, not
+  spread. So it is not a learning-rate problem.
+- **k=32 raises utilization a lot (27%→41%) but val is flat** (1.856→1.862). More recall touches
+  more cells without improving loss — the extra cells carry little useful signal at this scale.
+
+**Conclusion.** The starvation diagnosis is correct (and it explains the E-scaling failure), but the
+problem is **deeper than a LR/k tweak** — it is product-key routing *collapse / lack of load
+balancing* over a huge cell set. This is precisely why **Counter-MoE wins** (`REALDATA_SCALING.md`):
+a dense router over FEW experts with an explicit load-balancing aux loss *forces* balanced
+utilization; product-key memory over 16–64k cells lets the router collapse onto a tiny live fraction.
+The untested candidate fix is a **load-balancing / entropy loss on the top-k retrieval** (needs a
+forward-side aux term, like MoE's) — the next experiment. Even the best memory config here (1.856)
+still trails dense (1.655); standalone memory-FFN is not yet a dense replacement, MoE is.
