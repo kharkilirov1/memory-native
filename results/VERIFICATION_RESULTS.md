@@ -8,10 +8,10 @@ stated as plainly as the passes.
 
 | # | method | what it attacks | verdict | witness |
 |---|---|---|---|---|
-| M1 | CounterMemoryFFN | FLOPs-to-loss (retrieval FFN) | **PARTIAL** — matches dense at ~5× less active compute; capacity-scaling inconclusive on toy data (overfits); resists overfitting | `MEMORY_FFN.md` |
+| M1 | CounterMemoryFFN | FLOPs-to-loss (retrieval FFN) | **PARTIAL / real-data WEAKER** — on real tinyshakespeare it is +12% worse than dense at 13× less compute, and bigger E hurts (non-monotonic). A compute-saver with a quality cost, not parity. M4 is the stronger lever | `MEMORY_FFN.md`, `REALDATA_SCALING.md` |
 | M2 | 2:4 group-counter | per-step (fwd/grad_x) | **PARTIAL** — 2:4 sparsity learns fine (≤ unstructured); error-feedback rotation NOT shown to beat pruning | `GROUP_COUNTER.md` |
 | M3 | slow-fast `sT+ABᵀ` | per-step (wgrad freq) | **PASS** — base-update cut 8–32× at no accuracy cost; standalone ceiling ~1.43× | `SLOWFAST.md` |
-| M4 | Counter-MoE FFN | FLOPs-to-loss (experts) | **PASS (cleanest)** — beats dense at E=8/16, monotonic capacity scaling, no routing collapse | `MOE_FFN.md` |
+| M4 | Counter-MoE FFN | FLOPs-to-loss (experts) | **PASS — REAL-DATA VALIDATED** — on real tinyshakespeare (GPU) beats dense FFN at equal active compute (E=16 1.632 vs 1.655), MONOTONIC E-scaling; value proven, not just mechanism | `MOE_FFN.md`, `REALDATA_SCALING.md` |
 | M5 | int8 forward | per-step | **PASS** (prior) — ×2.05 isolated, T4-verified | `ACCELERATION.md` |
 | M6 | int4-wgrad | per-step (wgrad) | **math PASS / HW rejected on T4** (Amdahl) | `INT4_WGRAD.md` |
 | M-STACK | 2:4 + slow-fast compose | per-step (integration) | **PARTIAL** — compose mechanically (train, no divergence) but at a quality cost (+31% vs plain counter); speedup unmeasured (kernel-gated) | `MSTACK.md` |
