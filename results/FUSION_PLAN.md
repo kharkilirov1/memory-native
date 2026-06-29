@@ -79,3 +79,22 @@ accumulator.
 - #1/#2: `diff(packed state) == 0` after a step (proves bit-exact) + Δ step-time + Nsight occupancy.
 - #3: Nsight Systems timeline showing co-resident kernels + Δ step-time.
 - #5: loss/accuracy curve vs baseline over N steps (parity).
+
+## Implementation status — what is now in the tree (CPU bit-exact / parity, kernels still GPU work)
+
+One pass landed the levers that are *implementable and checkable on CPU* — the bit-exact references
+the fused kernels will mirror, plus the pure-PyTorch enabler. The fused CUDA/CUTLASS kernels and the
+wall-clock speedups remain GPU/kernel work (a PyTorch path materializes the intermediates, so it
+cannot deliver the HBM-traffic win — only prove the math the kernel must reproduce).
+
+| lever | landed here | how it's gated | still GPU/kernel |
+|---|---|---|---|
+| **#1 lagged epilogue enabler** | `lagged=` on `counter_update_hashsr` / `counter_update_from_io_hashsr` (+ `LAGGED` constexpr in both Triton kernels) | `test_fusion_levers.py::test_lagged_hashsr_is_per_element` (perturb grad_w[0,5] → 1 byte vs 7) + teacher-recovery; `fusion_invariants.py` | the tiled CUTLASS epilogue + Nsight occupancy |
+| **#2 ternary forward prologue** | already shipped (`triton_decode_matmul`); enabler proven | `fusion_invariants.py::confirm_forward_is_ternary_only` (max\|Δ\|=0) | mixed-input ternary mainloop unpack |
+| **#4 persistent cache flip-patch** | `cache_patch="flip"` on `CompactCounterLinear` (writes only flipped cache elements; `cache_patches` diagnostic) | `test_fusion_levers.py::test_flip_patch_cache_bit_identical` (== full rewrite AND fresh decode) + teacher-recovery | none — fully realized in PyTorch (bit-exact) |
+| **#5 fp8 grad_w** | `fp8_correlation` (e4m3, per-tensor scale, fp32 accumulate; `update_compute="fp8"`) | `test_fusion_levers.py::test_fp8_correlation_low_error` (rel<8%, ~4% e4m3) + teacher-recovery (parity, NOT bit-exact) | `torch._scaled_mm` Tensor-Core path (attempted, falls back to fp32 emulation off-CUDA) |
+| **#3 overlap** | not landed (pure scheduling) | — | GPU + Nsight Systems; T4-unlikely |
+
+Honest caveat preserved: **#1/#2/#5 give speed ONLY as fused kernels** (decode/SR in registers, fp8
+on Tensor Cores). What is in-tree is the verified reference (so the kernel has a bit-exact / parity
+oracle) plus **#4**, which is genuinely useful as pure PyTorch and is bit-exact today.

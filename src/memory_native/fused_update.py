@@ -45,9 +45,19 @@ def uniform01(x: torch.Tensor) -> torch.Tensor:
 @torch.no_grad()
 def counter_update_hashsr(codes: torch.Tensor, scale: torch.Tensor, v: torch.Tensor,
                           grad_w: torch.Tensor, *, C: int, lr: float, lr_scale: float,
-                          rms_beta: float, rms_eps: float, seed: int) -> torch.Tensor:
+                          rms_beta: float, rms_eps: float, seed: int,
+                          lagged: bool = False) -> torch.Tensor:
     """Deterministic-SR RMS counter update on UNPACKED codes [out,in]. Mutates scale and v in
-    place, returns the new codes. Exactly the math the Triton kernel implements (per row)."""
+    place, returns the new codes. Exactly the math the Triton kernel implements (per row).
+
+    lagged=False (default, "exact"): the RMS denominator uses THIS step's freshly-updated v, so the
+      per-element tick depends on a full-row reduction (g_sq) of the current grad -> two passes, and
+      the state-write of weight [o,i] depends on the whole row's grad (NOT epilogue-fusable).
+    lagged=True ("one-pass"): the denominator uses the PREVIOUS step's v (read before the EMA
+      update), so given last step's v the tick of [o,i] depends ONLY on grad_w[o,i] -> the
+      state-write is PER-ELEMENT and fuses into a tiled GEMM epilogue (fusion-plan lever #1). The
+      v-EMA still needs the row's g_sq, but it emits only O(out) values (fold into split-K). This is
+      the hash-SR analogue of RMSCounterLinear's rms_mode='lagged'."""
     out, in_ = codes.shape
     t, c = decode_state(codes, C)                       # int16 [out,in]
     t = t.float(); c = c.float()
@@ -55,8 +65,12 @@ def counter_update_hashsr(codes: torch.Tensor, scale: torch.Tensor, v: torch.Ten
 
     # --- row stats (per output row) ---
     g_sq = gw.pow(2).mean(dim=1, keepdim=True)          # [out,1]
-    v.mul_(rms_beta).add_(g_sq, alpha=1.0 - rms_beta)
-    denom = v.sqrt().clamp_min(rms_eps)                 # [out,1]
+    if lagged:
+        denom = v.sqrt().clamp_min(rms_eps)             # previous-step v -> tick is per-element
+        v.mul_(rms_beta).add_(g_sq, alpha=1.0 - rms_beta)
+    else:
+        v.mul_(rms_beta).add_(g_sq, alpha=1.0 - rms_beta)
+        denom = v.sqrt().clamp_min(rms_eps)             # freshly-updated v -> full-row dependency
     grad_s = (gw * t).sum(dim=1, keepdim=True) / (in_ ** 0.5)
     s_old = scale.clone()
     s_new = (s_old - lr_scale * grad_s).clamp_(1e-5, 10.0)
@@ -123,7 +137,7 @@ if HAS_TRITON:
     @triton.jit
     def _counter_update_kernel(state_ptr, scale_ptr, v_ptr, grad_w_ptr, seed_ptr,
                                C, in_features, lr, lr_scale, rms_beta, rms_eps,
-                               BLOCK_I: tl.constexpr):
+                               BLOCK_I: tl.constexpr, LAGGED: tl.constexpr = False):
         # One program per output row. state packed [out, (in/4)*3]; grad_w dense [out,in].
         # seed is loaded from a tensor (not a scalar arg) so Triton never specializes seed==0/1
         # to a Python int -- that would break the `seed ^ hash` uint32 arithmetic.
@@ -155,9 +169,11 @@ if HAS_TRITON:
         g_sq = g_sq / in_features
         grad_s = grad_s / tl.sqrt(in_features.to(tl.float32))
         s_old = tl.load(scale_ptr + row)
-        vv = rms_beta * tl.load(v_ptr + row) + (1.0 - rms_beta) * g_sq
+        v_old = tl.load(v_ptr + row)
+        vv = rms_beta * v_old + (1.0 - rms_beta) * g_sq
         tl.store(v_ptr + row, vv)
-        denom = tl.maximum(tl.sqrt(vv), rms_eps)
+        # lagged: denom from the PREVIOUS v (per-element tick); exact: from the freshly-updated v.
+        denom = tl.maximum(tl.sqrt(v_old if LAGGED else vv), rms_eps)
         s_new = tl.minimum(tl.maximum(s_old - lr_scale * grad_s, 1e-5), 10.0)
         Cf = C * 1.0
         # pass 2: apply per packed group of 4 (in_features % 4 == 0 so col<in_features holds)
@@ -188,10 +204,11 @@ if HAS_TRITON:
 
 def triton_counter_update(state_packed: torch.Tensor, scale: torch.Tensor, v: torch.Tensor,
                           grad_w: torch.Tensor, *, C: int, lr: float, lr_scale: float,
-                          rms_beta: float, rms_eps: float, seed: int) -> None:
+                          rms_beta: float, rms_eps: float, seed: int, lagged: bool = False) -> None:
     """One-launch fused RMS + stochastic-rounding counter update on packed state. Mutates
-    state_packed, scale, v in place. Requires CUDA + triton; matches counter_update_hashsr up to
-    one SR quantum on an O(1) fraction of weights (chunked fp reduction, not bit-exact)."""
+    state_packed, scale, v in place. Requires CUDA + triton; matches counter_update_hashsr (same
+    `lagged`) up to one SR quantum on an O(1) fraction of weights (chunked fp reduction, not
+    bit-exact). lagged=True uses the previous-step v for the denominator (per-element tick)."""
     if not HAS_TRITON:
         raise RuntimeError("triton not available")
     out = scale.numel()
@@ -202,5 +219,5 @@ def triton_counter_update(state_packed: torch.Tensor, scale: torch.Tensor, v: to
     _counter_update_kernel[(out,)](
         state_packed, scale.reshape(out), v.reshape(out), grad_w.contiguous(), seed_t,
         C, in_features, lr, lr_scale, rms_beta, rms_eps,
-        BLOCK_I=BLOCK_I,
+        BLOCK_I=BLOCK_I, LAGGED=lagged,
     )

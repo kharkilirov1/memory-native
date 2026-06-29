@@ -179,6 +179,9 @@ class _FusedCounterLinearFn(torch.autograd.Function):
                     elif module.update_compute == "int4":
                         from .int8_compute import int4_correlation
                         grad_w_i = int4_correlation(go2[:, lo:hi], x2)
+                    elif module.update_compute == "fp8":
+                        from .int8_compute import fp8_correlation
+                        grad_w_i = fp8_correlation(go2[:, lo:hi], x2)
                     else:
                         grad_w_i = (go2[:, lo:hi].transpose(0, 1) @ x2).float()
                     # proxy RMS: take the row second-moment from grad_out norms (* activation
@@ -243,6 +246,7 @@ class CompactCounterLinear(nn.Module):
         act_save_bits: int = 0,
         decimate_updates: bool = False,
         cache_mode: str = "none",
+        cache_patch: str = "full",
         update_compute: str = "fp",
         forward_compute: str = "fp",
     ) -> None:
@@ -298,12 +302,26 @@ class CompactCounterLinear(nn.Module):
         # (not truth, not optimizer state): rebuilt from the state, refreshed on visible flips.
         if cache_mode not in {"none", "fp16", "int8"}:
             raise ValueError("cache_mode must be 'none', 'fp16' or 'int8'")
-        if update_compute not in {"fp", "int8", "int4"}:
-            raise ValueError("update_compute must be 'fp', 'int8' or 'int4'")
+        # cache_patch (fusion-plan lever #4): how the persistent derived T-cache is refreshed after
+        # an update. "full" rewrites the whole updated tile every step; "flip" writes ONLY the
+        # elements whose visible ternary actually changed (the rest are already correct in the
+        # persistent buffer). Bit-identical result; "flip" models the kernel's amortized-decode~0
+        # cost (with decimation almost no weight flips, so almost nothing is rewritten). The cache
+        # is already persistent across steps (a persistent=False buffer, never rebuilt unless absent
+        # or reloaded) -- "flip" is the cross-step flip-patching half of the lever.
+        if cache_patch not in {"full", "flip"}:
+            raise ValueError("cache_patch must be 'full' or 'flip'")
+        self.cache_patch = cache_patch
+        # diagnostics only: how many cache elements were patched (O(1) scalar, not optimizer state).
+        self.register_buffer("cache_patches", torch.zeros((), dtype=torch.int64), persistent=False)
+        if update_compute not in {"fp", "int8", "int4", "fp8"}:
+            raise ValueError("update_compute must be 'fp', 'int8', 'int4' or 'fp8'")
         if forward_compute not in {"fp", "int8"}:
             raise ValueError("forward_compute must be 'fp' or 'int8'")
-        # "int8" forms grad_w with an unbiased int8 GEMM estimator (Tensor Cores on CUDA) instead
-        # of the fp32 correlation. Unbiased -> training-neutral in expectation; opt-in, fp default.
+        # "int8"/"int4" form grad_w with an UNBIASED stochastic low-bit GEMM estimator (Tensor Cores
+        # on CUDA) instead of the fp32 correlation -> training-neutral in expectation. "fp8" is a
+        # deterministic fp8 (e4m3) estimator: slightly biased (round-to-nearest), parity-gated, the
+        # error-feedback absorbs it (fusion-plan lever #5). All opt-in; fp is the default.
         self.update_compute = update_compute
         # forward_compute="int8" runs the forward Y=XT^T on the integer Tensor Cores (deterministic
         # round-to-nearest activation quant, so reversible/eager stay valid); pairs with the int8
@@ -427,6 +445,15 @@ class CompactCounterLinear(nn.Module):
         if self.cache_mode != "none":
             if not hasattr(self, "_t_cache"):   # state for these rows is already written -> snapshot
                 self._build_t_cache()
+            elif self.cache_patch == "flip":
+                # write only the elements whose visible ternary actually changed; the persistent
+                # buffer already holds the correct value everywhere else (bit-identical to "full").
+                view = self._t_cache[lo:hi]
+                tt = t.to(view.dtype)
+                changed = view != tt
+                if changed.any():
+                    view[changed] = tt[changed]
+                    self.cache_patches.add_(int(changed.sum().item()))
             else:
                 self._t_cache[lo:hi] = t.to(self._t_cache.dtype)
 
