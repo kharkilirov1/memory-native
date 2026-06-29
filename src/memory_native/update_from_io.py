@@ -42,7 +42,8 @@ if HAS_TRITON:
     @triton.jit
     def _counter_update_from_io_kernel(state_ptr, scale_ptr, v_ptr, x_ptr, go_ptr, seed_ptr,
                                        C, in_features, M, lr, lr_scale, rms_beta, rms_eps,
-                                       BLOCK_G: tl.constexpr, BLOCK_M: tl.constexpr):
+                                       BLOCK_G: tl.constexpr, BLOCK_M: tl.constexpr,
+                                       LAGGED: tl.constexpr = False):
         # One program per output row. Forms grad_w[row, :] per packed lane (no dense grad_w), then
         # exact RMS + scale + SR tick + re-pack. state packed [out, (in/4)*3]; x [M,in]; go [M,out].
         row = tl.program_id(0)
@@ -84,9 +85,10 @@ if HAS_TRITON:
         g_sq = (tl.sum(gw0 * gw0) + tl.sum(gw1 * gw1) + tl.sum(gw2 * gw2) + tl.sum(gw3 * gw3)) / in_features
         grad_s = (tl.sum(gw0 * t0) + tl.sum(gw1 * t1) + tl.sum(gw2 * t2) + tl.sum(gw3 * t3)) / tl.sqrt(in_features.to(tl.float32))
         s_old = tl.load(scale_ptr + row)
-        vv = rms_beta * tl.load(v_ptr + row) + (1.0 - rms_beta) * g_sq
+        v_old = tl.load(v_ptr + row)
+        vv = rms_beta * v_old + (1.0 - rms_beta) * g_sq
         tl.store(v_ptr + row, vv)
-        denom = tl.maximum(tl.sqrt(vv), rms_eps)
+        denom = tl.maximum(tl.sqrt(v_old if LAGGED else vv), rms_eps)
         s_new = tl.minimum(tl.maximum(s_old - lr_scale * grad_s, 1e-5), 10.0)
         # SR tick per lane, then re-pack 4 codes / 3 bytes
         nc0 = _tick(c0, gw0, row, col0 + 0, in_features, lv, C, Cf, lr, denom, s_old, s_new, seed)
@@ -104,10 +106,12 @@ if HAS_TRITON:
 
 def triton_counter_update_from_io(state_packed: torch.Tensor, scale: torch.Tensor, v: torch.Tensor,
                                   x: torch.Tensor, grad_out: torch.Tensor, *, C: int, lr: float,
-                                  lr_scale: float, rms_beta: float, rms_eps: float, seed: int) -> None:
+                                  lr_scale: float, rms_beta: float, rms_eps: float, seed: int,
+                                  lagged: bool = False) -> None:
     """One-launch strict update: forms grad_w in-kernel from (x, grad_out) -- no dense gradient --
-    and applies the exact RMS + SR counter update. Mutates state_packed, scale, v in place.
-    Bit-quantified-equal to counter_update_from_io_hashsr (verify on GPU)."""
+    and applies the RMS + SR counter update. Mutates state_packed, scale, v in place.
+    Bit-quantified-equal to counter_update_from_io_hashsr (verify on GPU). lagged=True uses the
+    previous-step v for the denominator (per-element tick)."""
     if not HAS_TRITON:
         raise RuntimeError("triton not available")
     out = scale.numel()
@@ -120,5 +124,5 @@ def triton_counter_update_from_io(state_packed: torch.Tensor, scale: torch.Tenso
     _counter_update_from_io_kernel[(out,)](
         state_packed, scale.reshape(out), v.reshape(out), x.contiguous(), grad_out.contiguous(),
         seed_t, C, in_features, M, lr, lr_scale, rms_beta, rms_eps,
-        BLOCK_G=BLOCK_G, BLOCK_M=128,
+        BLOCK_G=BLOCK_G, BLOCK_M=128, LAGGED=lagged,
     )

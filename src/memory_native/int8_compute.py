@@ -20,7 +20,36 @@ from __future__ import annotations
 import torch
 
 __all__ = ["quantize_int8_cols", "quantize_int8_rows", "int8_mm", "int8_correlation",
-           "int8_correlation_presaved", "int8_forward_ternary"]
+           "int8_correlation_presaved", "int8_forward_ternary", "fp8_correlation"]
+
+
+def fp8_correlation(delta: torch.Tensor, x: torch.Tensor,
+                    dtype: torch.dtype = torch.float8_e4m3fn) -> torch.Tensor:
+    """Lower-precision grad_w correlation G = delta^T x with fp8 (e4m3) operands, fp32 accumulate
+    (fusion-plan lever #5, the "fp8 on grad_w" half). delta [M,N], x [M,K] -> G [N,K].
+
+    NOT bit-exact and NOT stochastic -- this is deterministic round-to-nearest in fp8, so it is a
+    slightly BIASED low-precision estimate, parity-gated (a loss/accuracy witness is required before
+    adoption; see FUSION_PLAN.md). The counter's error-feedback absorbs the small per-step bias.
+    Unlike int8 (no exponent -> needs per-column amax), fp8's exponent carries the range; a single
+    per-tensor scale maps amax near the fp8 max so the 3-bit mantissa is used well. On CUDA the same
+    scaled fp8 operands map to torch._scaled_mm (the Tensor-Core fp8 GEMM, ~2x fp16 / in-family with
+    int8); on CPU there is no fp8 GEMM so we cast fp8->fp32 and matmul (captures the fp8 rounding)."""
+    fp8_max = 448.0 if dtype == torch.float8_e4m3fn else 57344.0    # e4m3 vs e5m2
+    da = delta.abs().amax().clamp_min(1e-12) / fp8_max
+    xa = x.abs().amax().clamp_min(1e-12) / fp8_max
+    dq = (delta / da).to(dtype)
+    xq = (x / xa).to(dtype)
+    if delta.is_cuda and hasattr(torch, "_scaled_mm"):
+        try:
+            acc = torch._scaled_mm(dq.t().contiguous(), xq,
+                                   scale_a=da.reshape(1), scale_b=xa.reshape(1),
+                                   out_dtype=torch.float32)
+            return acc
+        except Exception:  # arch/shape constraints -> fall back, stay correct
+            pass
+    acc = dq.to(torch.float32).t() @ xq.to(torch.float32)          # fp32 accumulate
+    return acc * (da * xa)
 
 
 def _srq(u: torch.Tensor, stochastic: bool, levels: int = 127) -> torch.Tensor:

@@ -35,6 +35,7 @@ from .group_counter import GroupCounterLinear
 from .stack_linear import StackCounterLinear
 from .mod import MoDBlock
 from .int8_compute import (
+    fp8_correlation,
     int4_correlation,
     int8_correlation,
     int8_correlation_presaved,
@@ -86,6 +87,7 @@ __all__ = [
     "GroupCounterLinear",
     "StackCounterLinear",
     "MoDBlock",
+    "fp8_correlation",
     "int4_correlation",
     "int8_correlation",
     "int8_correlation_presaved",
