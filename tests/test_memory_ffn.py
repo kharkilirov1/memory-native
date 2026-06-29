@@ -81,3 +81,19 @@ def test_memory_ffn_can_fit_a_target():
         if first is None:
             first = loss.item()
     assert loss.item() < 0.7 * first, (first, loss.item())
+
+
+def test_load_balance_raises_cell_utilization():
+    """The sub-key load-balance aux fights router starvation: it raises the fraction of cells ever
+    retrieved at large E (the M1 starvation finding). Mechanism check, not a quality claim."""
+    def live(awl):
+        torch.manual_seed(0)
+        ffn = CounterMemoryFFN(64, n_cells=16384, k=16, key_dim=32, aux_loss_weight=awl).train()
+        opt = torch.optim.AdamW([p for p in ffn.parameters() if p.requires_grad], lr=3e-3)
+        x = torch.randn(32, 32, 64)
+        for _ in range(150):
+            out = ffn(x)
+            (out.pow(2).sum() + awl * ffn.last_aux_loss).backward()
+            opt.step(); opt.zero_grad(set_to_none=True)
+        return ffn.live_fraction()
+    assert live(20.0) > live(0.0) + 0.05      # balancing reaches materially more cells

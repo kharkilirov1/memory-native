@@ -161,7 +161,7 @@ class CounterMemoryFFN(nn.Module):
 
     def __init__(self, dim: int, n_cells: int = 16384, k: int = 8, key_dim: int = 32, *,
                  C: int = 11, lr: float = 0.04, lr_scale: float = 2e-4,
-                 value_compute: str = "counter") -> None:
+                 value_compute: str = "counter", aux_loss_weight: float = 0.0) -> None:
         super().__init__()
         m = int(round(math.sqrt(n_cells)))
         if m * m != n_cells:
@@ -171,11 +171,23 @@ class CounterMemoryFFN(nn.Module):
         self.E = n_cells
         self.k = int(k)
         self.dk = int(key_dim)
+        self.aux_loss_weight = float(aux_loss_weight)
+        self.last_aux_loss = torch.zeros(())
         self.query = nn.Linear(dim, 2 * self.dk, bias=False)
         self.k1 = nn.Parameter(torch.randn(m, self.dk) / math.sqrt(self.dk))
         self.k2 = nn.Parameter(torch.randn(m, self.dk) / math.sqrt(self.dk))
         self.values = CounterValueMemory(n_cells, dim, C=C, lr=lr, lr_scale=lr_scale,
                                          value_compute=value_compute)
+
+    @staticmethod
+    def _balance(scores: torch.Tensor, idx: torch.Tensor, m: int) -> torch.Tensor:
+        """Switch-style load-balance over sub-keys: m * sum_e frac_e * mean_prob_e. Minimized when
+        sub-key usage is uniform -> the router spreads over cells instead of collapsing (fights the
+        starvation that kills large-E memory). Computed on the m=sqrt(E) sub-keys (cheap)."""
+        prob = torch.softmax(scores, dim=1).mean(0)            # [m] mean router prob per sub-key
+        onehot = torch.zeros_like(scores).scatter_(1, idx, 1.0)
+        frac = onehot.mean(0)                                  # [m] fraction of tokens selecting it
+        return m * (frac * prob).sum()
 
     def _retrieve(self, q: torch.Tensor):
         """q: [N, 2*dk] -> (weights [N,k], flat_ids [N,k]) via product-key top-k."""
@@ -185,6 +197,8 @@ class CounterMemoryFFN(nn.Module):
         ks = min(self.k, self.m)
         v1, i1 = s1.topk(ks, dim=1)                        # [N, ks]
         v2, i2 = s2.topk(ks, dim=1)
+        if self.training and self.aux_loss_weight > 0:
+            self.last_aux_loss = self._balance(s1, i1, self.m) + self._balance(s2, i2, self.m)
         # combine the two half-scorelists -> scores over the ks*ks candidate cells, take top-k
         cand = v1[:, :, None] + v2[:, None, :]            # [N, ks, ks]
         cand_id = i1[:, :, None] * self.m + i2[:, None, :]  # flat cell id within E
