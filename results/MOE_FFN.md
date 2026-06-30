@@ -110,18 +110,27 @@ Two kernel-level changes attack the wall-clock, each measured on the same GPU (t
 |---|---|---|---|---|
 | baseline | RMSCounterLinear experts, python loop | 50595 | 27233 | 1.6176 |
 | **Prong A** | packed experts → fused Triton update (1 launch vs ~15) | 54893 (+8%) | 29736 (+9%) | 1.6063 |
-| **Prong B** | grouped-GEMM experts (`torch._grouped_mm`, no python forward loop) | **69828 (+27%)** | **42782 (+44%)** | 1.6091 |
+| **Prong B** | grouped-GEMM forward (`torch._grouped_mm`, no python forward loop) | 69828 | 42782 | 1.6091 |
+| **Prong B2** | stacked experts → batched counter update (no per-expert SR loop) | **166184** | **144658** | 1.6040 |
 
-**Net so far: moe16 27233 → 42782 tok/s (+57%), quality preserved** (val 1.6176→1.6091, within
-noise of the loop). The win grows with E (bigger loop eliminated). Prong A's mere +9% proved the
-fused update was NOT the bottleneck — the **python per-expert forward loop was**, which Prong B
-removes via one grouped GEMM per layer (`grouped=True` / `GPTConfig.ffn_grouped`). The grouped path
-is fp32 bit-exact vs the loop on CPU (`test_grouped_matches_loop_forward_and_trains`), so the math
-is unchanged; `torch._grouped_mm` runs on CPU for the test and maps to the optimized grouped kernel
-on CUDA.
+**Net: moe16 27233 → 144658 tok/s = ×5.3, quality preserved** (val 1.6176→1.6040, if anything
+slightly better). moe8 ×3.3. The progression isolated each bottleneck with a witness:
+- Prong A (+9%) proved the fused update was NOT the bottleneck;
+- Prong B (+44%) removed the **python per-expert forward loop** (one grouped GEMM/layer);
+- Prong B2 (×3.4 over B at E=16) removed the **per-expert SR update loop**: all experts live in one
+  stacked `[E,out,in]` buffer (`StackedCounterExperts`), so the weight decode (forward) and the full
+  RMS+SR counter update (backward) are each ONE vectorized op over the expert axis.
 
-**Still open (next kernel increment):** the *backward* still loops over E to form each expert's
-grad_w and apply its counter update — now the dominant remainder. Grouping that (a 3D-output grouped
-GEMM for all experts' grad_w + a batched counter update over the stacked `[E,·]` state) is the path
-to close more of the gap to dense (645k). MoE remains ~15× slower than dense at E=16; the gap is
-overhead, not FLOPs (equal active MACs).
+Correctness (CPU, no GPU needed): the batched `[E,·]` update is **bit-identical** to looping the
+per-expert update with the same SR order (`test_batched_update_equals_per_expert`); the grouped
+forward equals a per-expert reference over the same stacked weights
+(`test_grouped_stacked_forward_matches_reference_and_trains`). `torch._grouped_mm` runs on CPU
+(fp32) for the tests and maps to the optimized grouped kernel on CUDA. Enable with `grouped=True` /
+`GPTConfig.ffn_grouped`.
+
+**Where the gap to dense now stands:** MoE16 at 144.7k tok/s is **~4.5× slower than dense** (645k),
+down from ~24× at baseline. The remainder is (a) E× weight traffic (each expert has its own weights
+— fundamental to MoE, not overhead), (b) the per-expert segment weight-gradient matmul loop (the
+last per-expert step; needs a reliable 3D grouped GEMM — `torch._grouped_mm`'s 2d×2d→3d mode did not
+give per-segment grad_w cleanly), and (c) sort/scatter routing. The win is quality/capacity at equal
+active MACs **and now within ~4.5× of dense wall-clock**, where it was an order of magnitude before.
