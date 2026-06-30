@@ -154,3 +154,33 @@ def test_packed_experts_match_unpacked_on_cpu():
         ta, _ = decode_state(ea.fc1.state, 11)
         tb, _ = decode_state(unpack_codes(eb.fc1.state, d), 11)
         assert torch.equal(ta, tb)
+
+
+def test_grouped_matches_loop_forward_and_trains():
+    """Prong B: grouped=True (torch._grouped_mm, no python expert loop) must (a) match the loop
+    forward and (b) train. Same math, just batched -- the loop is the ground truth."""
+    if not hasattr(torch, "_grouped_mm"):
+        import pytest; pytest.skip("torch._grouped_mm unavailable")
+    d = 32
+    def build(grouped):
+        torch.manual_seed(0)
+        return CounterMoEFFN(d, n_experts=4, top_k=2, C=11, grouped=grouped)
+    loop, grp = build(False).eval(), build(True).eval()
+    assert grp.grouped and not loop.grouped
+    torch.manual_seed(1); x = torch.randn(6, 5, d)
+    with torch.no_grad():
+        assert torch.allclose(loop(x), grp(x), atol=1e-4)        # grouped == loop forward
+
+    torch.manual_seed(0)
+    m = CounterMoEFFN(d, n_experts=4, top_k=2, C=11, lr=0.06, grouped=True).train()
+    opt = torch.optim.AdamW([p for p in m.parameters() if p.requires_grad], lr=3e-3)
+    x = torch.randn(64, d); y = torch.randn(64, d) * 0.3
+    st0 = m.experts[0].fc1.state.clone()
+    first = None
+    for _ in range(120):
+        out = m(x); loss = (out - y).pow(2).mean() + 1e-2 * m.last_aux_loss
+        opt.zero_grad(set_to_none=True); loss.backward(); opt.step()
+        if first is None: first = loss.item()
+    assert loss.item() < 0.7 * first                             # learns
+    assert not torch.equal(st0, m.experts[0].fc1.state)          # experts self-updated
+    assert m.router.weight.grad is not None                      # router still gets its gradient
