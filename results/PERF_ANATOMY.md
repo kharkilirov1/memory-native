@@ -64,6 +64,20 @@ the fast config is **d-dependent**: small models → anchors + int8 OFF; large (
 int8 ON. fused_qkv is ~neutral at this size (gap < noise). Best d=512 (anchor 2-4 + int8 off) ≈ 60k
 vs 36.5k for pure-reversible+int8-on = **+65%**, loss unchanged.
 
+**Two levers that did NOT add speed at d=512 (honest negatives; same arm, baseline noise ~12%):**
+- **decimation** (`decimate_updates`): 61292 tok/s vs baseline 55–61k → within noise. It is a
+  *late-training* lever — the skip period only grows once a layer's flip-rate falls; over 200 warmup
+  steps almost every layer is still active (period=1, no skips). Loss unaffected. Re-check on long
+  runs, not a short-run win.
+- **decode-prologue** (`counter_triton`, decode fused into the forward GEMM): 50393 tok/s, *below*
+  the baseline band → not faster at d=512. The custom triton decode-matmul doesn't beat
+  packed-decode + cuBLAS on narrow layers (kernel overhead); may pay at larger d. Loss preserved.
+
+**Consolidated speed recipe (witnessed):** the one dominant lever is **anchors=2-4 (+35%)**; **int8 is
+d-dependent** (OFF below ~768, ON above); fused_qkv / decimation / decode-prologue are
+neutral-to-marginal at d=512. Best d=512 ≈ 60k vs 36.5k pure-reversible+int8 = **+65%**, loss
+unchanged. At 1B (d=2048) the recipe is anchors=2 + int8 ON.
+
 **Residual / note.** Anchors reduce but do not remove it. It is **opt-in**: it is the price of the
 activation-memory lever. With enough memory you turn reversible off and there is no second forward.
 
