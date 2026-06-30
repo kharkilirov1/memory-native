@@ -35,7 +35,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .counter import RMSCounterLinear
+from .counter import RMSCounterLinear, decode_state, encode_state, stochastic_round
 from .packed import PackedRMSCounterLinear
 
 __all__ = ["CounterMoEFFN"]
@@ -48,47 +48,106 @@ def _gelu_grad(x: torch.Tensor) -> torch.Tensor:
     return cdf + x * pdf
 
 
-class _GroupedExperts(torch.autograd.Function):
-    """Run ALL experts' two counter MLPs as grouped GEMMs (one launch each via torch._grouped_mm)
-    instead of a python loop over E experts, then self-update each expert's counter state from its
-    grouped weight-gradient. Tokens arrive already SORTED by expert; `offs` are the cumulative
-    per-expert row ends. Routing, the convex-combination weighting, and the scatter stay in ordinary
-    autograd OUTSIDE this Function (so the router gets its gradient for free); the Function owns only
-    x->grad_x and the counter update -- the counter-specific part autograd can't express. `tap`
-    forces backward to run even when x needs no gradient (so the experts always self-update)."""
+@torch.no_grad()
+def _batched_rms_update(state, scale, v, grad_w, active, *, C, lr, lr_scale, beta, eps):
+    """RMS + stochastic-rounding counter update over a STACK of experts at once: state/grad_w are
+    [E,out,in], scale/v are [E,out,1]. Identical math to RMSCounterLinear._update_tile (exact/eager,
+    pulse=direct), just vectorized over the E axis -- so all experts update in ONE set of ops, no
+    per-expert decode/SR/encode loop. `active` [E] masks experts that got no tokens this step (they
+    keep their state/scale/v unchanged, matching the loop path which never calls them). Bit-identical
+    to looping the same update per expert with the same SR draw order (verified)."""
+    t, c = decode_state(state, C); t = t.float(); c = c.float()
+    g_sq = grad_w.pow(2).mean(dim=-1, keepdim=True)
+    v_new = beta * v + (1.0 - beta) * g_sq
+    denom = v_new.sqrt().clamp_min(eps)
+    grad_eff = grad_w / denom
+    grad_s = (grad_w * t).sum(dim=-1, keepdim=True) / math.sqrt(grad_w.shape[-1])
+    s_new = (scale - lr_scale * grad_s).clamp(1e-5, 10.0)
+    cc = stochastic_round(c * (scale / s_new) + (-lr * grad_eff) * (C / s_new))
+    carry = torch.trunc(cc / C)
+    rem = cc - carry * C
+    nt = (t + carry).clamp(-1, 1)
+    rem = torch.where((t + carry) != nt, torch.sign(cc) * (C - 1), rem).clamp(-(C - 1), C - 1)
+    new_state = encode_state(nt, rem, C)
+    m = active.view(-1, *([1] * (state.dim() - 1)))           # [E,1,1] broadcast mask
+    state.copy_(torch.where(m, new_state, state))
+    scale.copy_(torch.where(m, s_new, scale))
+    v.copy_(torch.where(m, v_new, v))
+
+
+class StackedCounterExperts(nn.Module):
+    """All E experts' two counter MLPs in STACKED buffers ([E,out,in]) instead of a ModuleList, so
+    the weight decode (forward) and the RMS+SR update (backward) are each ONE vectorized op over the
+    whole expert axis -- no python per-expert loop. Combined with the grouped GEMMs, the only
+    remaining per-expert step is forming each segment's weight-gradient. Same counter math as
+    RMSCounterLinear (exact/eager); state is 1 byte/weight here (unpacked codes, the stack is small)."""
+
+    def __init__(self, E, d, h, *, C, lr, lr_scale, init_gain=1.0, rms_beta=0.9, rms_eps=1e-3):
+        super().__init__()
+        self.E, self.d, self.h, self.C = E, d, h, C
+        self.lr, self.lr_scale = lr, lr_scale
+        self.beta, self.eps = rms_beta, rms_eps
+        for name, out, in_ in (("1", h, d), ("2", d, h)):
+            t0 = torch.randint(-1, 2, (E, out, in_), dtype=torch.int16)
+            self.register_buffer(f"s{name}", encode_state(t0, torch.zeros_like(t0), C))
+            s0 = init_gain * math.sqrt(3.0 / (2.0 * in_))
+            self.register_buffer(f"sc{name}", torch.full((E, out, 1), s0, dtype=torch.float32))
+            self.register_buffer(f"v{name}", torch.zeros((E, out, 1), dtype=torch.float32))
+
+    def weights(self):
+        """Decode both stacked states to usable ternary*scale weights, in ONE decode each."""
+        W1 = self.sc1 * decode_state(self.s1, self.C)[0].float()   # [E,h,d]
+        W2 = self.sc2 * decode_state(self.s2, self.C)[0].float()   # [E,d,h]
+        return W1, W2
+
+    @torch.no_grad()
+    def update(self, grad_w1, grad_w2, active):
+        kw = dict(C=self.C, lr=self.lr, lr_scale=self.lr_scale, beta=self.beta, eps=self.eps)
+        _batched_rms_update(self.s1, self.sc1, self.v1, grad_w1, active, **kw)
+        _batched_rms_update(self.s2, self.sc2, self.v2, grad_w2, active, **kw)
+
+    def persistent_bytes(self):
+        return (self.s1.numel() + self.s2.numel()
+                + (self.sc1.numel() + self.sc2.numel() + self.v1.numel() + self.v2.numel()) * 4)
+
+
+class _StackedGroupedFn(torch.autograd.Function):
+    """Grouped forward + grad_x via torch._grouped_mm over the stacked experts, then ONE batched
+    counter update. The only per-expert step left is the segment weight-gradient matmul (cheap GEMM);
+    the heavy decode/SR/encode is vectorized over E. tap forces backward so experts always update."""
 
     @staticmethod
-    def forward(ctx, x_sorted, offs, tap, moe):
-        E, d, h = moe.E, moe.d, moe.h
-        W1 = torch.empty(E, h, d, device=x_sorted.device, dtype=torch.float32)   # scale1*T1 [out,in]
-        W2 = torch.empty(E, d, h, device=x_sorted.device, dtype=torch.float32)
-        for e, ex in enumerate(moe.experts):
-            t1, _ = ex.fc1._decode_rows(0, h); W1[e] = ex.fc1.scale * t1.float()
-            t2, _ = ex.fc2._decode_rows(0, d); W2[e] = ex.fc2.scale * t2.float()
+    def forward(ctx, x_sorted, offs, tap, stk):
+        W1, W2 = stk.weights()                                          # [E,h,d], [E,d,h]
         xs = x_sorted.float()
         y1 = torch._grouped_mm(xs, W1.transpose(1, 2).contiguous(), offs=offs)   # [M,h]
         a = F.gelu(y1)
         y2 = torch._grouped_mm(a, W2.transpose(1, 2).contiguous(), offs=offs)    # [M,d]
-        ctx.moe = moe; ctx.offs = offs
+        ctx.stk = stk; ctx.offs = offs
         ctx.save_for_backward(xs, y1, a, W1, W2)
         return y2.to(x_sorted.dtype)
 
     @staticmethod
     def backward(ctx, grad_y2):
         xs, y1, a, W1, W2 = ctx.saved_tensors
-        offs = ctx.offs; moe = ctx.moe
+        offs = ctx.offs; stk = ctx.stk; E = stk.E
         gy2 = grad_y2.float()
-        grad_a = torch._grouped_mm(gy2, W2.contiguous(), offs=offs)              # [M,h]
+        grad_a = torch._grouped_mm(gy2, W2.contiguous(), offs=offs)               # [M,h]
         grad_y1 = grad_a * _gelu_grad(y1)
-        grad_x = torch._grouped_mm(grad_y1, W1.contiguous(), offs=offs)          # [M,d]
-        # per-expert counter update from the grouped weight-gradients (the cheap ~9% part).
+        grad_x = torch._grouped_mm(grad_y1, W1.contiguous(), offs=offs)           # [M,d]
+        # per-segment weight gradients, stacked (the only remaining per-expert step; cheap GEMMs).
+        gw1 = xs.new_zeros(E, stk.h, stk.d)
+        gw2 = xs.new_zeros(E, stk.d, stk.h)
         bounds = [0] + offs.tolist()
-        for e, ex in enumerate(moe.experts):
+        active = torch.zeros(E, dtype=torch.bool, device=xs.device)
+        for e in range(E):
             s, t = bounds[e], bounds[e + 1]
             if t <= s:
                 continue
-            ex.fc1.apply_update_from_grad_w(grad_y1[s:t].t() @ xs[s:t])          # [h,d]
-            ex.fc2.apply_update_from_grad_w(gy2[s:t].t() @ a[s:t])               # [d,h]
+            active[e] = True
+            gw1[e] = grad_y1[s:t].t() @ xs[s:t]                                    # [h,d]
+            gw2[e] = gy2[s:t].t() @ a[s:t]                                         # [d,h]
+        stk.update(gw1, gw2, active)                                              # ONE batched update
         return grad_x.to(grad_y2.dtype), None, None, None
 
 
@@ -143,21 +202,27 @@ class CounterMoEFFN(nn.Module):
         # h = 4d / top_k -> top_k experts cost ~ the dense FFN's 2*d*4d active MACs/token.
         self.h = int(expert_hidden) if expert_hidden is not None else max(1, (4 * self.d) // self.k)
         self.aux_loss_weight = float(aux_loss_weight)
-        # grouped=True replaces the python per-expert loop with grouped GEMMs (torch._grouped_mm):
-        # all experts' fc1/fc2 run in one launch each, the per-expert update reads its grouped
-        # weight-gradient. Same math as the loop (fp32, up to reduction order). Needs torch._grouped_mm.
+        # grouped=True replaces the python per-expert loop with grouped GEMMs (torch._grouped_mm) +
+        # stacked experts: all experts' fc1/fc2 run in one launch each AND the counter update is one
+        # vectorized op over the expert axis (StackedCounterExperts). Same math as the loop (fp32, up
+        # to reduction order + batched-vs-per-expert SR ordering). Needs torch._grouped_mm.
         self.grouped = bool(grouped) and hasattr(torch, "_grouped_mm")
 
         # The ONLY fp Parameter: the router (a tiny d->E linear). AdamW owns it.
         self.router = nn.Linear(self.d, self.E, bias=False)
         nn.init.normal_(self.router.weight, std=0.02)
 
-        # packed_experts=True (default): experts are PackedRMSCounterLinear -> fused Triton update
-        # on CUDA + 0.75 B/weight. Identical dynamics on CPU.
-        self.experts = nn.ModuleList(
-            _CounterExpert(self.d, self.h, C=C, lr=lr, lr_scale=lr_scale, packed=packed_experts)
-            for _ in range(self.E)
-        )
+        # grouped -> stacked storage (one shared buffer, vectorized decode+update); else a ModuleList
+        # of per-expert counter MLPs. packed_experts=True: PackedRMSCounterLinear (fused update + 0.75
+        # B/weight) on the loop path. Identical dynamics on CPU.
+        if self.grouped:
+            self.stacked = StackedCounterExperts(self.E, self.d, self.h, C=C, lr=lr, lr_scale=lr_scale)
+            self.experts = nn.ModuleList()
+        else:
+            self.experts = nn.ModuleList(
+                _CounterExpert(self.d, self.h, C=C, lr=lr, lr_scale=lr_scale, packed=packed_experts)
+                for _ in range(self.E)
+            )
 
         # Diagnostics (not optimizer state): O(E) scalars.
         self.register_buffer("token_count", torch.zeros(self.E, dtype=torch.float64),
@@ -228,7 +293,7 @@ class CounterMoEFFN(nn.Module):
         x_sorted = h[sorted_tok]                                          # [M, d] (autograd-tracked)
         tap = (torch.zeros((), device=h.device, dtype=h.dtype, requires_grad=True)
                if torch.is_grad_enabled() else h.new_zeros(()))           # forces experts to update
-        y2 = _GroupedExperts.apply(x_sorted, offs, tap, self)             # [M, d] unweighted outputs
+        y2 = _StackedGroupedFn.apply(x_sorted, offs, tap, self.stacked)   # [M, d] unweighted outputs
         weighted = y2 * sorted_w.unsqueeze(-1)                            # router grad flows here
         y = torch.zeros_like(h).index_add(0, sorted_tok, weighted)
         return y.reshape(sh)
@@ -240,10 +305,13 @@ class CounterMoEFFN(nn.Module):
 
     def persistent_bytes(self) -> int:
         """Counter experts (the bulk: ~0.75 B/weight visible + per-row scale/v) + fp router."""
-        b = 0
-        for expert in self.experts:
-            for m in (expert.fc1, expert.fc2):
-                b += m.state.numel() + m.scale.numel() * 4 + m.v.numel() * 4
+        if self.grouped:
+            b = self.stacked.persistent_bytes()
+        else:
+            b = 0
+            for expert in self.experts:
+                for m in (expert.fc1, expert.fc2):
+                    b += m.state.numel() + m.scale.numel() * 4 + m.v.numel() * 4
         b += self.router.weight.numel() * 4                                # fp router
         return b
 

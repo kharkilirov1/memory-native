@@ -156,31 +156,64 @@ def test_packed_experts_match_unpacked_on_cpu():
         assert torch.equal(ta, tb)
 
 
-def test_grouped_matches_loop_forward_and_trains():
-    """Prong B: grouped=True (torch._grouped_mm, no python expert loop) must (a) match the loop
-    forward and (b) train. Same math, just batched -- the loop is the ground truth."""
+def test_grouped_stacked_forward_matches_reference_and_trains():
+    """Prong B: grouped=True uses stacked experts + torch._grouped_mm (no python expert loop). The
+    grouped forward must equal a manual per-expert forward over the SAME stacked weights, and the
+    model must train (router grad + stacked counter state moves)."""
+    import torch.nn.functional as F
     if not hasattr(torch, "_grouped_mm"):
         import pytest; pytest.skip("torch._grouped_mm unavailable")
     d = 32
-    def build(grouped):
-        torch.manual_seed(0)
-        return CounterMoEFFN(d, n_experts=4, top_k=2, C=11, grouped=grouped)
-    loop, grp = build(False).eval(), build(True).eval()
-    assert grp.grouped and not loop.grouped
-    torch.manual_seed(1); x = torch.randn(6, 5, d)
+    torch.manual_seed(0)
+    m = CounterMoEFFN(d, n_experts=4, top_k=2, C=11, grouped=True).eval()
+    assert m.grouped and hasattr(m, "stacked")
+    torch.manual_seed(1); x = torch.randn(6, 5, d); h = x.reshape(-1, d)
     with torch.no_grad():
-        assert torch.allclose(loop(x), grp(x), atol=1e-4)        # grouped == loop forward
+        yg = m(x).reshape(-1, d)
+        flat_tok, flat_exp, flat_w = m._route(h)                 # deterministic router -> same routing
+        W1, W2 = m.stacked.weights()
+        ref = torch.zeros_like(h)
+        for e in range(m.E):
+            sel = (flat_exp == e).nonzero(as_tuple=True)[0]
+            if sel.numel() == 0:
+                continue
+            tok = flat_tok[sel]
+            o = F.gelu(h[tok] @ W1[e].t()) @ W2[e].t()           # per-expert reference, same weights
+            ref.index_add_(0, tok, flat_w[sel].unsqueeze(-1) * o)
+        assert torch.allclose(yg, ref, atol=1e-4)                # grouped forward == per-expert ref
 
     torch.manual_seed(0)
-    m = CounterMoEFFN(d, n_experts=4, top_k=2, C=11, lr=0.06, grouped=True).train()
-    opt = torch.optim.AdamW([p for p in m.parameters() if p.requires_grad], lr=3e-3)
+    m2 = CounterMoEFFN(d, n_experts=4, top_k=2, C=11, lr=0.06, grouped=True).train()
+    opt = torch.optim.AdamW([p for p in m2.parameters() if p.requires_grad], lr=3e-3)
     x = torch.randn(64, d); y = torch.randn(64, d) * 0.3
-    st0 = m.experts[0].fc1.state.clone()
+    st0 = m2.stacked.s1.clone()
     first = None
     for _ in range(120):
-        out = m(x); loss = (out - y).pow(2).mean() + 1e-2 * m.last_aux_loss
+        out = m2(x); loss = (out - y).pow(2).mean() + 1e-2 * m2.last_aux_loss
         opt.zero_grad(set_to_none=True); loss.backward(); opt.step()
         if first is None: first = loss.item()
     assert loss.item() < 0.7 * first                             # learns
-    assert not torch.equal(st0, m.experts[0].fc1.state)          # experts self-updated
-    assert m.router.weight.grad is not None                      # router still gets its gradient
+    assert not torch.equal(st0, m2.stacked.s1)                   # stacked counter state self-updated
+    assert m2.router.weight.grad is not None                     # router still gets its gradient
+
+
+def test_batched_update_equals_per_expert():
+    """The vectorized [E,out,in] counter update == looping the same update per expert (same SR
+    order). Pins that StackedCounterExperts.update keeps the per-expert dynamics exactly."""
+    from memory_native.counter import encode_state
+    from memory_native.moe_ffn import _batched_rms_update
+    C, E, out, in_ = 11, 4, 8, 12
+    torch.manual_seed(0)
+    st = encode_state(torch.randint(-1, 2, (E, out, in_)).short(),
+                      torch.zeros(E, out, in_).short(), C)
+    sc = torch.full((E, out, 1), 0.2); v = torch.zeros(E, out, 1)
+    gw = torch.randn(E, out, in_); active = torch.ones(E, dtype=torch.bool)
+    kw = dict(C=C, lr=0.04, lr_scale=2e-4, beta=0.9, eps=1e-3)
+    sb, scb, vb = st.clone(), sc.clone(), v.clone()
+    torch.manual_seed(7); _batched_rms_update(sb, scb, vb, gw.clone(), active, **kw)
+    torch.manual_seed(7)
+    sp = st.clone(); scp = sc.clone(); vp = v.clone()
+    for e in range(E):                                           # same SR draw order as the batch
+        _batched_rms_update(sp[e:e+1], scp[e:e+1], vp[e:e+1], gw[e:e+1].clone(),
+                            active[e:e+1], **kw)
+    assert torch.equal(sb, sp)
