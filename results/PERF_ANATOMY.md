@@ -36,6 +36,20 @@ zero extra. So a step goes from `forward(1) + backward(2)` to `forward(1) + [inv
 **Mitigation.** Anchors: store an activation every K blocks and recompute *from the anchor* (ordinary
 checkpointing, no inverse, exact) → recompute count drops to O(L/A).
 
+**Measured (the spare-memory→speed knob; Blackwell, ReversibleGPT d=512, 8 layers, int8, fused_qkv):**
+
+| anchor_every | tok/s | peak GiB | train loss |
+|---|---|---|---|
+| 0 (pure reversible) | 36485 | 0.43 | 2.763 |
+| **2** | **49190 (+35%)** | 0.54 | 2.760 |
+| 4 | 50271 (+38%) | 0.71 | 2.763 |
+| 8 (whole-chain checkpoint) | 50811 (+39%) | 1.08 | 2.761 |
+
+The inverse pass is ~1 of the ~2 extra F/G evals; anchors drop it. **anchor_every=2 buys +35% tok/s
+for +0.11 GiB** — pure reversible (the minimum-memory extreme) leaves ~a third of throughput on the
+table for almost no memory saving. Loss is identical (anchors are exact) → free speed given any
+memory headroom. Sweet spot 2–4; anchor=8 adds +1% for 2× the extra memory. (`run_rev` arm.)
+
 **Residual / note.** Anchors reduce but do not remove it. It is **opt-in**: it is the price of the
 activation-memory lever. With enough memory you turn reversible off and there is no second forward.
 
