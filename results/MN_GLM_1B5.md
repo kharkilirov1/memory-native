@@ -93,6 +93,24 @@ all-reduce, chunked loss, MTP module, `GPTConfig.ffn`/`ffn_grouped` flags. 128 t
 None of these conflict with the counter method (they are all just different linear/norm shapes that
 counter-linears slot into); they are the build list to go from "our GPT" to "GLM-5.2-class".
 
+## 5b. Witness — the skeleton trains end-to-end on real GPU (Blackwell, ZeroGPU)
+
+`glm.py` (RMSNorm + GQA + RoPE + QK-norm + Counter-MoE) built and trained on real tinyshakespeare,
+d=768, L=6, E=8, int8 fwd+update, grouped MoE, 300 steps. CPU unit tests (5) pin RMSNorm/RoPE/GQA;
+this is the GPU end-to-end:
+
+| GQA (kv/heads) | val | tok/s | counter-coeffs |
+|---|---|---|---|
+| 12/12 (full MHA) | **2.2435** | 29517 | 14.2M |
+| 3/12 (GQA 4×) | 2.3218 | 27890 | 8.8M |
+| 1/12 (MQA) | 2.5950 | 29821 | 7.7M |
+
+The classic GQA tradeoff shows up correctly — **MHA > GQA > MQA** in val; GQA-4× costs +0.08 val for
+−38% attention params, MQA (1 KV head) is too aggressive (+0.35). tok/s ≈ equal (attention isn't the
+bottleneck; the MoE FFN dominates). The skeleton behaves exactly as a GLM-class model should. (Toy
+char corpus, so absolute val is not meaningful — the point is the components are wired right and the
+full stack trains with the tuned counter knobs.) Run via the `glm:` space arm.
+
 ## 6. One-line spec
 
 `ReversibleGPT(d=1536, L=24, GQA 12/2, RoPE, RMSNorm, ffn="moe" E=8 k=2 SwiGLU grouped, kind="counter_packed", C=11, anchor_every=2, int8 fwd+update, act_save_bits=8, fused_qkv, decimate, MTP×2 untied)` → ~2B params, ~1.3 GiB state, trains on one mid-GPU.
