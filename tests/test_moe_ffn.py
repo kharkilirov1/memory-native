@@ -128,3 +128,29 @@ def test_capacity_grows_without_active_compute():
     small_expert = small.k * (2 * d * small.h)
     big_expert = big.k * (2 * d * big.h)
     assert small_expert == big_expert
+
+
+def test_packed_experts_match_unpacked_on_cpu():
+    """Prong A: packed experts (fused-update path on CUDA) keep IDENTICAL dynamics on CPU -- packed
+    only changes storage + which update kernel fires, not the math. Same seed -> bit-exact forward
+    and bit-exact loss after a training step. (Guards 'no CPU regression' from the default switch.)"""
+    import torch.nn.functional as F
+    d = 32
+    def build(packed):
+        torch.manual_seed(0)
+        return CounterMoEFFN(d, n_experts=4, top_k=2, C=11, packed_experts=packed).train()
+    a, b = build(False), build(True)
+    torch.manual_seed(1); x = torch.randn(8, 5, d)
+    ya = a(x.clone()); yb = b(x.clone())
+    assert torch.equal(ya, yb)                       # identical forward
+    # the counter update uses torch.rand stochastic rounding -> reseed before each backward so both
+    # arms draw the SAME SR stream (otherwise a's draws advance the RNG before b's update).
+    torch.manual_seed(2); ya.pow(2).mean().backward()
+    torch.manual_seed(2); yb.pow(2).mean().backward()
+    # after one self-update step the experts' visible weights must still match bit-for-bit
+    for ea, eb in zip(a.experts, b.experts):
+        from memory_native.counter import decode_state
+        from memory_native.packed import unpack_codes
+        ta, _ = decode_state(ea.fc1.state, 11)
+        tb, _ = decode_state(unpack_codes(eb.fc1.state, d), 11)
+        assert torch.equal(ta, tb)

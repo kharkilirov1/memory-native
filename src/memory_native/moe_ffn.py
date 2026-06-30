@@ -34,18 +34,31 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .counter import RMSCounterLinear
+from .packed import PackedRMSCounterLinear
 
 __all__ = ["CounterMoEFFN"]
 
 
-class _CounterExpert(nn.Module):
-    """A single counter-MLP expert: RMSCounterLinear(d->h) -> gelu -> RMSCounterLinear(h->d).
-    Holds no fp Parameters; both linears are counter-state and self-update in backward."""
+def _expert_linear(fin: int, fout: int, *, C: int, lr: float, lr_scale: float, packed: bool):
+    """Pick the expert's counter linear. packed=True -> PackedRMSCounterLinear, which on CUDA fires
+    the ONE-launch fused Triton update (vs ~15 torch ops) and stores 0.75 B/weight; it needs
+    in_features % 4 == 0, so fall back to RMSCounterLinear when the width isn't divisible by 4. The
+    learning dynamics are identical on CPU (packed only changes storage + which update path runs)."""
+    if packed and fin % 4 == 0:
+        return PackedRMSCounterLinear(fin, fout, C=C, lr=lr, lr_scale=lr_scale)
+    return RMSCounterLinear(fin, fout, C=C, lr=lr, lr_scale=lr_scale)
 
-    def __init__(self, dim: int, hidden: int, *, C: int, lr: float, lr_scale: float) -> None:
+
+class _CounterExpert(nn.Module):
+    """A single counter-MLP expert: counter-linear(d->h) -> gelu -> counter-linear(h->d). Holds no
+    fp Parameters; both linears are counter-state and self-update in backward. With packed=True the
+    two linears are PackedRMSCounterLinear so the per-expert update runs as one fused kernel."""
+
+    def __init__(self, dim: int, hidden: int, *, C: int, lr: float, lr_scale: float,
+                 packed: bool = True) -> None:
         super().__init__()
-        self.fc1 = RMSCounterLinear(dim, hidden, C=C, lr=lr, lr_scale=lr_scale)
-        self.fc2 = RMSCounterLinear(hidden, dim, C=C, lr=lr, lr_scale=lr_scale)
+        self.fc1 = _expert_linear(dim, hidden, C=C, lr=lr, lr_scale=lr_scale, packed=packed)
+        self.fc2 = _expert_linear(hidden, dim, C=C, lr=lr, lr_scale=lr_scale, packed=packed)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.fc2(F.gelu(self.fc1(x)))
@@ -66,7 +79,8 @@ class CounterMoEFFN(nn.Module):
 
     def __init__(self, dim: int, n_experts: int = 8, top_k: int = 2,
                  expert_hidden: int | None = None, *, C: int = 11, lr: float = 0.04,
-                 lr_scale: float = 2e-4, aux_loss_weight: float = 1e-2) -> None:
+                 lr_scale: float = 2e-4, aux_loss_weight: float = 1e-2,
+                 packed_experts: bool = True) -> None:
         super().__init__()
         self.d = int(dim)
         self.E = int(n_experts)
@@ -81,8 +95,11 @@ class CounterMoEFFN(nn.Module):
         self.router = nn.Linear(self.d, self.E, bias=False)
         nn.init.normal_(self.router.weight, std=0.02)
 
+        # packed_experts=True (default): experts are PackedRMSCounterLinear -> fused Triton update
+        # on CUDA + 0.75 B/weight. Identical dynamics on CPU.
         self.experts = nn.ModuleList(
-            _CounterExpert(self.d, self.h, C=C, lr=lr, lr_scale=lr_scale) for _ in range(self.E)
+            _CounterExpert(self.d, self.h, C=C, lr=lr, lr_scale=lr_scale, packed=packed_experts)
+            for _ in range(self.E)
         )
 
         # Diagnostics (not optimizer state): O(E) scalars.
