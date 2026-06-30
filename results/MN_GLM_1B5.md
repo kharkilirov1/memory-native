@@ -1,0 +1,98 @@
+# MN-GLM-1.5B — a GLM-5.2-class, memory-native model at 1–2B (blueprint + tuned config)
+
+A modern GLM-class decoder (MoE + GQA + RoPE + SwiGLU + RMSNorm) rebuilt on the counter-synapse
+method, at ~1–2B parameters, with **every knob set to what the runs in this repo actually showed**
+(not defaults). Honesty first: §5 marks exactly what is already in the codebase vs what is new design
+work. Knob justifications point at the witness.
+
+---
+
+## 1. Architecture (GLM-5.2-class)
+
+```
+tokens ─► embedding (tied)                                   [counter-linear, see §3]
+   │
+   ├─ N× reversible block  (O(1) activations, anchor_every=2)
+   │     F = ATTENTION:  RMSNorm → GQA(+RoPE, QK-norm) → out-proj     [counter-linears]
+   │     G = FFN:        RMSNorm → Counter-MoE (SwiGLU experts, top-k)  [M4, grouped+stacked]
+   │
+   ├─ final RMSNorm
+   └─ heads:  next-token  +  MTP (k extra heads, UNTIED)   [M9]
+```
+
+- **Sparse MoE FFN** (the GLM-4.5/5-class move) = our **M4 Counter-MoE** — the one *validated*
+  architecture win (beats dense at equal active compute, monotonic E-scaling, `MOE_FFN.md`).
+- **GQA** (few KV heads) shrinks the KV cache; **RoPE** for long context; **SwiGLU** experts;
+  **RMSNorm** pre-norm; optional **QK-norm** for stability at depth.
+
+## 2. Concrete config (~1.5B total / ~0.6B active)
+
+| field | value | note |
+|---|---|---|
+| d_model | 1536 | |
+| n_layer | 24 | reversible coupling blocks |
+| n_head / n_kv_head | 12 / 2 | GQA 6× KV reduction |
+| head_dim | 128 | RoPE applied per head |
+| vocab | 50257 (gpt2) | GLM uses ~150k; swap tokenizer if desired |
+| seq_len | 4096 | RoPE-enabled long context (runs here used 256) |
+| MoE experts E / top_k | 8 / 2 | capacity = E/top_k × dense ≈ 4× |
+| expert = SwiGLU hidden h | ≈ 1.33·d (=2048) | sized so top_k experts ≈ dense active MACs |
+| MTP extra heads | 2 (untied) | M9 |
+
+**Param budget** (per layer ≈ `2.33 d²` attn + `E·4 d²` MoE = `34.3 d²`; ×24 + embed):
+≈ **2.0–2.3B total**, **~0.6B active/token**. Dial to ~1.3B with `L=20, E=6`. Persistent state at
+**0.72 B/coeff → ~1.1–1.6 GiB** (vs dense+Adam ~30–37 GiB).
+
+## 3. The method knobs — set to what the runs showed (the part you asked for)
+
+| knob | value | why (witness) |
+|---|---|---|
+| linear `kind` | **counter_packed** | 0.75 B/weight; `counter_triton` decode-prologue was **not** faster at d≤512 (`PERF_ANATOMY.md`), re-check only at d≥1536 |
+| `C` (counter range) | **11** | best per the bit-budget ablation (63 states) |
+| reversible | **ON**, `anchor_every=2` | **+35% tok/s for +0.1 GiB**, loss identical — the dominant speed lever; pure reversible (anchor=0) left a third of throughput on the table |
+| `ffn` | **moe**, `grouped=True` | M4 = the validated win; stacked-grouped kernels gave **×5.3** (27k→145k tok/s), quality preserved |
+| `aux_loss_weight` | **1e-2** | load-balance; >0 needed or the router collapses (`MOE_FFN.md`) |
+| `forward_compute` / `update_compute` | **int8** | d=1536 ≥ 768 → int8 **wins** (×2.05 fwd, ×1.45–2.16 update). At d≤512 int8 was −27%, so this is ON *only because the model is wide enough* |
+| `act_save_bits` | **8** | int8 saved activation is reused by the int8 update (no re-quant of X) |
+| `fused_qkv` | **ON** | q,k,v in one launch; ~neutral-to-small but free |
+| `decimate_updates` | **ON** | skips updates on stabilized layers — a *late-training* win (no effect in the first ~200 steps, real over a long run) |
+| MTP heads | **untied** | tied small-embedding heads REGRESS (M9 toy-fail); untied is the fix |
+| optimizer (fp params) | AdamW, lr 3e-4 | owns ONLY router + embed + norms + MTP heads; counters self-update (lr 0.04, lr_scale 2e-4) |
+| DDP | grad_w all-reduce | states stay bit-identical across ranks (`test_ddp_*`) |
+| loss head | chunked (`loss_chunk`) | never materialize `[B,T,V]` at vocab 50k |
+
+**Scale-dependence is the headline tuning lesson:** `int8` and `counter_triton` flip sign with `d` —
+ON here because d=1536 is wide; both would be *off* on a narrow model. `anchors` and the MoE kernels
+help at every scale.
+
+## 4. Budget estimates (extrapolated; mark as estimate, not witness)
+
+| | MN-GLM-1.5B | dense+AdamW equiv |
+|---|---|---|
+| persistent state | **~1.1–1.6 GiB** | ~30–37 GiB |
+| training peak (reversible, anchor=2) | **fits one 24 GB GPU comfortably** | OOM on <40 GB |
+| throughput | MoE quality at ~**0.6–0.9× dense** step speed (grouped kernels close most of the tiny-scale gap; routing + E× weight traffic remain) | 1.0× |
+
+The prize is unchanged: **a 1.5–2B-capacity model that trains in the memory of a small GPU**, with
+MoE buying frontier-style quality-per-active-FLOP — not a faster step.
+
+## 5. In the codebase vs NEW design work (honest)
+
+**Already here (wired, tested):** counter-synapse linears, reversible + anchors, **Counter-MoE
+(grouped+stacked kernels)**, int8 fwd/update, act-quant, fused_qkv, decimation, DDP grad_w
+all-reduce, chunked loss, MTP module, `GPTConfig.ffn`/`ffn_grouped` flags. 128 tests green.
+
+**Needs adding for true GLM-5.2 parity (new modules):**
+- **RoPE** (we use learned positional embeddings) — needed for long context.
+- **GQA** (we use full MHA) — KV-head reduction.
+- **SwiGLU experts** (our experts are fc→gelu→fc2) — swap the expert MLP.
+- **RMSNorm** (we use LayerNorm) — drop-in.
+- **QK-norm** (optional) — stability at depth.
+- MoE **backward grad_w grouping** (the last per-expert loop) — for more step speed.
+
+None of these conflict with the counter method (they are all just different linear/norm shapes that
+counter-linears slot into); they are the build list to go from "our GPT" to "GLM-5.2-class".
+
+## 6. One-line spec
+
+`ReversibleGPT(d=1536, L=24, GQA 12/2, RoPE, RMSNorm, ffn="moe" E=8 k=2 SwiGLU grouped, kind="counter_packed", C=11, anchor_every=2, int8 fwd+update, act_save_bits=8, fused_qkv, decimate, MTP×2 untied)` → ~2B params, ~1.3 GiB state, trains on one mid-GPU.
