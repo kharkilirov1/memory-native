@@ -93,18 +93,27 @@ counter-синапс**; всё остальное ниже — дорожная 
 - 🔧 M1 memory-FFN — на реальных данных слабее dense (+12%); M4 закрывает нишу лучше.
 - 🔧 M9 MTP / M10 MoD — реализованы, но без масштабного/причинно-корректного свидетеля.
 
-## 7. Bill of materials — что внедрить, в каком порядке
+## 7. Bill of materials — что внедрено / что осталось
 
-| # | компонент | вердикт | внедрение | приоритет |
+**Внедрено в реальную GPT за флагами (✅, `test_model_integration.py`):** полезные M-рычаги теперь
+выбираются конфигом, dense-путь бит-в-бит не тронут.
+
+| # | компонент | вердикт | как включить | статус |
 |---|---|---|---|---|
-| 1 | **M4 Counter-MoE** как FFN | ✅ PASS | флаг `ffn="moe"` в `Block`/`GPTConfig` | **первый — единственный доказанный выигрыш** |
-| 2 | **M3 slow-fast** линейки | ✅ PASS | `make_linear`→`SlowFastCounterLinear` | дёшево, сразу |
-| 3 | int8 fwd+update вместе | ✅ (по отдельности) | end-to-end флаг + один T4-замер | закрыть число |
-| 4 | reversible+anchors по умолчанию | ✅ | уже есть `ReversibleGPT(anchor_every)` | вкл. в конфиг |
-| 5 | **M10 MoD** | 🔧 unmeasured | сперва причинно-безопасный witness, потом роутинг блоков | после числа |
-| 6 | **M9 MTP** untied heads | 🔧 toy-fail | отдельная `MTPGPT`, прогон на scale | research |
-| 7 | fused-ядра #1/#2 | 📐 | CUTLASS epilogue/prologue + Nsight | kernel-команда |
-| 8 | NVFP4-веса | 📐 | Blackwell-only | по железу |
+| 1 | **M4 Counter-MoE** как FFN | ✅ PASS | `GPTConfig(ffn="moe", ffn_experts, ffn_top_k)` | **ВНЕДРЕНО** (+ aux-loss в loss) |
+| 2 | **M3 slow-fast** линейки | ✅ PASS | `GPT(kind="slowfast", rank=, merge_every=)` | **ВНЕДРЕНО** |
+| 3 | **M1 memory-FFN** | 🔧 слабее dense | `GPTConfig(ffn="memory", ffn_cells, ffn_k)` | **ВНЕДРЕНО** (compute-saver) |
+| 4 | **M2 2:4 group** | 🔧 PARTIAL | `GPT(kind="group", group=, keep=)` | **ВНЕДРЕНО** |
+| 5 | int8 fwd+update вместе | ✅ (по отдельности) | end-to-end флаг + один T4-замер | число открыто |
+| 6 | reversible+anchors | ✅ | `ReversibleGPT(anchor_every)` (отд. модель) | есть |
+
+**Намеренно НЕ вшито (с причиной):**
+
+| компонент | почему не вшито |
+|---|---|
+| **M10 MoD** | в causal-LM ломает причинность: top-k собирает токены через позиции/батч и attention среди них смешивает будущее с прошлым (известный confound). Сначала причинно-безопасный witness, потом роутинг. |
+| **M9 MTP** | это **отдельная модель** `MTPGPT` (не сабслой Block); toy-fail без untied heads на scale. Уже существует как самостоятельный модуль. |
+| fused-ядра #1/#2, NVFP4 | 📐 kernel/Blackwell-работа, не PyTorch-уровень. |
 
 ## 8. Одной строкой
 

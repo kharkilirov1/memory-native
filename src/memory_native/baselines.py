@@ -37,7 +37,11 @@ class TernaryQATLinear(nn.Module):
 
 def make_linear(kind: str, fin: int, fout: int, init_gain: float = 1.0, **counter_kw):
     """Factory used by the GPT harness.
-    kind in {dense, qat, counter, counter_rms, counter_packed}."""
+    kind in {dense, qat, counter, counter_rms, counter_packed, counter_triton, slowfast, group}.
+    'slowfast' (M3) and 'group' (M2) are counter-linear drop-ins: SlowFastCounterLinear folds a
+    low-rank fp residual into the base every K steps (cuts the base correlation 8-32x); the extra
+    rank/merge_every knobs ride in counter_kw. GroupCounterLinear is a 2:4 structured-sparse counter
+    linear (group/keep/hysteresis in counter_kw). Both replace any nn.Linear in the block."""
     from .counter import CompactCounterLinear, RMSCounterLinear
     from .packed import PackedRMSCounterLinear
 
@@ -50,6 +54,12 @@ def make_linear(kind: str, fin: int, fout: int, init_gain: float = 1.0, **counte
     if kind == "counter_triton":
         from .triton_counter import TritonCounterLinear
         return TritonCounterLinear(fin, fout, init_gain=init_gain, **counter_kw)
+    if kind == "slowfast":                                  # M3
+        from .slowfast import SlowFastCounterLinear
+        return SlowFastCounterLinear(fin, fout, init_gain=init_gain, **counter_kw)
+    if kind == "group":                                     # M2
+        from .group_counter import GroupCounterLinear
+        return GroupCounterLinear(fin, fout, init_gain=init_gain, **counter_kw)
     if kind == "qat":
         return TernaryQATLinear(fin, fout, init_gain)
     if kind == "dense":
