@@ -53,3 +53,27 @@ E=16 the per-expert token share is 4.5–9.2% (uniform would be 6.25%) — no st
 ## Tests — `tests/test_moe_ffn.py` (6, pass)
 router-gets-grads + experts-self-update, top_k=1 routes one expert, load-balance-reduces-imbalance,
 fits-a-target, active-MACs flat in E, persistent grows in E. Default OFF / opt-in.
+
+## End-to-end in the INTEGRATED GPT — `scripts/moe_gpt_witness.py` (real tinyshakespeare)
+
+The numbers above are isolated-FFN. After wiring `ffn="moe"` into the real GPT (`GPTConfig.ffn`,
+`test_model_integration.py`), this re-checks the win in the FULL model: same GPT, **dense-fp
+attention in every arm** (isolates the FFN), only the FFN swapped, **equal active compute**
+(h=4d/top_k → top_k experts ≈ dense FFN MACs). Val-loss is hardware-independent, so the quality
+verdict is valid on CPU (tok/s is NOT — see note). d=128, 3 layers, block 64, 500 steps:
+
+| arm | val-loss | FFN active MACs/tok |
+|---|---|---|
+| dense FFN (fp, AdamW) | 1.9561 | 131072 |
+| **counter-MoE E=8 k=2** | **1.9442** | 131072 |
+| counter-MoE E=16 k=2 | 1.9661 | 131072 |
+
+**MoE-GPT (E=8) beats dense-GPT by Δ0.012 at equal active compute** — the M4 win **survives the
+integration** into the full model, not just the isolated FFN. E=16 is undertrained at this tiny
+scale (500 steps) and dips below E=8 — the same scale-dependence the FFN-level sweep showed; the
+clean monotonic margin (E=16 1.632 vs dense 1.655, Δ0.023) was the d=256/1500-step GPU run above.
+
+**tok/s note (NOT a speed result):** CPU wall-clock was 19.7s (dense) vs 92–149s (MoE) — that gap is
+the python gather/scatter in the CPU routing, the known artifact, NOT the method's speed. A GPU
+grouped-GEMM expert kernel is required for any wall-clock claim; this witness measures **quality
+only**, which transfers from CPU to GPU unchanged.
