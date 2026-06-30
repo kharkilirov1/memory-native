@@ -101,3 +101,27 @@ equal active *MACs* the arithmetic matches dense; the routing overhead dominates
 Blackwell is already ~645k tok/s. **The MoE win is quality/capacity at equal MACs, not wall-clock —
 a grouped-GEMM expert kernel is required before any speed claim.** (Triggered headless via
 gradio_client; `scratchpad/space/app.py` task `intg:`.)
+
+### Making MoE faster — the kernel progression (Blackwell, same d=256/4L/1500-step run)
+
+Two kernel-level changes attack the wall-clock, each measured on the same GPU (training tok/s):
+
+| step | what | moe8 tok/s | moe16 tok/s | val (E=16) |
+|---|---|---|---|---|
+| baseline | RMSCounterLinear experts, python loop | 50595 | 27233 | 1.6176 |
+| **Prong A** | packed experts → fused Triton update (1 launch vs ~15) | 54893 (+8%) | 29736 (+9%) | 1.6063 |
+| **Prong B** | grouped-GEMM experts (`torch._grouped_mm`, no python forward loop) | **69828 (+27%)** | **42782 (+44%)** | 1.6091 |
+
+**Net so far: moe16 27233 → 42782 tok/s (+57%), quality preserved** (val 1.6176→1.6091, within
+noise of the loop). The win grows with E (bigger loop eliminated). Prong A's mere +9% proved the
+fused update was NOT the bottleneck — the **python per-expert forward loop was**, which Prong B
+removes via one grouped GEMM per layer (`grouped=True` / `GPTConfig.ffn_grouped`). The grouped path
+is fp32 bit-exact vs the loop on CPU (`test_grouped_matches_loop_forward_and_trains`), so the math
+is unchanged; `torch._grouped_mm` runs on CPU for the test and maps to the optimized grouped kernel
+on CUDA.
+
+**Still open (next kernel increment):** the *backward* still loops over E to form each expert's
+grad_w and apply its counter update — now the dominant remainder. Grouping that (a 3D-output grouped
+GEMM for all experts' grad_w + a batched counter update over the stacked `[E,·]` state) is the path
+to close more of the gap to dense (645k). MoE remains ~15× slower than dense at E=16; the gap is
+overhead, not FLOPs (equal active MACs).
