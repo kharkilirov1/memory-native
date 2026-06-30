@@ -497,6 +497,23 @@ class CompactCounterLinear(nn.Module):
         self.weight_flips.add_(flips)
 
     @torch.no_grad()
+    def apply_update_from_grad_w(self, grad_w: torch.Tensor) -> None:
+        """Drive ONE full-matrix counter update from an externally-supplied grad_w [out,in].
+
+        For callers that compute grad_w outside this layer's own autograd Function -- e.g. the
+        grouped Counter-MoE, where every expert's weight gradient comes from one grouped GEMM, so
+        the per-expert forward Function is bypassed. Routes through the same fused/torch update path
+        as the in-backward self-update (so the dynamics are identical), at full-matrix granularity.
+        Honors training/update_enabled; does NOT apply decimation or the DDP grad_w all-reduce (the
+        grouped path is single-process / dense-update by construction)."""
+        if not (self.training and self.update_enabled):
+            return
+        lo, hi = 0, self.out_features
+        t_i, c_i = self._decode_rows(lo, hi)
+        if not self._fused_update(lo, hi, grad_w):
+            self._update_tile(lo, hi, grad_w, t_i, c_i, self.scale[lo:hi])
+
+    @torch.no_grad()
     def state_statistics(self) -> dict[str, float]:
         t, c = decode_state(self.state, self.C)
         return {

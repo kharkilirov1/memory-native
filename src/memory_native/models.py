@@ -30,6 +30,7 @@ class GPTConfig:
     ffn: str = "dense"
     ffn_experts: int = 8      # M4: E total experts (capacity, not active compute)
     ffn_top_k: int = 2        # M4: experts visited per token (active compute)
+    ffn_grouped: bool = False # M4: grouped GEMM experts (torch._grouped_mm, no python expert loop)
     ffn_cells: int = 16384    # M1: number of memory cells (perfect square)
     ffn_k: int = 8            # M1: cells retrieved per token
 
@@ -71,7 +72,7 @@ class Block(nn.Module):
         elif cfg.ffn == "moe":
             from .moe_ffn import CounterMoEFFN
             self.ffn = CounterMoEFFN(d, n_experts=cfg.ffn_experts, top_k=cfg.ffn_top_k,
-                                     **_counter_numeric(kw))
+                                     grouped=cfg.ffn_grouped, **_counter_numeric(kw))
         elif cfg.ffn == "memory":
             from .memory_ffn import CounterMemoryFFN
             self.ffn = CounterMemoryFFN(d, n_cells=cfg.ffn_cells, k=cfg.ffn_k,
