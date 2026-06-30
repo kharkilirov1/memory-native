@@ -77,3 +77,27 @@ clean monotonic margin (E=16 1.632 vs dense 1.655, Δ0.023) was the d=256/1500-s
 the python gather/scatter in the CPU routing, the known artifact, NOT the method's speed. A GPU
 grouped-GEMM expert kernel is required for any wall-clock claim; this witness measures **quality
 only**, which transfers from CPU to GPU unchanged.
+
+### GPU run — integrated GPT, Blackwell (ZeroGPU), the cleaner monotonic win
+
+Same integrated `GPT(ffn=...)`, real tinyshakespeare, d=256, 4 layers, block 128, **1500 steps**,
+on an NVIDIA RTX PRO 6000 Blackwell (MIG 2g.48gb). val is pure CE (aux excluded), every arm dense-fp
+attention, equal active MACs:
+
+| arm | val-loss | train-loss | tok/s |
+|---|---|---|---|
+| dense FFN (fp, AdamW) | 1.6243 | 1.4124 | 645790 |
+| counter-MoE E=8 k=2 | 1.6249 | 1.4533 | 50595 |
+| **counter-MoE E=16 k=2** | **1.6176** | 1.4318 | 27233 |
+
+**MoE E=16 beats dense in the live model: 1.6176 vs 1.6243 (Δ0.0067), and E=16 < E=8 — monotonic
+E-scaling** (the tiny CPU run's E=16 dip was just undertraining; 1500 steps fixes it). The
+integration reproduces the M4 win at scale. MoE also generalizes slightly better (lower val despite
+HIGHER train loss than dense — less overfit, consistent with the regularization seen elsewhere).
+
+**Speed — the honest hard number:** MoE is **13–24× SLOWER** wall-clock (645k → 51k/27k tok/s). This
+is the python per-expert gather/scatter + per-expert counter update, NOT a fundamental cost — at
+equal active *MACs* the arithmetic matches dense; the routing overhead dominates because dense on
+Blackwell is already ~645k tok/s. **The MoE win is quality/capacity at equal MACs, not wall-clock —
+a grouped-GEMM expert kernel is required before any speed claim.** (Triggered headless via
+gradio_client; `scratchpad/space/app.py` task `intg:`.)
