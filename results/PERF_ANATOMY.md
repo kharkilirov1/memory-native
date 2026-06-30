@@ -50,6 +50,20 @@ for +0.11 GiB** — pure reversible (the minimum-memory extreme) leaves ~a third
 table for almost no memory saving. Loss is identical (anchors are exact) → free speed given any
 memory headroom. Sweet spot 2–4; anchor=8 adds +1% for 2× the extra memory. (`run_rev` arm.)
 
+**Lever decomposition (anchor=4 fixed, d=512, Blackwell; MIG slice has ~±10-15% run-to-run noise):**
+
+| config | tok/s | note |
+|---|---|---|
+| fqkv=1 int8=1 | 44766 | all on |
+| fqkv=1 **int8=0** | **61506** | int8 OFF → **+37%** |
+| fqkv=0 int8=1 | 41801 | fqkv off (~within noise of int8=1) |
+
+**int8 is net-NEGATIVE at d=512** (the quantize epilogue costs more than the GEMM saving on narrow
+layers) — it only pays at d≥768 (×2.05 fwd), as the d-sweep in `ACCELERATION.md` first showed. So
+the fast config is **d-dependent**: small models → anchors + int8 OFF; large (d≥768 / 1B) → anchors +
+int8 ON. fused_qkv is ~neutral at this size (gap < noise). Best d=512 (anchor 2-4 + int8 off) ≈ 60k
+vs 36.5k for pure-reversible+int8-on = **+65%**, loss unchanged.
+
 **Residual / note.** Anchors reduce but do not remove it. It is **opt-in**: it is the price of the
 activation-memory lever. With enough memory you turn reversible off and there is no second forward.
 
