@@ -82,13 +82,14 @@ MoE buying frontier-style quality-per-active-FLOP — not a faster step.
 (grouped+stacked kernels)**, int8 fwd/update, act-quant, fused_qkv, decimation, DDP grad_w
 all-reduce, chunked loss, MTP module, `GPTConfig.ffn`/`ffn_grouped` flags. 128 tests green.
 
-**Needs adding for true GLM-5.2 parity (new modules):**
-- **RoPE** (we use learned positional embeddings) — needed for long context.
-- **GQA** (we use full MHA) — KV-head reduction.
-- **SwiGLU experts** (our experts are fc→gelu→fc2) — swap the expert MLP.
-- **RMSNorm** (we use LayerNorm) — drop-in.
-- **QK-norm** (optional) — stability at depth.
+**Now DONE (glm.py, tested + GPU-witnessed):** RoPE, GQA, **SwiGLU experts** (gate/up/down in both
+the loop and the grouped/stacked path; parity with gelu at equal active compute — val 2.2421 vs
+2.2476, same 8.8M coeffs), RMSNorm, QK-norm, and the reversible wrapper (`ReversibleMNGLM`, ×3.1 less
+activation memory).
+
+**Still open (new modules):**
 - MoE **backward grad_w grouping** (the last per-expert loop) — for more step speed.
+- A real-corpus / larger-scale run (the witnesses here are toy char-level).
 
 None of these conflict with the counter method (they are all just different linear/norm shapes that
 counter-linears slot into); they are the build list to go from "our GPT" to "GLM-5.2-class".
@@ -110,6 +111,10 @@ The classic GQA tradeoff shows up correctly — **MHA > GQA > MQA** in val; GQA-
 bottleneck; the MoE FFN dominates). The skeleton behaves exactly as a GLM-class model should. (Toy
 char corpus, so absolute val is not meaningful — the point is the components are wired right and the
 full stack trains with the tuned counter knobs.) Run via the `glm:` space arm.
+
+**SwiGLU vs GELU experts** (d=768, L=6, E=8, GQA 3/12, equal active compute): val 2.2421 (gelu) vs
+2.2476 (swiglu), **same 8.8M coeffs** — parity at this toy scale (SwiGLU's edge shows at real scale),
+implementation correct and equal-compute (h=8d/(3·top_k)). SwiGLU is the default (GLM/Llama expert).
 
 ## 5c. Reversible witness — O(1) activation memory in the GLM skeleton (Blackwell)
 
