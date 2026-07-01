@@ -254,3 +254,21 @@ def test_swiglu_grouped_matches_reference_and_trains():
         opt.zero_grad(set_to_none=True); loss.backward(); opt.step()
         if first is None: first = loss.item()
     assert loss.item() < 0.7 * first
+
+
+def test_grouped_grad_w_matches_loop():
+    """The loop-free per-expert weight-gradient (pad+bmm) == the per-segment matmul loop, bit-exact
+    (incl. empty experts). This is the last per-expert loop removed from the MoE backward."""
+    from memory_native.moe_ffn import _grouped_grad_w
+    torch.manual_seed(0)
+    M, h, d, E = 20, 6, 8, 4
+    go = torch.randn(M, h); xs = torch.randn(M, d)
+    for offs in (torch.tensor([5, 9, 14, 20], dtype=torch.int32),
+                 torch.tensor([5, 5, 14, 20], dtype=torch.int32)):        # 2nd: expert 1 empty
+        gw, active = _grouped_grad_w(go, xs, offs, E)
+        starts = [0] + offs.tolist()[:-1]
+        ends = offs.tolist()
+        man = torch.stack([(go[s:t].t() @ xs[s:t] if t > s else torch.zeros(h, d))
+                           for s, t in zip(starts, ends)])
+        assert torch.allclose(gw, man, atol=1e-4)
+        assert active.tolist() == [(t > s) for s, t in zip(starts, ends)]
