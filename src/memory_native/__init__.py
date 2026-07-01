@@ -34,7 +34,7 @@ from .mtp import MultiTokenHead, MTPGPT, mtp_loss, shift_targets
 from .group_counter import GroupCounterLinear
 from .stack_linear import StackCounterLinear
 from .mod import MoDBlock
-from .glm import MNGLM, GLMBlock, GLMAttention, RMSNorm
+from .glm import MNGLM, ReversibleMNGLM, GLMBlock, GLMAttention, RMSNorm
 from .int8_compute import (
     fp8_correlation,
     int4_correlation,
@@ -89,6 +89,7 @@ __all__ = [
     "StackCounterLinear",
     "MoDBlock",
     "MNGLM",
+    "ReversibleMNGLM",
     "GLMBlock",
     "GLMAttention",
     "RMSNorm",
