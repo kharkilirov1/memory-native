@@ -75,6 +75,29 @@ def _batched_rms_update(state, scale, v, grad_w, active, *, C, lr, lr_scale, bet
     v.copy_(torch.where(m, v_new, v))
 
 
+def _grouped_grad_w(go_sorted, x_sorted, offs, E):
+    """Per-expert weight-gradient gw[e] = go[seg_e]^T @ x[seg_e], stacked to [E, Nout, Nin], with NO
+    python loop over experts: scatter each expert's sorted rows into a padded [E, cap, ·] batch (cap =
+    max segment) and one torch.bmm. Zero-padding contributes zero, so the result is bit-exact vs the
+    per-expert matmul loop (up to fp reduction order). Returns (gw, active[E]) where active marks the
+    experts that got at least one token (kept unchanged in the batched update). torch._grouped_mm's
+    2d×2d→3d mode does NOT compute this per-segment product (verified), hence the pad+bmm."""
+    M = go_sorted.shape[0]
+    starts = torch.cat([offs.new_zeros(1), offs[:-1]])
+    counts = offs - starts
+    cap = max(int(counts.max().item()) if M > 0 else 1, 1)
+    row = torch.arange(M, device=go_sorted.device)
+    eid = torch.searchsorted(offs, row, right=True).clamp_max(E - 1)       # expert id per sorted row
+    slot = eid * cap + (row - starts[eid])                                 # slot within the padded batch
+
+    def pad(t):
+        p = t.new_zeros(E * cap, t.shape[1]); p[slot] = t
+        return p.view(E, cap, t.shape[1])
+
+    gw = torch.bmm(pad(go_sorted).transpose(1, 2), pad(x_sorted))          # [E, Nout, Nin]
+    return gw, counts > 0
+
+
 class StackedCounterExperts(nn.Module):
     """All E experts' two counter MLPs in STACKED buffers ([E,out,in]) instead of a ModuleList, so
     the weight decode (forward) and the RMS+SR update (backward) are each ONE vectorized op over the
@@ -181,19 +204,10 @@ class _StackedSwiGLUFn(torch.autograd.Function):
         # grad_x flows through BOTH gate and up branches
         grad_x = (torch._grouped_mm(grad_yg, Wg.contiguous(), offs=offs)
                   + torch._grouped_mm(grad_yu, Wu.contiguous(), offs=offs))      # [M,d]
-        gw_g = xs.new_zeros(E, stk.h, stk.d)
-        gw_u = xs.new_zeros(E, stk.h, stk.d)
-        gw_d = xs.new_zeros(E, stk.d, stk.h)
-        bounds = [0] + offs.tolist()
-        active = torch.zeros(E, dtype=torch.bool, device=xs.device)
-        for e in range(E):
-            s, t = bounds[e], bounds[e + 1]
-            if t <= s:
-                continue
-            active[e] = True
-            gw_g[e] = grad_yg[s:t].t() @ xs[s:t]                                 # [h,d]
-            gw_u[e] = grad_yu[s:t].t() @ xs[s:t]                                 # [h,d]
-            gw_d[e] = gy[s:t].t() @ a[s:t]                                       # [d,h]
+        # per-expert weight-gradients, loop-free (pad + bmm), then ONE batched update over all 3.
+        gw_g, active = _grouped_grad_w(grad_yg, xs, offs, E)                     # [E,h,d]
+        gw_u, _ = _grouped_grad_w(grad_yu, xs, offs, E)                          # [E,h,d]
+        gw_d, _ = _grouped_grad_w(gy, a, offs, E)                               # [E,d,h]
         stk.update(gw_g, gw_u, gw_d, active)
         return grad_x.to(grad_y.dtype), None, None, None
 
@@ -222,18 +236,9 @@ class _StackedGroupedFn(torch.autograd.Function):
         grad_a = torch._grouped_mm(gy2, W2.contiguous(), offs=offs)               # [M,h]
         grad_y1 = grad_a * _gelu_grad(y1)
         grad_x = torch._grouped_mm(grad_y1, W1.contiguous(), offs=offs)           # [M,d]
-        # per-segment weight gradients, stacked (the only remaining per-expert step; cheap GEMMs).
-        gw1 = xs.new_zeros(E, stk.h, stk.d)
-        gw2 = xs.new_zeros(E, stk.d, stk.h)
-        bounds = [0] + offs.tolist()
-        active = torch.zeros(E, dtype=torch.bool, device=xs.device)
-        for e in range(E):
-            s, t = bounds[e], bounds[e + 1]
-            if t <= s:
-                continue
-            active[e] = True
-            gw1[e] = grad_y1[s:t].t() @ xs[s:t]                                    # [h,d]
-            gw2[e] = gy2[s:t].t() @ a[s:t]                                         # [d,h]
+        # per-expert weight-gradients, loop-free (pad + bmm), then ONE batched update.
+        gw1, active = _grouped_grad_w(grad_y1, xs, offs, E)                       # [E,h,d]
+        gw2, _ = _grouped_grad_w(gy2, a, offs, E)                                 # [E,d,h]
         stk.update(gw1, gw2, active)                                              # ONE batched update
         return grad_x.to(grad_y2.dtype), None, None, None
 
