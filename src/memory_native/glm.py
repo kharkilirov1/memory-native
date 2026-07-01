@@ -104,6 +104,32 @@ def _counter_numeric(kw: dict) -> dict:
     return {k: kw[k] for k in ("C", "lr", "lr_scale") if k in kw}
 
 
+def _glm_head_loss(model, h, targets, loss_chunk):
+    """Shared head/loss for the GLM models: tied head + CE + MoE load-balance aux. loss_chunk>0
+    chunks the head over rows so the [B,T,V] logits tensor (V~50k) is never materialized -- returns
+    (None, loss). loss_chunk=0 returns (logits, loss)."""
+    if targets is not None and loss_chunk > 0:
+        d = model.d
+        hf = h.reshape(-1, d); tf = targets.reshape(-1)
+        total = hf.new_zeros(()); n = hf.shape[0]
+        for i in range(0, n, loss_chunk):
+            lg = model.head(hf[i:i + loss_chunk])
+            total = total + F.cross_entropy(lg, tf[i:i + loss_chunk], reduction="sum")
+        loss = total / n
+        aux = model.aux_loss()
+        if aux is not None:
+            loss = loss + aux
+        return None, loss
+    logits = model.head(h)
+    loss = None
+    if targets is not None:
+        loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), targets.reshape(-1))
+        aux = model.aux_loss()
+        if aux is not None:
+            loss = loss + aux
+    return logits, loss
+
+
 class GLMBlock(nn.Module):
     """RMSNorm-pre-norm GLM block: attention sublayer + Counter-MoE FFN sublayer, both residual."""
 
@@ -145,21 +171,15 @@ class MNGLM(nn.Module):
         self.head = nn.Linear(n_embd, vocab_size, bias=False)
         self.head.weight = self.tok.weight                             # tie
 
-    def forward(self, idx: torch.Tensor, targets: torch.Tensor | None = None):
+    def forward(self, idx: torch.Tensor, targets: torch.Tensor | None = None, loss_chunk: int = 0):
         B, T = idx.shape
         if T > self.block_size:
             raise ValueError(f"sequence length {T} exceeds block size {self.block_size}")
         x = self.tok(idx)
         for b in self.blocks:
             x = b(x)
-        logits = self.head(self.nf(x))
-        loss = None
-        if targets is not None:
-            loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), targets.reshape(-1))
-            aux = self.aux_loss()
-            if aux is not None:
-                loss = loss + aux
-        return logits, loss
+        h = self.nf(x)
+        return _glm_head_loss(self, h, targets, loss_chunk)
 
     def aux_loss(self) -> torch.Tensor | None:
         total = None
@@ -229,7 +249,7 @@ class ReversibleMNGLM(nn.Module):
         self.head = nn.Linear(n_embd, vocab_size, bias=False)
         self.head.weight = self.tok.weight
 
-    def forward(self, idx: torch.Tensor, targets: torch.Tensor | None = None):
+    def forward(self, idx: torch.Tensor, targets: torch.Tensor | None = None, loss_chunk: int = 0):
         B, T = idx.shape
         if T > self.block_size:
             raise ValueError(f"sequence length {T} exceeds block size {self.block_size}")
@@ -237,14 +257,7 @@ class ReversibleMNGLM(nn.Module):
         x = torch.cat([e, e], dim=-1)                                  # two reversible streams
         x = self.rev(x)
         h = self.nf(x[..., :self.d] + x[..., self.d:])                 # recombine
-        logits = self.head(h)
-        loss = None
-        if targets is not None:
-            loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), targets.reshape(-1))
-            aux = self.aux_loss()
-            if aux is not None:
-                loss = loss + aux
-        return logits, loss
+        return _glm_head_loss(self, h, targets, loss_chunk)
 
     def aux_loss(self) -> torch.Tensor | None:
         total = None
