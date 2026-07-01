@@ -111,6 +111,25 @@ bottleneck; the MoE FFN dominates). The skeleton behaves exactly as a GLM-class 
 char corpus, so absolute val is not meaningful — the point is the components are wired right and the
 full stack trains with the tuned counter knobs.) Run via the `glm:` space arm.
 
+## 5c. Reversible witness — O(1) activation memory in the GLM skeleton (Blackwell)
+
+`ReversibleMNGLM` wraps the GLM blocks (F=attention sublayer, G=Counter-MoE sublayer) in the
+reversible coupling stack. d=768, L=12, GQA 3/12, E=8, int8, anchor=2:
+
+| variant | peak GiB | tok/s | val | counter-coeffs |
+|---|---|---|---|---|
+| plain (non-reversible) | 5.35 | 15525 | 2.5361 | 17.7M |
+| reversible (anchor=2) | **1.73** | 13847 | 2.7723 | 17.7M |
+
+**Activation memory 5.35 → 1.73 GiB = −68% (×3.1)** — the O(1)-in-depth lever works in the GLM stack.
+Weights unchanged (17.7M coeffs). Speed −11% (the recompute tax, smaller than pure reversible's +33%
+because anchor=2). **Honest caveat on the val gap (2.54 vs 2.77):** the reversible *coupling*
+(`y1=x1+F(x2); y2=x2+G(y1)`, two streams — RevNet/Reformer) is a **different architecture** than a
+plain residual stack, not a memory-optimized identical model. It is exact w.r.t. itself
+(`test_reversible_glm_anchor_invariance`: anchor=0 == anchor=2), but its function differs from
+plain-residual; the two-stream form fit this toy char corpus slightly worse. RevNet-class models
+match standard ones at real scale (established) — a scale/tuning question, not a memory-lever defect.
+
 ## 6. One-line spec
 
 `ReversibleGPT(d=1536, L=24, GQA 12/2, RoPE, RMSNorm, ffn="moe" E=8 k=2 SwiGLU grouped, kind="counter_packed", C=11, anchor_every=2, int8 fwd+update, act_save_bits=8, fused_qkv, decimate, MTP×2 untied)` → ~2B params, ~1.3 GiB state, trains on one mid-GPU.
