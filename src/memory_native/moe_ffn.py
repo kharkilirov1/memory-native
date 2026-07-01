@@ -111,6 +111,93 @@ class StackedCounterExperts(nn.Module):
                 + (self.sc1.numel() + self.sc2.numel() + self.v1.numel() + self.v2.numel()) * 4)
 
 
+def _silu_grad(x: torch.Tensor) -> torch.Tensor:
+    """d/dx of SiLU(x)=x*sigmoid(x) = sig*(1 + x*(1-sig))."""
+    s = torch.sigmoid(x)
+    return s * (1.0 + x * (1.0 - s))
+
+
+class StackedSwiGLUExperts(nn.Module):
+    """Stacked SwiGLU experts: gate/up (d->h) and down (h->d), all in shared [E,·] buffers so the
+    decode (forward) and the RMS+SR counter update (backward) are each one vectorized op over E.
+    SwiGLU FFN = down( SiLU(gate(x)) * up(x) ) -- the GLM/Llama expert MLP (3 matrices vs gelu's 2)."""
+
+    def __init__(self, E, d, h, *, C, lr, lr_scale, init_gain=1.0, rms_beta=0.9, rms_eps=1e-3):
+        super().__init__()
+        self.E, self.d, self.h, self.C = E, d, h, C
+        self.lr, self.lr_scale = lr, lr_scale
+        self.beta, self.eps = rms_beta, rms_eps
+        for name, out, in_ in (("g", h, d), ("u", h, d), ("d", d, h)):    # gate, up, down
+            t0 = torch.randint(-1, 2, (E, out, in_), dtype=torch.int16)
+            self.register_buffer(f"s{name}", encode_state(t0, torch.zeros_like(t0), C))
+            s0 = init_gain * math.sqrt(3.0 / (2.0 * in_))
+            self.register_buffer(f"sc{name}", torch.full((E, out, 1), s0, dtype=torch.float32))
+            self.register_buffer(f"v{name}", torch.zeros((E, out, 1), dtype=torch.float32))
+
+    def weights(self):
+        Wg = self.scg * decode_state(self.sg, self.C)[0].float()          # [E,h,d]
+        Wu = self.scu * decode_state(self.su, self.C)[0].float()          # [E,h,d]
+        Wd = self.scd * decode_state(self.sd, self.C)[0].float()          # [E,d,h]
+        return Wg, Wu, Wd
+
+    @torch.no_grad()
+    def update(self, gw_g, gw_u, gw_d, active):
+        kw = dict(C=self.C, lr=self.lr, lr_scale=self.lr_scale, beta=self.beta, eps=self.eps)
+        _batched_rms_update(self.sg, self.scg, self.vg, gw_g, active, **kw)
+        _batched_rms_update(self.su, self.scu, self.vu, gw_u, active, **kw)
+        _batched_rms_update(self.sd, self.scd, self.vd, gw_d, active, **kw)
+
+    def persistent_bytes(self):
+        b = self.sg.numel() + self.su.numel() + self.sd.numel()
+        for t in (self.scg, self.scu, self.scd, self.vg, self.vu, self.vd):
+            b += t.numel() * 4
+        return b
+
+
+class _StackedSwiGLUFn(torch.autograd.Function):
+    """Grouped SwiGLU experts: gate/up/down via torch._grouped_mm + one batched counter update."""
+
+    @staticmethod
+    def forward(ctx, x_sorted, offs, tap, stk):
+        Wg, Wu, Wd = stk.weights()
+        xs = x_sorted.float()
+        yg = torch._grouped_mm(xs, Wg.transpose(1, 2).contiguous(), offs=offs)   # [M,h]
+        yu = torch._grouped_mm(xs, Wu.transpose(1, 2).contiguous(), offs=offs)   # [M,h]
+        sg = F.silu(yg)
+        a = sg * yu                                                              # [M,h]
+        y = torch._grouped_mm(a, Wd.transpose(1, 2).contiguous(), offs=offs)     # [M,d]
+        ctx.stk = stk; ctx.offs = offs
+        ctx.save_for_backward(xs, yg, yu, a, Wg, Wu, Wd)
+        return y.to(x_sorted.dtype)
+
+    @staticmethod
+    def backward(ctx, grad_y):
+        xs, yg, yu, a, Wg, Wu, Wd = ctx.saved_tensors
+        offs = ctx.offs; stk = ctx.stk; E = stk.E
+        gy = grad_y.float()
+        grad_a = torch._grouped_mm(gy, Wd.contiguous(), offs=offs)               # [M,h]
+        grad_yu = grad_a * F.silu(yg)
+        grad_yg = grad_a * yu * _silu_grad(yg)
+        # grad_x flows through BOTH gate and up branches
+        grad_x = (torch._grouped_mm(grad_yg, Wg.contiguous(), offs=offs)
+                  + torch._grouped_mm(grad_yu, Wu.contiguous(), offs=offs))      # [M,d]
+        gw_g = xs.new_zeros(E, stk.h, stk.d)
+        gw_u = xs.new_zeros(E, stk.h, stk.d)
+        gw_d = xs.new_zeros(E, stk.d, stk.h)
+        bounds = [0] + offs.tolist()
+        active = torch.zeros(E, dtype=torch.bool, device=xs.device)
+        for e in range(E):
+            s, t = bounds[e], bounds[e + 1]
+            if t <= s:
+                continue
+            active[e] = True
+            gw_g[e] = grad_yg[s:t].t() @ xs[s:t]                                 # [h,d]
+            gw_u[e] = grad_yu[s:t].t() @ xs[s:t]                                 # [h,d]
+            gw_d[e] = gy[s:t].t() @ a[s:t]                                       # [d,h]
+        stk.update(gw_g, gw_u, gw_d, active)
+        return grad_x.to(grad_y.dtype), None, None, None
+
+
 class _StackedGroupedFn(torch.autograd.Function):
     """Grouped forward + grad_x via torch._grouped_mm over the stacked experts, then ONE batched
     counter update. The only per-expert step left is the segment weight-gradient matmul (cheap GEMM);
@@ -176,6 +263,21 @@ class _CounterExpert(nn.Module):
         return self.fc2(F.gelu(self.fc1(x)))
 
 
+class _SwiGLUExpert(nn.Module):
+    """A SwiGLU counter-MLP expert (GLM/Llama style): down( SiLU(gate(x)) * up(x) ). Three counter
+    linears (gate d->h, up d->h, down h->d), all counter-state, self-updating in backward."""
+
+    def __init__(self, dim: int, hidden: int, *, C: int, lr: float, lr_scale: float,
+                 packed: bool = True) -> None:
+        super().__init__()
+        self.gate = _expert_linear(dim, hidden, C=C, lr=lr, lr_scale=lr_scale, packed=packed)
+        self.up = _expert_linear(dim, hidden, C=C, lr=lr, lr_scale=lr_scale, packed=packed)
+        self.down = _expert_linear(hidden, dim, C=C, lr=lr, lr_scale=lr_scale, packed=packed)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.down(F.silu(self.gate(x)) * self.up(x))
+
+
 class CounterMoEFFN(nn.Module):
     """Sparse Mixture-of-counter-Experts FFN drop-in.
 
@@ -192,15 +294,25 @@ class CounterMoEFFN(nn.Module):
     def __init__(self, dim: int, n_experts: int = 8, top_k: int = 2,
                  expert_hidden: int | None = None, *, C: int = 11, lr: float = 0.04,
                  lr_scale: float = 2e-4, aux_loss_weight: float = 1e-2,
-                 packed_experts: bool = True, grouped: bool = False) -> None:
+                 packed_experts: bool = True, grouped: bool = False, swiglu: bool = False) -> None:
         super().__init__()
         self.d = int(dim)
         self.E = int(n_experts)
         self.k = int(top_k)
+        self.swiglu = bool(swiglu)
         if self.k > self.E:
             raise ValueError(f"top_k ({self.k}) cannot exceed n_experts ({self.E})")
-        # h = 4d / top_k -> top_k experts cost ~ the dense FFN's 2*d*4d active MACs/token.
-        self.h = int(expert_hidden) if expert_hidden is not None else max(1, (4 * self.d) // self.k)
+        # Equal-active-compute hidden: gelu (2 matmuls) -> h=4d/top_k; SwiGLU (3 matmuls, gate/up/down)
+        # -> h=8d/(3*top_k) so top_k experts still ~ the dense FFN active MACs. Round to a multiple of
+        # 8: torch._grouped_mm needs the operand's last dim (h) stride to be a multiple of 16 bytes.
+        def _r8(x):
+            return max(8, ((int(x) + 7) // 8) * 8)
+        if expert_hidden is not None:
+            self.h = int(expert_hidden)
+        elif self.swiglu:
+            self.h = _r8((8 * self.d) / (3 * self.k))
+        else:
+            self.h = _r8((4 * self.d) / self.k)
         self.aux_loss_weight = float(aux_loss_weight)
         # grouped=True replaces the python per-expert loop with grouped GEMMs (torch._grouped_mm) +
         # stacked experts: all experts' fc1/fc2 run in one launch each AND the counter update is one
@@ -216,11 +328,13 @@ class CounterMoEFFN(nn.Module):
         # of per-expert counter MLPs. packed_experts=True: PackedRMSCounterLinear (fused update + 0.75
         # B/weight) on the loop path. Identical dynamics on CPU.
         if self.grouped:
-            self.stacked = StackedCounterExperts(self.E, self.d, self.h, C=C, lr=lr, lr_scale=lr_scale)
+            Stacked = StackedSwiGLUExperts if self.swiglu else StackedCounterExperts
+            self.stacked = Stacked(self.E, self.d, self.h, C=C, lr=lr, lr_scale=lr_scale)
             self.experts = nn.ModuleList()
         else:
+            Expert = _SwiGLUExpert if self.swiglu else _CounterExpert
             self.experts = nn.ModuleList(
-                _CounterExpert(self.d, self.h, C=C, lr=lr, lr_scale=lr_scale, packed=packed_experts)
+                Expert(self.d, self.h, C=C, lr=lr, lr_scale=lr_scale, packed=packed_experts)
                 for _ in range(self.E)
             )
 
@@ -293,15 +407,18 @@ class CounterMoEFFN(nn.Module):
         x_sorted = h[sorted_tok]                                          # [M, d] (autograd-tracked)
         tap = (torch.zeros((), device=h.device, dtype=h.dtype, requires_grad=True)
                if torch.is_grad_enabled() else h.new_zeros(()))           # forces experts to update
-        y2 = _StackedGroupedFn.apply(x_sorted, offs, tap, self.stacked)   # [M, d] unweighted outputs
+        fn = _StackedSwiGLUFn if self.swiglu else _StackedGroupedFn
+        y2 = fn.apply(x_sorted, offs, tap, self.stacked)                 # [M, d] unweighted outputs
         weighted = y2 * sorted_w.unsqueeze(-1)                            # router grad flows here
         y = torch.zeros_like(h).index_add(0, sorted_tok, weighted)
         return y.reshape(sh)
 
     # --- accounting (for the equal-active-compute comparison) ----------------------
     def active_macs_per_token(self) -> int:
-        """MACs a single token touches: router (d*E) + its top_k experts (each 2*d*h)."""
-        return self.d * self.E + self.k * (2 * self.d * self.h)
+        """MACs a single token touches: router (d*E) + its top_k experts. Each gelu expert is 2*d*h
+        (fc1+fc2); each SwiGLU expert is 3*d*h (gate+up+down)."""
+        per_expert = (3 if self.swiglu else 2) * self.d * self.h
+        return self.d * self.E + self.k * per_expert
 
     def persistent_bytes(self) -> int:
         """Counter experts (the bulk: ~0.75 B/weight visible + per-row scale/v) + fp router."""
@@ -310,7 +427,8 @@ class CounterMoEFFN(nn.Module):
         else:
             b = 0
             for expert in self.experts:
-                for m in (expert.fc1, expert.fc2):
+                mats = (expert.gate, expert.up, expert.down) if self.swiglu else (expert.fc1, expert.fc2)
+                for m in mats:
                     b += m.state.numel() + m.scale.numel() * 4 + m.v.numel() * 4
         b += self.router.weight.numel() * 4                                # fp router
         return b

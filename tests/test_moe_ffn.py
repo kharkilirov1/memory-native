@@ -217,3 +217,40 @@ def test_batched_update_equals_per_expert():
         _batched_rms_update(sp[e:e+1], scp[e:e+1], vp[e:e+1], gw[e:e+1].clone(),
                             active[e:e+1], **kw)
     assert torch.equal(sb, sp)
+
+
+def test_swiglu_grouped_matches_reference_and_trains():
+    """SwiGLU experts (gate/up/down, GLM/Llama-style): grouped forward == per-expert reference on the
+    same stacked weights, and it trains. Active MACs use the 3-matrix count."""
+    import torch.nn.functional as F
+    if not hasattr(torch, "_grouped_mm"):
+        import pytest; pytest.skip("torch._grouped_mm unavailable")
+    d = 32
+    torch.manual_seed(0)
+    m = CounterMoEFFN(d, n_experts=4, top_k=2, C=11, grouped=True, swiglu=True).eval()
+    torch.manual_seed(1); x = torch.randn(6, 5, d); h = x.reshape(-1, d)
+    with torch.no_grad():
+        yg = m(x).reshape(-1, d)
+        ft, fe, fw = m._route(h)
+        Wg, Wu, Wd = m.stacked.weights()
+        ref = torch.zeros_like(h)
+        for e in range(m.E):
+            sel = (fe == e).nonzero(as_tuple=True)[0]
+            if sel.numel() == 0:
+                continue
+            tok = ft[sel]
+            o = (F.silu(h[tok] @ Wg[e].t()) * (h[tok] @ Wu[e].t())) @ Wd[e].t()
+            ref.index_add_(0, tok, fw[sel].unsqueeze(-1) * o)
+        assert torch.allclose(yg, ref, atol=1e-4)
+    assert m.active_macs_per_token() == d * m.E + m.k * (3 * d * m.h)   # 3 matmuls per SwiGLU expert
+
+    torch.manual_seed(0)
+    mm = CounterMoEFFN(d, n_experts=4, top_k=2, C=11, lr=0.06, grouped=True, swiglu=True).train()
+    opt = torch.optim.AdamW([p for p in mm.parameters() if p.requires_grad], lr=3e-3)
+    xx = torch.randn(64, d); yy = torch.randn(64, d) * 0.3
+    first = None
+    for _ in range(120):
+        out = mm(xx); loss = (out - yy).pow(2).mean() + 1e-2 * mm.last_aux_loss
+        opt.zero_grad(set_to_none=True); loss.backward(); opt.step()
+        if first is None: first = loss.item()
+    assert loss.item() < 0.7 * first
