@@ -111,9 +111,10 @@ Two kernel-level changes attack the wall-clock, each measured on the same GPU (t
 | baseline | RMSCounterLinear experts, python loop | 50595 | 27233 | 1.6176 |
 | **Prong A** | packed experts → fused Triton update (1 launch vs ~15) | 54893 (+8%) | 29736 (+9%) | 1.6063 |
 | **Prong B** | grouped-GEMM forward (`torch._grouped_mm`, no python forward loop) | 69828 | 42782 | 1.6091 |
-| **Prong B2** | stacked experts → batched counter update (no per-expert SR loop) | **166184** | **144658** | 1.6040 |
+| **Prong B2** | stacked experts → batched counter update (no per-expert SR loop) | 166184 | 144658 | 1.6040 |
+| **Prong B3** | loop-free grad_w (pad+bmm) → ZERO per-expert loops in the step | **177744** | **~167800** | 1.6084 |
 
-**Net: moe16 27233 → 144658 tok/s = ×5.3, quality preserved** (val 1.6176→1.6040, if anything
+**Net: moe16 27233 → ~167800 tok/s = ×6.2, quality preserved** (val 1.6176→1.6040, if anything
 slightly better). moe8 ×3.3. The progression isolated each bottleneck with a witness:
 - Prong A (+9%) proved the fused update was NOT the bottleneck;
 - Prong B (+44%) removed the **python per-expert forward loop** (one grouped GEMM/layer);
@@ -128,9 +129,15 @@ forward equals a per-expert reference over the same stacked weights
 (fp32) for the tests and maps to the optimized grouped kernel on CUDA. Enable with `grouped=True` /
 `GPTConfig.ffn_grouped`.
 
-**Where the gap to dense now stands:** MoE16 at 144.7k tok/s is **~4.5× slower than dense** (645k),
+- Prong B3 (+16% at E=16 over B2) removed the **last per-expert loop** — the segment weight-gradient.
+  `_grouped_grad_w` scatters each expert's sorted rows into a padded `[E,cap,·]` batch and does one
+  `torch.bmm` (zero-padding → bit-exact vs the loop; `test_grouped_grad_w_matches_loop`). So the MoE
+  step now has **ZERO per-expert python loops**: forward, grad_x, grad_w, and the counter update are
+  all vectorized over E. (`torch._grouped_mm`'s 2d×2d→3d mode does NOT give per-segment grad_w —
+  verified — hence pad+bmm.)
+
+**Where the gap to dense now stands:** MoE16 at ~167.8k tok/s is **~3.8× slower than dense** (645k),
 down from ~24× at baseline. The remainder is (a) E× weight traffic (each expert has its own weights
-— fundamental to MoE, not overhead), (b) the per-expert segment weight-gradient matmul loop (the
-last per-expert step; needs a reliable 3D grouped GEMM — `torch._grouped_mm`'s 2d×2d→3d mode did not
-give per-segment grad_w cleanly), and (c) sort/scatter routing. The win is quality/capacity at equal
+— fundamental to MoE, not overhead), (b) the pad+bmm's capacity overhead on skewed routing, and (c)
+sort/scatter routing. These are memory-movement, not FLOPs (equal active MACs). The win is quality/capacity at equal
 active MACs **and now within ~4.5× of dense wall-clock**, where it was an order of magnitude before.
