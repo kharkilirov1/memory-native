@@ -77,15 +77,29 @@ def _batched_rms_update(state, scale, v, grad_w, active, *, C, lr, lr_scale, bet
 
 def _grouped_grad_w(go_sorted, x_sorted, offs, E):
     """Per-expert weight-gradient gw[e] = go[seg_e]^T @ x[seg_e], stacked to [E, Nout, Nin], with NO
-    python loop over experts: scatter each expert's sorted rows into a padded [E, cap, ·] batch (cap =
-    max segment) and one torch.bmm. Zero-padding contributes zero, so the result is bit-exact vs the
-    per-expert matmul loop (up to fp reduction order). Returns (gw, active[E]) where active marks the
-    experts that got at least one token (kept unchanged in the batched update). torch._grouped_mm's
-    2d×2d→3d mode does NOT compute this per-segment product (verified), hence the pad+bmm."""
+    python loop over experts: scatter each expert's sorted rows into a padded [E, cap, ·] batch and
+    one torch.bmm. Zero-padding contributes zero, so it is bit-exact vs the per-expert matmul loop
+    (up to fp reduction order). Returns (gw, active[E]).
+
+    MEMORY GUARD: the pad allocates E*cap*(Nout+Nin) with cap = MAX segment. Under skewed routing
+    (early training / collapse) cap -> M, so the pad blows up to ~E x the real work. When cap exceeds
+    a small multiple of the balanced size we fall back to the per-expert loop (memory-safe, each
+    segment at its real size) -- the loop-free bmm only fires when routing is balanced enough that the
+    pad is bounded. torch._grouped_mm's 2d×2d→3d mode does NOT compute this per-segment product."""
     M = go_sorted.shape[0]
     starts = torch.cat([offs.new_zeros(1), offs[:-1]])
     counts = offs - starts
+    Nout, Nin = go_sorted.shape[1], x_sorted.shape[1]
     cap = max(int(counts.max().item()) if M > 0 else 1, 1)
+    mean = max(M // E, 1)
+    if cap > 4 * mean:                                                     # too skewed -> pad blows up
+        gw = go_sorted.new_zeros(E, Nout, Nin)
+        b = [0] + offs.tolist()
+        for e in range(E):
+            s, t = b[e], b[e + 1]
+            if t > s:
+                gw[e] = go_sorted[s:t].t() @ x_sorted[s:t]
+        return gw, counts > 0
     row = torch.arange(M, device=go_sorted.device)
     eid = torch.searchsorted(offs, row, right=True).clamp_max(E - 1)       # expert id per sorted row
     slot = eid * cap + (row - starts[eid])                                 # slot within the padded batch
@@ -424,6 +438,12 @@ class CounterMoEFFN(nn.Module):
         (fc1+fc2); each SwiGLU expert is 3*d*h (gate+up+down)."""
         per_expert = (3 if self.swiglu else 2) * self.d * self.h
         return self.d * self.E + self.k * per_expert
+
+    def coeff_count(self) -> int:
+        """TOTAL counter weights across all E experts (gelu: 2*d*h; SwiGLU: 3*d*h per expert). These
+        live in the stacked buffers (grouped) or the ModuleList (loop) -- NOT as CompactCounterLinear
+        instances in the grouped path, so a `counter_layers()` scan misses them; count them here."""
+        return self.E * (3 if self.swiglu else 2) * self.d * self.h
 
     def persistent_bytes(self) -> int:
         """Counter experts (the bulk: ~0.75 B/weight visible + per-row scale/v) + fp router."""

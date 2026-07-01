@@ -193,6 +193,15 @@ class MNGLM(nn.Module):
     def counter_layers(self) -> list[CompactCounterLinear]:
         return [m for m in self.modules() if isinstance(m, CompactCounterLinear)]
 
+    def total_counter_coeffs(self) -> int:
+        """ALL counter weights: attention counter linears + the MoE experts (which live in stacked
+        buffers, not CompactCounterLinear instances, so counter_layers() alone undercounts)."""
+        n = sum(c.in_features * c.out_features for c in self.counter_layers())
+        for mod in self.modules():
+            if isinstance(mod, CounterMoEFFN):
+                n += mod.coeff_count()
+        return n
+
     def trainable_parameters(self):
         return [p for p in self.parameters() if p.requires_grad]
 
@@ -270,6 +279,15 @@ class ReversibleMNGLM(nn.Module):
 
     def counter_layers(self) -> list[CompactCounterLinear]:
         return [m for m in self.modules() if isinstance(m, CompactCounterLinear)]
+
+    def total_counter_coeffs(self) -> int:
+        """ALL counter weights: attention counter linears + the MoE experts (which live in stacked
+        buffers, not CompactCounterLinear instances, so counter_layers() alone undercounts)."""
+        n = sum(c.in_features * c.out_features for c in self.counter_layers())
+        for mod in self.modules():
+            if isinstance(mod, CounterMoEFFN):
+                n += mod.coeff_count()
+        return n
 
     def trainable_parameters(self):
         return [p for p in self.parameters() if p.requires_grad]

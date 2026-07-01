@@ -264,7 +264,8 @@ def test_grouped_grad_w_matches_loop():
     M, h, d, E = 20, 6, 8, 4
     go = torch.randn(M, h); xs = torch.randn(M, d)
     for offs in (torch.tensor([5, 9, 14, 20], dtype=torch.int32),
-                 torch.tensor([5, 5, 14, 20], dtype=torch.int32)):        # 2nd: expert 1 empty
+                 torch.tensor([5, 5, 14, 20], dtype=torch.int32),         # 2nd: expert 1 empty
+                 torch.tensor([1, 2, 3, 20], dtype=torch.int32)):         # 3rd: skewed -> loop branch
         gw, active = _grouped_grad_w(go, xs, offs, E)
         starts = [0] + offs.tolist()[:-1]
         ends = offs.tolist()
