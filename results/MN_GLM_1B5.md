@@ -157,6 +157,27 @@ toy steps may just be early-convergence drag, not a quality ceiling — bf16 tra
 scale): add a bf16 arm to the Kaggle convergence witness. After bf16, the next speed bottleneck is
 the counter-update elementwise chain (~25-30%) — a fusion (Triton) target, not a dtype one.
 
+### 5e. Fused stacked-expert update kernel — the elementwise chain collapsed (both levers landed)
+
+`stacked_update.py`: ONE Triton launch per expert matrix replaces the ~15-op elementwise chain over
+`[E,out,in]` (decode is a u8 load — the stack is unpacked; reuses the packed kernel's `_tick`
+hash-SR automaton; accepts **fp32 or bf16 grad_w in-register**, so the bf16 GEMM path feeds the
+update with no fp32 copy). Validated on GPU: **19 kernel tests pass** (kernel == `stacked_update_
+hashsr` reference up to one SR quantum, fp32 and bf16; inactive experts untouched). d=1536 step:
+
+| config | step | vs start |
+|---|---|---|
+| fp32 (before) | 2115 ms | ×1.0 |
+| fp32 + fused update | 1757 ms | ×1.20 |
+| bf16 + fused update | **1026 ms** | **×2.06** |
+
+**The profiled step is now ×2.06 faster** (both profile targets — fp32-SIMT GEMMs and the update
+chain — eliminated). E2e quality gate with the fused kernel on the training path: val **2.2084**,
+inside (slightly better than) the fp32 band 2.2215–2.2476, +15% tok/s at d=768 — the hash-SR switch
+is in-family, quality preserved. **fp32+fused (×1.20) ships unconditionally; bf16 (+fused ×2.06)
+remains gated on the long-horizon parity arm.** On the 2B Colab run this maps to ~1950 → ~2350
+(fp32) or ~4000 (bf16) tok/s.
+
 ## 6. One-line spec
 
 `ReversibleGPT(d=1536, L=24, GQA 12/2, RoPE, RMSNorm, ffn="moe" E=8 k=2 SwiGLU grouped, kind="counter_packed", C=11, anchor_every=2, int8 fwd+update, act_save_bits=8, fused_qkv, decimate, MTP×2 untied)` → ~2B params, ~1.3 GiB state, trains on one mid-GPU.
