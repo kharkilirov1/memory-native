@@ -113,6 +113,23 @@ def _grouped_grad_w(go_sorted, x_sorted, offs, E):
     return gw, counts > 0
 
 
+
+def _stacked_dispatch(mats, active, seed_holder):
+    """Fire the fused Triton stacked update on CUDA (one launch per matrix, hash-SR, accepts bf16
+    grad directly); fall back to the torch batched update elsewhere. mats = [(state, scale, v,
+    grad_w, kw), ...]. Same in-family SR switch PackedRMSCounterLinear makes for its fused kernel."""
+    from .stacked_update import HAS_TRITON, triton_stacked_update
+    if HAS_TRITON and mats and mats[0][0].is_cuda:
+        for state, scale, v, gw, kw in mats:
+            seed = seed_holder[0]; seed_holder[0] += 1
+            triton_stacked_update(state, scale, v, gw, active,
+                                  C=kw["C"], lr=kw["lr"], lr_scale=kw["lr_scale"],
+                                  rms_beta=kw["beta"], rms_eps=kw["eps"], seed=seed)
+        return
+    for state, scale, v, gw, kw in mats:
+        _batched_rms_update(state, scale, v, gw, active, **kw)
+
+
 class StackedCounterExperts(nn.Module):
     """All E experts' two counter MLPs in STACKED buffers ([E,out,in]) instead of a ModuleList, so
     the weight decode (forward) and the RMS+SR update (backward) are each ONE vectorized op over the
@@ -127,6 +144,7 @@ class StackedCounterExperts(nn.Module):
         self.lr, self.lr_scale = lr, lr_scale
         self.beta, self.eps = rms_beta, rms_eps
         self.compute_dtype = compute_dtype
+        self._sr = [0]                                  # per-call seed for the fused hash-SR kernel
         for name, out, in_ in (("1", h, d), ("2", d, h)):
             t0 = torch.randint(-1, 2, (E, out, in_), dtype=torch.int16)
             self.register_buffer(f"s{name}", encode_state(t0, torch.zeros_like(t0), C))
@@ -153,8 +171,8 @@ class StackedCounterExperts(nn.Module):
     @torch.no_grad()
     def update(self, grad_w1, grad_w2, active):
         kw = dict(C=self.C, lr=self.lr, lr_scale=self.lr_scale, beta=self.beta, eps=self.eps)
-        _batched_rms_update(self.s1, self.sc1, self.v1, grad_w1, active, **kw)
-        _batched_rms_update(self.s2, self.sc2, self.v2, grad_w2, active, **kw)
+        _stacked_dispatch([(self.s1, self.sc1, self.v1, grad_w1, kw),
+                           (self.s2, self.sc2, self.v2, grad_w2, kw)], active, self._sr)
 
     def persistent_bytes(self):
         return (self.s1.numel() + self.s2.numel()
@@ -179,6 +197,7 @@ class StackedSwiGLUExperts(nn.Module):
         self.lr, self.lr_scale = lr, lr_scale
         self.beta, self.eps = rms_beta, rms_eps
         self.compute_dtype = compute_dtype
+        self._sr = [0]                                  # per-call seed for the fused hash-SR kernel
         for name, out, in_ in (("g", h, d), ("u", h, d), ("d", d, h)):    # gate, up, down
             t0 = torch.randint(-1, 2, (E, out, in_), dtype=torch.int16)
             self.register_buffer(f"s{name}", encode_state(t0, torch.zeros_like(t0), C))
@@ -198,9 +217,9 @@ class StackedSwiGLUExperts(nn.Module):
     @torch.no_grad()
     def update(self, gw_g, gw_u, gw_d, active):
         kw = dict(C=self.C, lr=self.lr, lr_scale=self.lr_scale, beta=self.beta, eps=self.eps)
-        _batched_rms_update(self.sg, self.scg, self.vg, gw_g, active, **kw)
-        _batched_rms_update(self.su, self.scu, self.vu, gw_u, active, **kw)
-        _batched_rms_update(self.sd, self.scd, self.vd, gw_d, active, **kw)
+        _stacked_dispatch([(self.sg, self.scg, self.vg, gw_g, kw),
+                           (self.su, self.scu, self.vu, gw_u, kw),
+                           (self.sd, self.scd, self.vd, gw_d, kw)], active, self._sr)
 
     def persistent_bytes(self):
         b = self.sg.numel() + self.su.numel() + self.sd.numel()
@@ -240,7 +259,7 @@ class _StackedSwiGLUFn(torch.autograd.Function):
         gw_g, active = _grouped_grad_w(grad_yg, xs, offs, E)                     # [E,h,d]
         gw_u, _ = _grouped_grad_w(grad_yu, xs, offs, E)                          # [E,h,d]
         gw_d, _ = _grouped_grad_w(gy, a, offs, E)                               # [E,d,h]
-        stk.update(gw_g.float(), gw_u.float(), gw_d.float(), active)             # update math stays fp32
+        stk.update(gw_g, gw_u, gw_d, active)   # fp32 cast happens in-kernel / in the fallback
         return grad_x.to(grad_y.dtype), None, None, None
 
 
@@ -271,7 +290,7 @@ class _StackedGroupedFn(torch.autograd.Function):
         # per-expert weight-gradients, loop-free (pad + bmm), then ONE batched update.
         gw1, active = _grouped_grad_w(grad_y1, xs, offs, E)                       # [E,h,d]
         gw2, _ = _grouped_grad_w(gy2, a, offs, E)                                 # [E,d,h]
-        stk.update(gw1.float(), gw2.float(), active)                              # update math stays fp32                                              # ONE batched update
+        stk.update(gw1, gw2, active)           # fp32 cast happens in-kernel / in the fallback                                              # ONE batched update
         return grad_x.to(grad_y2.dtype), None, None, None
 
 
