@@ -135,6 +135,28 @@ plain residual stack, not a memory-optimized identical model. It is exact w.r.t.
 plain-residual; the two-stream form fit this toy char corpus slightly worse. RevNet-class models
 match standard ones at real scale (established) — a scale/tuning question, not a memory-lever defect.
 
+## 5d. Speed profile + the bf16 lever — measured, parity-gated, NOT yet passed
+
+**Profile of the 2B-width step** (d=1536, seq=1024, Blackwell, `prof:` arm): fwd 13% / **bwd 87%** /
+opt 0%. Inside: grouped_mm 27.7% + grad_w bmm 27.7% + mm ~17% — **~72% of CUDA time in fp32-SIMT
+GEMMs** (`cutlass_80_simt_sgemm`; Tensor Cores idle except int8's 1.9%), counter-update elementwise
+~25-30%.
+
+**bf16 GEMM operands in the stacked experts** (`moe_dtype="bf16"`; tick math stays fp32):
+
+| | step d=1536 | tok/s d=768 | val d=768/300 steps | peak |
+|---|---|---|---|---|
+| fp32 (×2 runs) | 2115 ms | 32.2k / 29.1k | **2.2215–2.2476** (noise band) | 2.83 GiB |
+| bf16 | **1406 ms (×1.50)** | 35.5k (+22%) | **2.3204 — OUTSIDE the band** | 2.26 GiB |
+| bf16+tf32 | 1376 ms (×1.54) | 36.6k | 2.3598 (tf32 adds +0.04) | 2.26 GiB |
+
+**Verdict: ×1.5 speed is real, but the parity gate FAILED at toy scale** (+0.09 val beyond the ±0.026
+fp32 noise band; bf16 grad rounding acts as extra tick noise and slows early convergence). Per the
+project rule, `moe_dtype` stays **opt-in, default fp32**. The decider is a LONGER-horizon test (300
+toy steps may just be early-convergence drag, not a quality ceiling — bf16 training is standard at
+scale): add a bf16 arm to the Kaggle convergence witness. After bf16, the next speed bottleneck is
+the counter-update elementwise chain (~25-30%) — a fusion (Triton) target, not a dtype one.
+
 ## 6. One-line spec
 
 `ReversibleGPT(d=1536, L=24, GQA 12/2, RoPE, RMSNorm, ffn="moe" E=8 k=2 SwiGLU grouped, kind="counter_packed", C=11, anchor_every=2, int8 fwd+update, act_save_bits=8, fused_qkv, decimate, MTP×2 untied)` → ~2B params, ~1.3 GiB state, trains on one mid-GPU.
