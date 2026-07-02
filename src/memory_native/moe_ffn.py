@@ -57,6 +57,7 @@ def _batched_rms_update(state, scale, v, grad_w, active, *, C, lr, lr_scale, bet
     keep their state/scale/v unchanged, matching the loop path which never calls them). Bit-identical
     to looping the same update per expert with the same SR draw order (verified)."""
     t, c = decode_state(state, C); t = t.float(); c = c.float()
+    grad_w = grad_w.float()                                   # the tick math is always fp32
     g_sq = grad_w.pow(2).mean(dim=-1, keepdim=True)
     v_new = beta * v + (1.0 - beta) * g_sq
     denom = v_new.sqrt().clamp_min(eps)
@@ -119,11 +120,13 @@ class StackedCounterExperts(nn.Module):
     remaining per-expert step is forming each segment's weight-gradient. Same counter math as
     RMSCounterLinear (exact/eager); state is 1 byte/weight here (unpacked codes, the stack is small)."""
 
-    def __init__(self, E, d, h, *, C, lr, lr_scale, init_gain=1.0, rms_beta=0.9, rms_eps=1e-3):
+    def __init__(self, E, d, h, *, C, lr, lr_scale, init_gain=1.0, rms_beta=0.9, rms_eps=1e-3,
+                 compute_dtype: str = "fp32"):
         super().__init__()
         self.E, self.d, self.h, self.C = E, d, h, C
         self.lr, self.lr_scale = lr, lr_scale
         self.beta, self.eps = rms_beta, rms_eps
+        self.compute_dtype = compute_dtype
         for name, out, in_ in (("1", h, d), ("2", d, h)):
             t0 = torch.randint(-1, 2, (E, out, in_), dtype=torch.int16)
             self.register_buffer(f"s{name}", encode_state(t0, torch.zeros_like(t0), C))
@@ -131,10 +134,20 @@ class StackedCounterExperts(nn.Module):
             self.register_buffer(f"sc{name}", torch.full((E, out, 1), s0, dtype=torch.float32))
             self.register_buffer(f"v{name}", torch.zeros((E, out, 1), dtype=torch.float32))
 
+    def _eff_dtype(self, ref: torch.Tensor) -> torch.dtype:
+        # bf16 GEMM operands ONLY on CUDA with 16-byte-aligned last dims (grouped_mm constraint);
+        # the counter update itself always stays fp32 (grad_w is cast back before ticking).
+        if self.compute_dtype == "bf16" and ref.is_cuda and self.d % 8 == 0 and self.h % 8 == 0:
+            return torch.bfloat16
+        return torch.float32
+
     def weights(self):
-        """Decode both stacked states to usable ternary*scale weights, in ONE decode each."""
-        W1 = self.sc1 * decode_state(self.s1, self.C)[0].float()   # [E,h,d]
-        W2 = self.sc2 * decode_state(self.s2, self.C)[0].float()   # [E,d,h]
+        """Decode both stacked states to usable ternary*scale weights, in ONE decode each. Ternary
+        t in {-1,0,1} is EXACT in bf16; only the per-row scale rounds -- the profiled fp32-SIMT GEMMs
+        move to the bf16 Tensor Cores when compute_dtype='bf16' (parity-gated, GEMM operands only)."""
+        dt = self._eff_dtype(self.s1)
+        W1 = (self.sc1 * decode_state(self.s1, self.C)[0].float()).to(dt)   # [E,h,d]
+        W2 = (self.sc2 * decode_state(self.s2, self.C)[0].float()).to(dt)   # [E,d,h]
         return W1, W2
 
     @torch.no_grad()
@@ -159,11 +172,13 @@ class StackedSwiGLUExperts(nn.Module):
     decode (forward) and the RMS+SR counter update (backward) are each one vectorized op over E.
     SwiGLU FFN = down( SiLU(gate(x)) * up(x) ) -- the GLM/Llama expert MLP (3 matrices vs gelu's 2)."""
 
-    def __init__(self, E, d, h, *, C, lr, lr_scale, init_gain=1.0, rms_beta=0.9, rms_eps=1e-3):
+    def __init__(self, E, d, h, *, C, lr, lr_scale, init_gain=1.0, rms_beta=0.9, rms_eps=1e-3,
+                 compute_dtype: str = "fp32"):
         super().__init__()
         self.E, self.d, self.h, self.C = E, d, h, C
         self.lr, self.lr_scale = lr, lr_scale
         self.beta, self.eps = rms_beta, rms_eps
+        self.compute_dtype = compute_dtype
         for name, out, in_ in (("g", h, d), ("u", h, d), ("d", d, h)):    # gate, up, down
             t0 = torch.randint(-1, 2, (E, out, in_), dtype=torch.int16)
             self.register_buffer(f"s{name}", encode_state(t0, torch.zeros_like(t0), C))
@@ -171,10 +186,13 @@ class StackedSwiGLUExperts(nn.Module):
             self.register_buffer(f"sc{name}", torch.full((E, out, 1), s0, dtype=torch.float32))
             self.register_buffer(f"v{name}", torch.zeros((E, out, 1), dtype=torch.float32))
 
+    _eff_dtype = StackedCounterExperts._eff_dtype
+
     def weights(self):
-        Wg = self.scg * decode_state(self.sg, self.C)[0].float()          # [E,h,d]
-        Wu = self.scu * decode_state(self.su, self.C)[0].float()          # [E,h,d]
-        Wd = self.scd * decode_state(self.sd, self.C)[0].float()          # [E,d,h]
+        dt = self._eff_dtype(self.sg)
+        Wg = (self.scg * decode_state(self.sg, self.C)[0].float()).to(dt)   # [E,h,d]
+        Wu = (self.scu * decode_state(self.su, self.C)[0].float()).to(dt)   # [E,h,d]
+        Wd = (self.scd * decode_state(self.sd, self.C)[0].float()).to(dt)   # [E,d,h]
         return Wg, Wu, Wd
 
     @torch.no_grad()
@@ -197,7 +215,7 @@ class _StackedSwiGLUFn(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x_sorted, offs, tap, stk):
         Wg, Wu, Wd = stk.weights()
-        xs = x_sorted.float()
+        xs = x_sorted.to(Wg.dtype)            # bf16 on CUDA when compute_dtype='bf16', else fp32
         yg = torch._grouped_mm(xs, Wg.transpose(1, 2).contiguous(), offs=offs)   # [M,h]
         yu = torch._grouped_mm(xs, Wu.transpose(1, 2).contiguous(), offs=offs)   # [M,h]
         sg = F.silu(yg)
@@ -211,7 +229,7 @@ class _StackedSwiGLUFn(torch.autograd.Function):
     def backward(ctx, grad_y):
         xs, yg, yu, a, Wg, Wu, Wd = ctx.saved_tensors
         offs = ctx.offs; stk = ctx.stk; E = stk.E
-        gy = grad_y.float()
+        gy = grad_y.to(Wd.dtype)
         grad_a = torch._grouped_mm(gy, Wd.contiguous(), offs=offs)               # [M,h]
         grad_yu = grad_a * F.silu(yg)
         grad_yg = grad_a * yu * _silu_grad(yg)
@@ -222,7 +240,7 @@ class _StackedSwiGLUFn(torch.autograd.Function):
         gw_g, active = _grouped_grad_w(grad_yg, xs, offs, E)                     # [E,h,d]
         gw_u, _ = _grouped_grad_w(grad_yu, xs, offs, E)                          # [E,h,d]
         gw_d, _ = _grouped_grad_w(gy, a, offs, E)                               # [E,d,h]
-        stk.update(gw_g, gw_u, gw_d, active)
+        stk.update(gw_g.float(), gw_u.float(), gw_d.float(), active)             # update math stays fp32
         return grad_x.to(grad_y.dtype), None, None, None
 
 
@@ -234,7 +252,7 @@ class _StackedGroupedFn(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x_sorted, offs, tap, stk):
         W1, W2 = stk.weights()                                          # [E,h,d], [E,d,h]
-        xs = x_sorted.float()
+        xs = x_sorted.to(W1.dtype)
         y1 = torch._grouped_mm(xs, W1.transpose(1, 2).contiguous(), offs=offs)   # [M,h]
         a = F.gelu(y1)
         y2 = torch._grouped_mm(a, W2.transpose(1, 2).contiguous(), offs=offs)    # [M,d]
@@ -246,14 +264,14 @@ class _StackedGroupedFn(torch.autograd.Function):
     def backward(ctx, grad_y2):
         xs, y1, a, W1, W2 = ctx.saved_tensors
         offs = ctx.offs; stk = ctx.stk; E = stk.E
-        gy2 = grad_y2.float()
+        gy2 = grad_y2.to(W2.dtype)
         grad_a = torch._grouped_mm(gy2, W2.contiguous(), offs=offs)               # [M,h]
         grad_y1 = grad_a * _gelu_grad(y1)
         grad_x = torch._grouped_mm(grad_y1, W1.contiguous(), offs=offs)           # [M,d]
         # per-expert weight-gradients, loop-free (pad + bmm), then ONE batched update.
         gw1, active = _grouped_grad_w(grad_y1, xs, offs, E)                       # [E,h,d]
         gw2, _ = _grouped_grad_w(gy2, a, offs, E)                                 # [E,d,h]
-        stk.update(gw1, gw2, active)                                              # ONE batched update
+        stk.update(gw1.float(), gw2.float(), active)                              # update math stays fp32                                              # ONE batched update
         return grad_x.to(grad_y2.dtype), None, None, None
 
 
@@ -313,7 +331,8 @@ class CounterMoEFFN(nn.Module):
     def __init__(self, dim: int, n_experts: int = 8, top_k: int = 2,
                  expert_hidden: int | None = None, *, C: int = 11, lr: float = 0.04,
                  lr_scale: float = 2e-4, aux_loss_weight: float = 1e-2,
-                 packed_experts: bool = True, grouped: bool = False, swiglu: bool = False) -> None:
+                 packed_experts: bool = True, grouped: bool = False, swiglu: bool = False,
+                 compute_dtype: str = "fp32") -> None:
         super().__init__()
         self.d = int(dim)
         self.E = int(n_experts)
@@ -348,7 +367,8 @@ class CounterMoEFFN(nn.Module):
         # B/weight) on the loop path. Identical dynamics on CPU.
         if self.grouped:
             Stacked = StackedSwiGLUExperts if self.swiglu else StackedCounterExperts
-            self.stacked = Stacked(self.E, self.d, self.h, C=C, lr=lr, lr_scale=lr_scale)
+            self.stacked = Stacked(self.E, self.d, self.h, C=C, lr=lr, lr_scale=lr_scale,
+                                   compute_dtype=compute_dtype)
             self.experts = nn.ModuleList()
         else:
             Expert = _SwiGLUExpert if self.swiglu else _CounterExpert

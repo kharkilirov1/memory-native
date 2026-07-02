@@ -135,14 +135,16 @@ class GLMBlock(nn.Module):
 
     def __init__(self, d: int, n_head: int, n_kv_head: int, kind: str, ckw: dict,
                  n_experts: int, top_k: int, qk_norm: bool, grouped: bool,
-                 aux_loss_weight: float = 1e-2, swiglu: bool = True) -> None:
+                 aux_loss_weight: float = 1e-2, swiglu: bool = True,
+                 moe_dtype: str = "fp32") -> None:
         super().__init__()
         self.n_embd = d
         self.n1 = RMSNorm(d)
         self.attn = GLMAttention(d, n_head, n_kv_head, kind, ckw, qk_norm)
         self.n2 = RMSNorm(d)
         self.ffn = CounterMoEFFN(d, n_experts=n_experts, top_k=top_k, grouped=grouped,
-                                 aux_loss_weight=aux_loss_weight, swiglu=swiglu, **_counter_numeric(ckw))
+                                 aux_loss_weight=aux_loss_weight, swiglu=swiglu,
+                                 compute_dtype=moe_dtype, **_counter_numeric(ckw))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = x + self.attn(self.n1(x))
@@ -156,7 +158,7 @@ class MNGLM(nn.Module):
     def __init__(self, vocab_size: int, n_embd: int, n_layer: int, n_head: int, n_kv_head: int,
                  block_size: int, *, kind: str = "counter_packed", n_experts: int = 8, top_k: int = 2,
                  qk_norm: bool = True, grouped: bool = True, aux_loss_weight: float = 1e-2,
-                 swiglu: bool = True, **counter_kw) -> None:
+                 swiglu: bool = True, moe_dtype: str = "fp32", **counter_kw) -> None:
         super().__init__()
         self.block_size = block_size
         self.d = n_embd
@@ -165,7 +167,7 @@ class MNGLM(nn.Module):
         nn.init.normal_(self.tok.weight, std=0.02)
         self.blocks = nn.ModuleList(
             GLMBlock(n_embd, n_head, n_kv_head, kind, counter_kw, n_experts, top_k,
-                     qk_norm, grouped, aux_loss_weight, swiglu)
+                     qk_norm, grouped, aux_loss_weight, swiglu, moe_dtype)
             for _ in range(n_layer))
         self.nf = RMSNorm(n_embd)
         self.head = nn.Linear(n_embd, vocab_size, bias=False)
@@ -222,12 +224,14 @@ class _GLMAttnSub(nn.Module):
 class _GLMFFNSub(nn.Module):
     """G for the reversible coupling: RMSNorm -> Counter-MoE FFN, maps [.,d]->[.,d]."""
 
-    def __init__(self, d, kind, ckw, n_experts, top_k, grouped, aux_loss_weight, swiglu):
+    def __init__(self, d, kind, ckw, n_experts, top_k, grouped, aux_loss_weight, swiglu,
+                 moe_dtype="fp32"):
         super().__init__()
         self.d = d
         self.n = RMSNorm(d)
         self.ffn = CounterMoEFFN(d, n_experts=n_experts, top_k=top_k, grouped=grouped,
-                                 aux_loss_weight=aux_loss_weight, swiglu=swiglu, **_counter_numeric(ckw))
+                                 aux_loss_weight=aux_loss_weight, swiglu=swiglu,
+                                 compute_dtype=moe_dtype, **_counter_numeric(ckw))
 
     def forward(self, x):
         return self.ffn(self.n(x))
@@ -242,7 +246,8 @@ class ReversibleMNGLM(nn.Module):
     def __init__(self, vocab_size: int, n_embd: int, n_layer: int, n_head: int, n_kv_head: int,
                  block_size: int, *, kind: str = "counter_packed", n_experts: int = 8, top_k: int = 2,
                  qk_norm: bool = True, grouped: bool = True, aux_loss_weight: float = 1e-2,
-                 anchor_every: int = 0, swiglu: bool = True, **counter_kw) -> None:
+                 anchor_every: int = 0, swiglu: bool = True, moe_dtype: str = "fp32",
+                 **counter_kw) -> None:
         super().__init__()
         self.block_size = block_size
         self.d = n_embd
@@ -251,7 +256,8 @@ class ReversibleMNGLM(nn.Module):
         blocks = [ReversibleCouplingBlock(
                       2 * n_embd,
                       F=_GLMAttnSub(n_embd, n_head, n_kv_head, kind, counter_kw, qk_norm),
-                      G=_GLMFFNSub(n_embd, kind, counter_kw, n_experts, top_k, grouped, aux_loss_weight, swiglu))
+                      G=_GLMFFNSub(n_embd, kind, counter_kw, n_experts, top_k, grouped,
+                                   aux_loss_weight, swiglu, moe_dtype))
                   for _ in range(n_layer)]
         self.rev = ReversibleSequence(blocks, anchor_every=anchor_every)
         self.nf = RMSNorm(n_embd)
