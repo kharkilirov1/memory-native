@@ -32,6 +32,10 @@ E, TOP_K = 8, 2                                  # MoE experts / top-k  (capacit
 LR, LR_SCALE, C, ABITS = 2e-3, 2e-4, 11, 8
 ANCHOR = 2                                       # reversible speed/memory knob (2-4 sweet spot)
 INT8 = True                                      # d=1536 >= 768 -> int8 wins; set False on narrow models
+BF16 = True                                      # bf16 expert GEMMs: x1.5 step. Parity caveat: at a
+                                                 # 300-step toy scale it lagged fp32 by ~0.09 val
+                                                 # (early-convergence drag); long-horizon parity is
+                                                 # the decider. Set False for the conservative path.
 BATCH = 16
 LOSS_CHUNK = 4096                                # chunk the vocab-50257 head so [B,T,V] is never built
 VAL_TOKENS = 600_000
@@ -85,7 +89,8 @@ def main():
     if INT8:
         ckw.update(forward_compute="int8", update_compute="int8")
     m = ReversibleMNGLM(vocab, D, L, NH, NKV, BLK, kind="counter_packed", n_experts=E, top_k=TOP_K,
-                        qk_norm=True, grouped=True, swiglu=True, anchor_every=ANCHOR, **ckw).to(dev).train()
+                        qk_norm=True, grouped=True, swiglu=True, anchor_every=ANCHOR,
+                        moe_dtype="bf16" if BF16 else "fp32", **ckw).to(dev).train()
     opt = build_optimizer("adamw", m.trainable_parameters(), LR)
 
     start = 0
@@ -98,10 +103,10 @@ def main():
     else:
         print("fresh start", flush=True)
 
-    cc = sum(c.in_features * c.out_features for c in m.counter_layers())
-    print(f"MN-GLM d={D} L={L} GQA {NH}/{NKV} E={E}/{TOP_K} swiglu anchor={ANCHOR} int8={INT8}: "
-          f"{cc/1e9:.2f}B counter coeffs (persistent ~{fmt_bytes(cc*3//4)} vs fp32+Adam {fmt_bytes(cc*16)})",
-          flush=True)
+    cc = m.total_counter_coeffs()               # attention linears + MoE experts (stacked buffers)
+    print(f"MN-GLM d={D} L={L} GQA {NH}/{NKV} E={E}/{TOP_K} swiglu anchor={ANCHOR} int8={INT8} "
+          f"bf16={BF16}: {cc/1e9:.2f}B counter coeffs (state ~{fmt_bytes(cc*3//4)} vs fp32+Adam "
+          f"{fmt_bytes(cc*16)})", flush=True)
 
     xb, yb = stream.batch(BATCH, BLK, dev)
     def onestep():
