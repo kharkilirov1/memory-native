@@ -1,0 +1,34 @@
+cff-version: 1.2.0
+message: "If you use this software or build on the memory-native method, please cite it as below."
+title: "memory-native: Training Without Master Weights — a 6-bit Finite-State Synapse with Optimizer-in-State"
+abstract: >-
+  A finite-state counter synapse in which the entire per-parameter training state is a single
+  6-bit code (visible ternary weight + bounded stochastic-rounding accumulator), updated in-place
+  by exact backpropagated gradients. Composed with reversible activations and int8/bf16 compute,
+  the method trains a 1.21B-parameter model on a single T4 in 2.25 GiB peak, where the dense+Adam
+  equivalent cannot allocate its 18 GiB of state. Convergence parity at scale is the open question.
+authors:
+  - family-names: "Kharki"
+    email: "kharkilirov@gmail.com"
+keywords:
+  - quantization-aware-training
+  - ternary-networks
+  - memory-efficient-training
+  - reversible-networks
+  - optimizer-in-state
+  - finite-state-synapse
+  - pytorch
+  - bitnet
+license: MIT
+type: software
+version: "0.1.0"
+date-released: "2026-07-04"
+preferred-citation:
+  type: unpublished
+  title: "Training Without Master Weights: a 6-bit Finite-State Synapse with Optimizer-in-State"
+  authors:
+    - family-names: "Kharki"
+  year: 2026
+  notes: "Preprint draft v0.1; see paper/MEMORY_NATIVE_PREPRINT.md in this repository."
+repository-code: "https://github.com/kharkilirov1/memory-native"
+url: "https://github.com/kharkilirov1/memory-native"
