@@ -1,9 +1,10 @@
-# memory-native (PyTorch)
+# memory-native
+
+> **📝 Preprint:** *[Training Without Master Weights: a 6-bit Finite-State Synapse with Optimizer-in-State](paper/MEMORY_NATIVE_PREPRINT.md)* (v0.1 draft). A 6-bit code holds the *entire* per-parameter training state — no FP master weight, no Adam moments. Composed with reversible activations + int8/bf16 compute, a 1.21B-parameter model trains on a single T4 in 2.25 GiB peak, where the dense+Adam equivalent cannot allocate its 18 GiB of state.
 
 Finite-state **counter synapses** + **reversible activations** for memory-efficient training,
-in **pure PyTorch** — no custom engine, runs on stock CPU/CUDA. The standalone, engine-independent
-package: everything that previously required the MotifCL C++/OpenCL build runs here with
-`pip install -e .`.
+in **pure PyTorch** — no custom engine, runs on stock CPU/CUDA. Pure-Python package:
+`pip install -e .` and train.
 
 > **GPU-validated** (Tesla T4 / T4×2): [`results/KERNEL.md`](results/KERNEL.md) (fused update
 > ×45.9 / step ×1.26) · [`results/SCALE_1B.md`](results/SCALE_1B.md) (1.21B params on one T4 at
@@ -29,11 +30,11 @@ The method attacks all four memory pools of training at once:
 ## Install
 
 ```bash
-pip install -e .            # from this directory (memory-native-training/pytorch)
+pip install -e .            # from this directory
 # or, once published: pip install memory-native
 ```
 
-Only dependency is `torch>=2.1`.
+Dependencies are `torch>=2.1` and `numpy>=1.21`.
 
 ## Quickstart
 
