@@ -1,0 +1,115 @@
+[{"stream_name":"stdout","time":1.3847353199999999,"data":"[install] pip installing memory-native from GitHub...\n"}
+,{"stream_name":"stdout","time":15.368493233,"data":"[install] done.\n"}
+,{"stream_name":"stdout","time":25.176584325,"data":"[main] output dir: /kaggle/working\n"}
+,{"stream_name":"stdout","time":25.4328739,"data":"[main] device: cuda\n"}
+,{"stream_name":"stdout","time":25.474184156,"data":"[main] GPU: Tesla T4\n"}
+,{"stream_name":"stdout","time":25.474231508,"data":"[data] fetching tinyshakespeare from https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt...\n"}
+,{"stream_name":"stdout","time":25.626635646,"data":"[data] got 1,115,394 chars of tinyshakespeare\n"}
+,{"stream_name":"stdout","time":25.626664317,"data":"\n"}
+,{"stream_name":"stdout","time":25.626667813,"data":"======================================================================\n"}
+,{"stream_name":"stdout","time":25.62667073,"data":"  d512_L8: d=512, L=8, steps=200, C=11\n"}
+,{"stream_name":"stdout","time":25.626673372,"data":"======================================================================\n"}
+,{"stream_name":"stdout","time":25.80150439,"data":"  vocab=65, train tokens=1,003,854\n"}
+,{"stream_name":"stdout","time":26.66353176,"data":"  counter layers: 48\n"}
+,{"stream_name":"stdout","time":39.719092216,"data":"  step    0/200  loss=4.2415  t=7.8s\n"}
+,{"stream_name":"stdout","time":39.719479745,"data":"           peak=0.14 GiB\n"}
+,{"stream_name":"stdout","time":48.163222086,"data":"  step   20/200  loss=3.3735  t=16.3s\n"}
+,{"stream_name":"stdout","time":48.163559539,"data":"           peak=0.14 GiB\n"}
+,{"stream_name":"stdout","time":56.658816206,"data":"  step   40/200  loss=3.2118  t=24.8s\n"}
+,{"stream_name":"stdout","time":56.659075195,"data":"           peak=0.14 GiB\n"}
+,{"stream_name":"stdout","time":65.080293876,"data":"  step   60/200  loss=2.7496  t=33.2s\n"}
+,{"stream_name":"stdout","time":65.080571316,"data":"           peak=0.14 GiB\n"}
+,{"stream_name":"stdout","time":73.425157409,"data":"  step   80/200  loss=2.6079  t=41.5s\n"}
+,{"stream_name":"stdout","time":73.425504187,"data":"           peak=0.14 GiB\n"}
+,{"stream_name":"stdout","time":81.829694285,"data":"  step  100/200  loss=2.6118  t=49.9s\n"}
+,{"stream_name":"stdout","time":81.829950318,"data":"           peak=0.14 GiB\n"}
+,{"stream_name":"stdout","time":90.129184724,"data":"  step  120/200  loss=2.5685  t=58.2s\n"}
+,{"stream_name":"stdout","time":90.129565576,"data":"           peak=0.14 GiB\n"}
+,{"stream_name":"stdout","time":98.533300268,"data":"  step  140/200  loss=2.6183  t=66.6s\n"}
+,{"stream_name":"stdout","time":98.533531381,"data":"           peak=0.14 GiB\n"}
+,{"stream_name":"stdout","time":106.955692121,"data":"  step  160/200  loss=2.5408  t=75.1s\n"}
+,{"stream_name":"stdout","time":106.955979125,"data":"           peak=0.14 GiB\n"}
+,{"stream_name":"stdout","time":115.462644626,"data":"  step  180/200  loss=2.5790  t=83.6s\n"}
+,{"stream_name":"stdout","time":115.46296567,"data":"           peak=0.14 GiB\n"}
+,{"stream_name":"stdout","time":123.502024836,"data":"  step  199/200  loss=2.5284  t=91.6s\n"}
+,{"stream_name":"stdout","time":123.502358858,"data":"           peak=0.14 GiB\n"}
+,{"stream_name":"stdout","time":123.52870602,"data":"  final val loss: 2.5515\n"}
+,{"stream_name":"stdout","time":123.608628216,"data":"[main] wrote /kaggle/working/saturation_d512_L8.json\n"}
+,{"stream_name":"stdout","time":123.608810512,"data":"[main] d512_L8: mean sat=0.0890  mean blocked=0.0049  val=2.5515\n"}
+,{"stream_name":"stdout","time":123.613936742,"data":"\n"}
+,{"stream_name":"stdout","time":123.613971856,"data":"======================================================================\n"}
+,{"stream_name":"stdout","time":123.613977557,"data":"  d1024_L12: d=1024, L=12, steps=200, C=11\n"}
+,{"stream_name":"stdout","time":123.613981896,"data":"======================================================================\n"}
+,{"stream_name":"stdout","time":123.744474833,"data":"  vocab=65, train tokens=1,003,854\n"}
+,{"stream_name":"stdout","time":126.511471742,"data":"  counter layers: 72\n"}
+,{"stream_name":"stdout","time":129.841374279,"data":"  step    0/200  loss=4.4002  t=2.3s\n"}
+,{"stream_name":"stdout","time":129.841669591,"data":"           peak=0.33 GiB\n"}
+,{"stream_name":"stdout","time":173.408988834,"data":"  step   20/200  loss=3.5565  t=45.8s\n"}
+,{"stream_name":"stdout","time":173.409375443,"data":"           peak=0.33 GiB\n"}
+,{"stream_name":"stdout","time":217.121554083,"data":"  step   40/200  loss=3.4658  t=89.6s\n"}
+,{"stream_name":"stdout","time":217.121852094,"data":"           peak=0.33 GiB\n"}
+,{"stream_name":"stdout","time":260.956350979,"data":"  step   60/200  loss=3.4250  t=133.4s\n"}
+,{"stream_name":"stdout","time":260.956647118,"data":"           peak=0.33 GiB\n"}
+,{"stream_name":"stdout","time":304.57135123,"data":"  step   80/200  loss=3.4470  t=177.0s\n"}
+,{"stream_name":"stdout","time":304.571666735,"data":"           peak=0.33 GiB\n"}
+,{"stream_name":"stdout","time":348.291201941,"data":"  step  100/200  loss=3.3687  t=220.7s\n"}
+,{"stream_name":"stdout","time":348.293375946,"data":"           peak=0.33 GiB\n"}
+,{"stream_name":"stdout","time":391.939702611,"data":"  step  120/200  loss=3.3603  t=264.4s\n"}
+,{"stream_name":"stdout","time":391.940036433,"data":"           peak=0.33 GiB\n"}
+,{"stream_name":"stdout","time":436.257067909,"data":"  step  140/200  loss=3.0658  t=308.7s\n"}
+,{"stream_name":"stdout","time":436.257456685,"data":"           peak=0.33 GiB\n"}
+,{"stream_name":"stdout","time":480.294501491,"data":"  step  160/200  loss=2.9263  t=352.7s\n"}
+,{"stream_name":"stdout","time":480.294734532,"data":"           peak=0.33 GiB\n"}
+,{"stream_name":"stdout","time":524.547585281,"data":"  step  180/200  loss=2.7764  t=397.0s\n"}
+,{"stream_name":"stdout","time":524.547875552,"data":"           peak=0.33 GiB\n"}
+,{"stream_name":"stdout","time":566.907935602,"data":"  step  199/200  loss=2.7317  t=439.3s\n"}
+,{"stream_name":"stdout","time":566.908258763,"data":"           peak=0.33 GiB\n"}
+,{"stream_name":"stdout","time":567.054732844,"data":"  final val loss: 2.7135\n"}
+,{"stream_name":"stdout","time":567.179026856,"data":"[main] wrote /kaggle/working/saturation_d1024_L12.json\n"}
+,{"stream_name":"stdout","time":567.179293022,"data":"[main] d1024_L12: mean sat=0.0998  mean blocked=0.0040  val=2.7135\n"}
+,{"stream_name":"stdout","time":567.222472368,"data":"\n"}
+,{"stream_name":"stdout","time":567.222495098,"data":"======================================================================\n"}
+,{"stream_name":"stdout","time":567.222501215,"data":"  d2048_L12: d=2048, L=12, steps=200, C=11\n"}
+,{"stream_name":"stdout","time":567.222506196,"data":"======================================================================\n"}
+,{"stream_name":"stdout","time":567.348578757,"data":"  vocab=65, train tokens=1,003,854\n"}
+,{"stream_name":"stdout","time":579.249119046,"data":"  counter layers: 72\n"}
+,{"stream_name":"stdout","time":599.641535624,"data":"  step    0/200  loss=4.7362  t=14.4s\n"}
+,{"stream_name":"stdout","time":599.641735382,"data":"           peak=0.88 GiB\n"}
+,{"stream_name":"stdout","time":881.0035236,"data":"  step   20/200  loss=3.3849  t=295.8s\n"}
+,{"stream_name":"stdout","time":881.003896729,"data":"           peak=0.89 GiB\n"}
+,{"stream_name":"stdout","time":1154.686957527,"data":"  step   40/200  loss=3.3837  t=569.5s\n"}
+,{"stream_name":"stdout","time":1154.687302387,"data":"           peak=0.89 GiB\n"}
+,{"stream_name":"stdout","time":1426.94601788,"data":"  step   60/200  loss=3.3871  t=841.7s\n"}
+,{"stream_name":"stdout","time":1426.946382573,"data":"           peak=0.89 GiB\n"}
+,{"stream_name":"stdout","time":1700.919005429,"data":"  step   80/200  loss=3.4291  t=1115.7s\n"}
+,{"stream_name":"stdout","time":1700.919457419,"data":"           peak=0.89 GiB\n"}
+,{"stream_name":"stdout","time":1976.574068307,"data":"  step  100/200  loss=3.4076  t=1391.3s\n"}
+,{"stream_name":"stdout","time":1976.574411732,"data":"           peak=0.89 GiB\n"}
+,{"stream_name":"stdout","time":2251.805344542,"data":"  step  120/200  loss=3.3403  t=1666.6s\n"}
+,{"stream_name":"stdout","time":2251.805672874,"data":"           peak=0.89 GiB\n"}
+,{"stream_name":"stdout","time":2530.476791156,"data":"  step  140/200  loss=3.4099  t=1945.2s\n"}
+,{"stream_name":"stdout","time":2530.477120893,"data":"           peak=0.89 GiB\n"}
+,{"stream_name":"stdout","time":2807.91438219,"data":"  step  160/200  loss=3.3587  t=2222.7s\n"}
+,{"stream_name":"stdout","time":2807.914805246,"data":"           peak=0.89 GiB\n"}
+,{"stream_name":"stdout","time":3085.408020902,"data":"  step  180/200  loss=3.1228  t=2500.2s\n"}
+,{"stream_name":"stdout","time":3085.408420462,"data":"           peak=0.89 GiB\n"}
+,{"stream_name":"stdout","time":3349.292658833,"data":"  step  199/200  loss=3.1916  t=2764.1s\n"}
+,{"stream_name":"stdout","time":3349.292987103,"data":"           peak=0.89 GiB\n"}
+,{"stream_name":"stdout","time":3349.916233366,"data":"  final val loss: 3.3177\n"}
+,{"stream_name":"stdout","time":3350.128326416,"data":"[main] wrote /kaggle/working/saturation_d2048_L12.json\n"}
+,{"stream_name":"stdout","time":3350.128537195,"data":"[main] d2048_L12: mean sat=0.0993  mean blocked=0.0043  val=3.3177\n"}
+,{"stream_name":"stdout","time":3350.158005475,"data":"\n"}
+,{"stream_name":"stdout","time":3350.158029017,"data":"[main] WROTE SUMMARY: /kaggle/working/saturation_summary.json\n"}
+,{"stream_name":"stdout","time":3350.158052094,"data":"[main] HEADLINE:\n"}
+,{"stream_name":"stdout","time":3350.16550302,"data":"  d512_L8: d= 512  sat=0.0890  blocked=0.0049  val=2.5515  peak=0.14 GiB\n"}
+,{"stream_name":"stdout","time":3350.165523356,"data":"  d1024_L12: d=1024  sat=0.0998  blocked=0.0040  val=2.7135  peak=0.33 GiB\n"}
+,{"stream_name":"stdout","time":3350.165529809,"data":"  d2048_L12: d=2048  sat=0.0993  blocked=0.0043  val=3.3177  peak=0.89 GiB\n"}
+,{"stream_name":"stdout","time":3350.165534697,"data":"\n"}
+,{"stream_name":"stdout","time":3350.165539222,"data":"[main] DONE.\n"}
+,{"stream_name":"stderr","time":3357.013163819,"data":"/usr/local/lib/python3.12/dist-packages/mistune.py:435: SyntaxWarning: invalid escape sequence '\\|'\n"}
+,{"stream_name":"stderr","time":3357.013235795,"data":"  cells[i][c] = re.sub('\\\\\\\\\\|', '|', cell)\n"}
+,{"stream_name":"stderr","time":3357.495972417,"data":"/usr/local/lib/python3.12/dist-packages/nbconvert/filters/filter_links.py:36: SyntaxWarning: invalid escape sequence '\\_'\n"}
+,{"stream_name":"stderr","time":3357.496010225,"data":"  text = re.sub(r'_', '\\_', text) # Escape underscores in display text\n"}
+,{"stream_name":"stderr","time":3358.238119991,"data":"[NbConvertApp] Converting notebook __script__.ipynb to html\n"}
+,{"stream_name":"stderr","time":3359.98983361,"data":"[NbConvertApp] Writing 338597 bytes to __results__.html\n"}
+]
