@@ -1,0 +1,112 @@
+[{"stream_name":"stdout","time":26.772391098,"data":"[main] output dir: /kaggle/working\n"}
+,{"stream_name":"stdout","time":27.038794103,"data":"[main] device: cuda\n"}
+,{"stream_name":"stdout","time":27.083484177,"data":"[main] GPU: Tesla T4\n"}
+,{"stream_name":"stdout","time":27.083531143,"data":"[data] fetching tinyshakespeare...\n"}
+,{"stream_name":"stdout","time":27.310684066,"data":"[data] got 1,115,394 chars\n"}
+,{"stream_name":"stdout","time":27.310736825,"data":"\n"}
+,{"stream_name":"stdout","time":27.310740787,"data":"======================================================================\n"}
+,{"stream_name":"stdout","time":27.310743726,"data":"  lrscale_0p0002: d=2048, L=12, lr_scale=0.0002, steps=200\n"}
+,{"stream_name":"stdout","time":27.31074642,"data":"======================================================================\n"}
+,{"stream_name":"stdout","time":27.497720457,"data":"  vocab=65, train tokens=1,003,854\n"}
+,{"stream_name":"stdout","time":41.736710012,"data":"  counter layers: 72\n"}
+,{"stream_name":"stdout","time":75.099824463,"data":"  step    0/200  loss=4.7362  t=22s\n"}
+,{"stream_name":"stdout","time":432.469119824,"data":"  step   25/200  loss=3.3819  t=379s\n"}
+,{"stream_name":"stdout","time":788.927428245,"data":"  step   50/200  loss=3.2828  t=736s\n"}
+,{"stream_name":"stdout","time":1150.933881992,"data":"  step   75/200  loss=3.3251  t=1098s\n"}
+,{"stream_name":"stdout","time":1506.427608662,"data":"  step  100/200  loss=3.4078  t=1453s\n"}
+,{"stream_name":"stdout","time":1866.89010519,"data":"  step  125/200  loss=3.4058  t=1814s\n"}
+,{"stream_name":"stdout","time":2228.40769571,"data":"  step  150/200  loss=3.2724  t=2175s\n"}
+,{"stream_name":"stdout","time":2584.169608517,"data":"  step  175/200  loss=3.3566  t=2531s\n"}
+,{"stream_name":"stdout","time":2927.414408938,"data":"  step  199/200  loss=3.1772  t=2874s\n"}
+,{"stream_name":"stdout","time":2928.071489999,"data":"  final val loss: 3.3200\n"}
+,{"stream_name":"stdout","time":2928.274792769,"data":"[main] wrote /kaggle/working/lrscale_0p0002.json\n"}
+,{"stream_name":"stdout","time":2928.275567388,"data":"[main] lrscale_0p0002: flip=0.0102  sat=0.0993  val=3.3200\n"}
+,{"stream_name":"stdout","time":2928.303898452,"data":"\n"}
+,{"stream_name":"stdout","time":2928.303920273,"data":"======================================================================\n"}
+,{"stream_name":"stdout","time":2928.303924527,"data":"  lrscale_0p0004: d=2048, L=12, lr_scale=0.0004, steps=200\n"}
+,{"stream_name":"stdout","time":2928.303927839,"data":"======================================================================\n"}
+,{"stream_name":"stdout","time":2928.445037584,"data":"  vocab=65, train tokens=1,003,854\n"}
+,{"stream_name":"stdout","time":2938.51442972,"data":"  counter layers: 72\n"}
+,{"stream_name":"stdout","time":2955.217443954,"data":"  step    0/200  loss=4.7362  t=12s\n"}
+,{"stream_name":"stdout","time":3259.484868426,"data":"  step   25/200  loss=3.3820  t=317s\n"}
+,{"stream_name":"stdout","time":3569.309723819,"data":"  step   50/200  loss=3.2829  t=626s\n"}
+,{"stream_name":"stdout","time":3875.871126154,"data":"  step   75/200  loss=3.3250  t=933s\n"}
+,{"stream_name":"stdout","time":4180.114154267,"data":"  step  100/200  loss=3.4078  t=1237s\n"}
+,{"stream_name":"stdout","time":4481.380449441,"data":"  step  125/200  loss=3.4058  t=1538s\n"}
+,{"stream_name":"stdout","time":4788.288245023,"data":"  step  150/200  loss=3.2723  t=1845s\n"}
+,{"stream_name":"stdout","time":5092.6037309,"data":"  step  175/200  loss=3.3558  t=2150s\n"}
+,{"stream_name":"stdout","time":5385.32889603,"data":"  step  199/200  loss=3.1898  t=2442s\n"}
+,{"stream_name":"stdout","time":5385.976198332,"data":"  final val loss: 3.3180\n"}
+,{"stream_name":"stdout","time":5386.132306797,"data":"[main] wrote /kaggle/working/lrscale_0p0004.json\n"}
+,{"stream_name":"stdout","time":5386.132557004,"data":"[main] lrscale_0p0004: flip=0.0102  sat=0.0993  val=3.3180\n"}
+,{"stream_name":"stdout","time":5386.159283361,"data":"\n"}
+,{"stream_name":"stdout","time":5386.159304624,"data":"======================================================================\n"}
+,{"stream_name":"stdout","time":5386.159319999,"data":"  lrscale_0p0008: d=2048, L=12, lr_scale=0.0008, steps=200\n"}
+,{"stream_name":"stdout","time":5386.159324297,"data":"======================================================================\n"}
+,{"stream_name":"stdout","time":5386.290299758,"data":"  vocab=65, train tokens=1,003,854\n"}
+,{"stream_name":"stdout","time":5396.296531046,"data":"  counter layers: 72\n"}
+,{"stream_name":"stdout","time":5411.851809403,"data":"  step    0/200  loss=4.7362  t=11s\n"}
+,{"stream_name":"stdout","time":5719.765302434,"data":"  step   25/200  loss=3.3818  t=319s\n"}
+,{"stream_name":"stdout","time":6033.963301599,"data":"  step   50/200  loss=3.2828  t=633s\n"}
+,{"stream_name":"stdout","time":6348.971861942,"data":"  step   75/200  loss=3.3250  t=948s\n"}
+,{"stream_name":"stdout","time":6663.92247148,"data":"  step  100/200  loss=3.4077  t=1263s\n"}
+,{"stream_name":"stdout","time":6979.216461847,"data":"  step  125/200  loss=3.4060  t=1579s\n"}
+,{"stream_name":"stdout","time":7293.173828439,"data":"  step  150/200  loss=3.2721  t=1892s\n"}
+,{"stream_name":"stdout","time":7610.32669729,"data":"  step  175/200  loss=3.3529  t=2210s\n"}
+,{"stream_name":"stdout","time":7912.951834122,"data":"  step  199/200  loss=3.1918  t=2512s\n"}
+,{"stream_name":"stdout","time":7913.600734502,"data":"  final val loss: 3.3181\n"}
+,{"stream_name":"stdout","time":7913.776453848,"data":"[main] wrote /kaggle/working/lrscale_0p0008.json\n"}
+,{"stream_name":"stdout","time":7913.77677472,"data":"[main] lrscale_0p0008: flip=0.0102  sat=0.0993  val=3.3181\n"}
+,{"stream_name":"stdout","time":7913.805027429,"data":"\n"}
+,{"stream_name":"stdout","time":7913.805048807,"data":"======================================================================\n"}
+,{"stream_name":"stdout","time":7913.805055876,"data":"  lrscale_0p0012: d=2048, L=12, lr_scale=0.0012, steps=200\n"}
+,{"stream_name":"stdout","time":7913.805061471,"data":"======================================================================\n"}
+,{"stream_name":"stdout","time":7913.934373205,"data":"  vocab=65, train tokens=1,003,854\n"}
+,{"stream_name":"stdout","time":7924.154322294,"data":"  counter layers: 72\n"}
+,{"stream_name":"stdout","time":7940.56917728,"data":"  step    0/200  loss=4.7362  t=12s\n"}
+,{"stream_name":"stdout","time":8255.46115297,"data":"  step   25/200  loss=3.3815  t=327s\n"}
+,{"stream_name":"stdout","time":8570.639130294,"data":"  step   50/200  loss=3.2828  t=642s\n"}
+,{"stream_name":"stdout","time":8886.028118736,"data":"  step   75/200  loss=3.3250  t=958s\n"}
+,{"stream_name":"stdout","time":9202.463178244,"data":"  step  100/200  loss=3.4073  t=1274s\n"}
+,{"stream_name":"stdout","time":9515.415321642,"data":"  step  125/200  loss=3.4058  t=1587s\n"}
+,{"stream_name":"stdout","time":9829.039201714,"data":"  step  150/200  loss=3.2707  t=1901s\n"}
+,{"stream_name":"stdout","time":10146.905370206,"data":"  step  175/200  loss=3.3535  t=2218s\n"}
+,{"stream_name":"stdout","time":10447.776393013,"data":"  step  199/200  loss=3.1944  t=2519s\n"}
+,{"stream_name":"stdout","time":10448.414445667,"data":"  final val loss: 3.3133\n"}
+,{"stream_name":"stdout","time":10448.582712261,"data":"[main] wrote /kaggle/working/lrscale_0p0012.json\n"}
+,{"stream_name":"stdout","time":10448.583011518,"data":"[main] lrscale_0p0012: flip=0.0102  sat=0.0993  val=3.3133\n"}
+,{"stream_name":"stdout","time":10448.609675632,"data":"\n"}
+,{"stream_name":"stdout","time":10448.609695092,"data":"======================================================================\n"}
+,{"stream_name":"stdout","time":10448.609699908,"data":"  lrscale_0p002: d=2048, L=12, lr_scale=0.002, steps=200\n"}
+,{"stream_name":"stdout","time":10448.60971995,"data":"======================================================================\n"}
+,{"stream_name":"stdout","time":10448.739530936,"data":"  vocab=65, train tokens=1,003,854\n"}
+,{"stream_name":"stdout","time":10458.934334908,"data":"  counter layers: 72\n"}
+,{"stream_name":"stdout","time":10475.6944671,"data":"  step    0/200  loss=4.7362  t=12s\n"}
+,{"stream_name":"stdout","time":10794.210514338,"data":"  step   25/200  loss=3.3813  t=331s\n"}
+,{"stream_name":"stdout","time":11114.628957186,"data":"  step   50/200  loss=3.2828  t=651s\n"}
+,{"stream_name":"stdout","time":11434.93451278,"data":"  step   75/200  loss=3.3251  t=972s\n"}
+,{"stream_name":"stdout","time":11757.453368943,"data":"  step  100/200  loss=3.4072  t=1294s\n"}
+,{"stream_name":"stdout","time":12078.094165492,"data":"  step  125/200  loss=3.4052  t=1615s\n"}
+,{"stream_name":"stdout","time":12396.818732331,"data":"  step  150/200  loss=3.2706  t=1933s\n"}
+,{"stream_name":"stdout","time":12720.207086451,"data":"  step  175/200  loss=3.3558  t=2257s\n"}
+,{"stream_name":"stdout","time":13029.39165538,"data":"  step  199/200  loss=3.1844  t=2566s\n"}
+,{"stream_name":"stdout","time":13030.045615715,"data":"  final val loss: 3.3144\n"}
+,{"stream_name":"stdout","time":13030.221206697,"data":"[main] wrote /kaggle/working/lrscale_0p002.json\n"}
+,{"stream_name":"stdout","time":13030.221626993,"data":"[main] lrscale_0p002: flip=0.0102  sat=0.0993  val=3.3144\n"}
+,{"stream_name":"stdout","time":13030.248683912,"data":"\n"}
+,{"stream_name":"stdout","time":13030.248706545,"data":"[main] WROTE SUMMARY: /kaggle/working/lrscale_summary.json\n"}
+,{"stream_name":"stdout","time":13030.248712514,"data":"[main] HEADLINE:\n"}
+,{"stream_name":"stdout","time":13030.250304857,"data":"  lrscale_0p0002: lr_scale=0.0002    flip=0.0102  sat=0.0993  val=3.3200  peak=0.89GiB\n"}
+,{"stream_name":"stdout","time":13030.250321004,"data":"  lrscale_0p0004: lr_scale=0.0004    flip=0.0102  sat=0.0993  val=3.3180  peak=0.89GiB\n"}
+,{"stream_name":"stdout","time":13030.250326989,"data":"  lrscale_0p0008: lr_scale=0.0008    flip=0.0102  sat=0.0993  val=3.3181  peak=0.89GiB\n"}
+,{"stream_name":"stdout","time":13030.250332272,"data":"  lrscale_0p0012: lr_scale=0.0012    flip=0.0102  sat=0.0993  val=3.3133  peak=0.89GiB\n"}
+,{"stream_name":"stdout","time":13030.250336918,"data":"  lrscale_0p002: lr_scale=0.002     flip=0.0102  sat=0.0993  val=3.3144  peak=0.89GiB\n"}
+,{"stream_name":"stdout","time":13030.250341786,"data":"\n"}
+,{"stream_name":"stdout","time":13030.250346594,"data":"[main] DONE.\n"}
+,{"stream_name":"stderr","time":13037.277369294,"data":"/usr/local/lib/python3.12/dist-packages/mistune.py:435: SyntaxWarning: invalid escape sequence '\\|'\n"}
+,{"stream_name":"stderr","time":13037.277432017,"data":"  cells[i][c] = re.sub('\\\\\\\\\\|', '|', cell)\n"}
+,{"stream_name":"stderr","time":13037.767247191,"data":"/usr/local/lib/python3.12/dist-packages/nbconvert/filters/filter_links.py:36: SyntaxWarning: invalid escape sequence '\\_'\n"}
+,{"stream_name":"stderr","time":13037.767278146,"data":"  text = re.sub(r'_', '\\_', text) # Escape underscores in display text\n"}
+,{"stream_name":"stderr","time":13038.528120917,"data":"[NbConvertApp] Converting notebook __script__.ipynb to html\n"}
+,{"stream_name":"stderr","time":13040.29704647,"data":"[NbConvertApp] Writing 331259 bytes to __results__.html\n"}
+]
