@@ -31,6 +31,7 @@ __all__ = [
     "decode_state",
     "stochastic_round",
     "ternary_gradient_unbiased",
+    "weight_to_counter_state",
     "CompactCounterLinear",
     "RMSCounterLinear",
 ]
@@ -78,6 +79,42 @@ def ternary_gradient_unbiased(g: torch.Tensor) -> torch.Tensor:
     p = (g.abs() / safe).clamp_(0.0, 1.0)
     event = (torch.rand_like(p) < p).to(g.dtype)
     return torch.sign(g) * event * amplitude
+
+
+def weight_to_counter_state(
+    weight: torch.Tensor, C: int = C_DEFAULT, threshold_ratio: float = 0.7
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Quantize a dense weight [out,in] into (scale, ternary t, residual counter c) so a counter
+    layer can be *warm-started from pretrained weights* instead of a random ternary init.
+
+    The counter layer's forward uses only ``scale * t`` (the visible ternary weight); the counter
+    ``c`` is a sub-threshold pending-update accumulator that shapes the *dynamics*, not the current
+    output. So warm-start forward fidelity is exactly the ternary quantization error -- inherently
+    lossy for a full-precision donor (this is why a recovery finetune / distillation is needed),
+    but ~0 for an already-ternary donor.
+
+    Method (per output row, TWN-style closed-form minimizer of ||w - s*t||):
+      * threshold  Delta = threshold_ratio * mean(|w_row|); keep entries with |w| > Delta.
+      * ternary    t = sign(w) on kept entries, 0 elsewhere.
+      * scale      s = mean(|w|) over the kept entries (the L2-optimal amplitude for that mask).
+      * counter    c = round((w/s - t) * C), clamped to [-(C-1), C-1] -- seeds the residual the
+                   donor weight was carrying toward its next ternary flip. Reconstructing
+                   ``s*(t + c/C)`` recovers ~6-bit fidelity, but the layer's forward only sees s*t.
+
+    Returns (scale [out,1] float32, t [out,in] int16, c [out,in] int16).
+    """
+    w = weight.detach().to(torch.float32)
+    if w.dim() != 2:
+        raise ValueError("weight_to_counter_state expects a 2-D weight [out_features, in_features]")
+    absw = w.abs()
+    delta = threshold_ratio * absw.mean(dim=1, keepdim=True)          # per-row keep threshold
+    mask = absw > delta
+    t = (torch.sign(w) * mask.to(w.dtype))                            # {-1,0,+1}
+    kept = mask.sum(dim=1, keepdim=True).clamp_min(1)
+    s = ((absw * mask).sum(dim=1, keepdim=True) / kept).clamp_min(1e-5)   # L2-optimal row scale
+    residual = w / s - t                                             # sub-ternary remainder
+    c = torch.round(residual * C).clamp_(-(C - 1), C - 1)
+    return s, t.to(torch.int16), c.to(torch.int16)
 
 
 class _FusedCounterLinearFn(torch.autograd.Function):
@@ -525,6 +562,41 @@ class CompactCounterLinear(nn.Module):
             "scale_mean": float(self.scale.mean()),
         }
 
+    # --- warm-start from pretrained weights ---------------------------------------
+    @torch.no_grad()
+    def load_dense_weight(self, weight: torch.Tensor, threshold_ratio: float = 0.7) -> None:
+        """Overwrite this layer's state+scale from a dense weight [out,in] (pretrained warm-start).
+
+        Routes the write through _write_rows, so the packed 6-bit subclass packs automatically and
+        any derived T-cache is refreshed. Optimizer-side buffers (RMS second moment, calibration
+        scale) are reset by subclasses that own them so the counter starts clean from the import."""
+        if tuple(weight.shape) != (self.out_features, self.in_features):
+            raise ValueError(
+                f"weight shape {tuple(weight.shape)} != layer ({self.out_features}, {self.in_features})"
+            )
+        s, t, c = weight_to_counter_state(weight, self.C, threshold_ratio)
+        self._write_rows(0, self.out_features, t, c)
+        self.scale.copy_(s.to(self.scale.dtype))
+
+    @classmethod
+    def from_dense(cls, weight: torch.Tensor, *, C: int = C_DEFAULT,
+                   threshold_ratio: float = 0.7, **counter_kw) -> "CompactCounterLinear":
+        """Build a counter layer warm-started from a dense weight tensor [out_features, in_features]."""
+        out_features, in_features = weight.shape
+        layer = cls(int(in_features), int(out_features), C=C, **counter_kw)
+        layer.load_dense_weight(weight, threshold_ratio=threshold_ratio)
+        return layer
+
+    @classmethod
+    def from_linear(cls, linear: nn.Module, *, C: int = C_DEFAULT,
+                    threshold_ratio: float = 0.7, **counter_kw) -> "CompactCounterLinear":
+        """Build a counter layer warm-started from an existing ``nn.Linear`` (its .weight).
+
+        The bias is dropped -- counter layers are bias-free (as in the GPT/GLM harness); fold any
+        bias into the following norm/next layer at the model level if the donor uses one.
+        """
+        return cls.from_dense(linear.weight, C=C, threshold_ratio=threshold_ratio, **counter_kw)
+
 
 class RMSCounterLinear(CompactCounterLinear):
     """CompactCounterLinear + per-row RMS adaptive scaling (the cheap analogue of Adam's
@@ -553,6 +625,14 @@ class RMSCounterLinear(CompactCounterLinear):
         self.scale_rebase = scale_rebase
         self.register_buffer("v", torch.zeros((self.out_features, 1), dtype=torch.float32))
         self.register_buffer("s_base", self.scale.clone())  # scale the counter is calibrated to
+
+    @torch.no_grad()
+    def load_dense_weight(self, weight: torch.Tensor, threshold_ratio: float = 0.7) -> None:
+        """Warm-start from a dense weight, then reset the RMS second moment and recalibrate s_base
+        to the imported scale so the counter dynamics start clean from the pretrained init."""
+        super().load_dense_weight(weight, threshold_ratio=threshold_ratio)
+        self.v.zero_()
+        self.s_base.copy_(self.scale)
 
     @torch.no_grad()
     def _update_tile(self, lo, hi, grad_w, t_i, c_i, s_i, proxy_gsq=None) -> None:
