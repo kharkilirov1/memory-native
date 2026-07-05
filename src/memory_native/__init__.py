@@ -19,7 +19,9 @@ from .counter import (
     encode_state,
     stochastic_round,
     ternary_gradient_unbiased,
+    weight_to_counter_state,
 )
+from .convert import CounterLinearWithBias, SwapReport, swap_linears_to_counter
 from .reversible import ReversibleCouplingBlock, ReversibleSequence, ReversibleSequential
 from .packed import PackedRMSCounterLinear, pack_codes, unpack_codes
 from .slowfast import SlowFastCounterLinear
@@ -70,6 +72,10 @@ __all__ = [
     "decode_state",
     "stochastic_round",
     "ternary_gradient_unbiased",
+    "weight_to_counter_state",
+    "swap_linears_to_counter",
+    "SwapReport",
+    "CounterLinearWithBias",
     "ReversibleCouplingBlock",
     "ReversibleSequential",
     "ReversibleSequence",
