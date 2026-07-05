@@ -1,0 +1,44 @@
+{
+  "results": [
+    {
+      "tag": "lrscale_0p0002",
+      "lr_scale": 0.0002,
+      "mean_flip_rate": 0.010189927030718684,
+      "mean_saturation": 0.09926629414471487,
+      "val_loss": 3.319995880126953,
+      "peak_gib": 0.8856334686279297
+    },
+    {
+      "tag": "lrscale_0p0004",
+      "lr_scale": 0.0004,
+      "mean_flip_rate": 0.010188771812532731,
+      "mean_saturation": 0.09926807009201083,
+      "val_loss": 3.3180196285247803,
+      "peak_gib": 0.8856334686279297
+    },
+    {
+      "tag": "lrscale_0p0008",
+      "lr_scale": 0.0008,
+      "mean_flip_rate": 0.01018366187205554,
+      "mean_saturation": 0.09926581970002088,
+      "val_loss": 3.318148612976074,
+      "peak_gib": 0.8856334686279297
+    },
+    {
+      "tag": "lrscale_0p0012",
+      "lr_scale": 0.0012,
+      "mean_flip_rate": 0.010181821178858033,
+      "mean_saturation": 0.09926790408893592,
+      "val_loss": 3.3133044242858887,
+      "peak_gib": 0.8856334686279297
+    },
+    {
+      "tag": "lrscale_0p002",
+      "lr_scale": 0.002,
+      "mean_flip_rate": 0.010178404297471334,
+      "mean_saturation": 0.09927233141639995,
+      "val_loss": 3.31440806388855,
+      "peak_gib": 0.8856334686279297
+    }
+  ]
+}

@@ -104,3 +104,61 @@ Whatever the next experiment finds, this is real progress: an OPEN question turn
 ```
 
 Raw per-step data: `results/kaggle_saturation/saturation_<tag>.json`.
+
+---
+
+# Follow-up: lr_scale sweep (d=2048) — second hypothesis refuted
+
+After the saturation analysis, a follow-up kernel (`lirovkharki/memory-native-lr-scale-sweep-d2048`) tested the new hypothesis that `lr_scale=2e-4` was mis-tuned at large `d`. **Result: refuted.** Raw data: `results/kaggle_lrscale/`.
+
+## Bug found in the probe (during analysis)
+
+The probe initially reported `flip_rate` from `weight_flips` (the buffer incremented in `RMSCounterLinear._update_tile`). On the T4 this buffer is **never incremented**, because the fused Triton kernel (`fused_update.py`) writes the packed state directly and skips `_write_rows` / the `weight_flips.add_()` call. The metric `flip_rate` (buffer-based) returned 0.0 for every step on every config.
+
+The accurate metric is `flip_rate_alt`, computed by comparing the decoded ternary `t` before and after each step. All numbers below use `flip_rate_alt` over the stationary regime (steps 50-200), dropping the initialization burst in the first ~50 steps where nearly every weight flips once.
+
+## Re-analyzed scale-sweep numbers (correct metric)
+
+| config | stationary flip rate (steps 50-200) | val loss |
+|---|---|---|
+| d=512  | **4.17%** | 2.55 |
+| d=1024 | **0.78%** | 2.71 |
+| d=2048 | **0.57%** | 3.32 |
+
+The flip-rate collapse with width is real and large (4.17% → 0.57% is a 7× drop), larger than the initial analysis showed.
+
+## lr_scale sweep at d=2048
+
+Fixed `d=2048, L=12, steps=200`, swept `lr_scale` over a 10× range. Raw data: `results/kaggle_lrscale/`.
+
+| lr_scale | stationary flip rate | val loss |
+|---|---|---|
+| 2e-4  | 0.56% | 3.32 |
+| 4e-4  | 0.56% | 3.32 |
+| 8e-4  | 0.56% | 3.32 |
+| 1.2e-3 | 0.56% | 3.31 |
+| 2e-3 | 0.56% | 3.31 |
+
+**10× change in `lr_scale` moves neither flip rate nor val loss.** The hypothesis is refuted.
+
+## Why the hypothesis was wrong: parameter confusion
+
+The follow-up was launched on a misread of the counter update math. In `_update_tile`:
+
+```python
+s_new = (s_i - self.lr_scale * grad_s).clamp_(1e-5, 10.0)      # lr_scale -> per-row scale
+ticks = (-self._eff_lr() * update_signal) * (self.C / s_new)   # _eff_lr = self.lr * _lr_mult
+```
+
+`lr_scale` controls the learning rate of the **per-row scale `s`**, not the counter ticks. The counter `c` is driven by `self.lr` (default `3e-3`). Sweeping `lr_scale` cannot move the flip rate by construction. Correcting the hypothesis means sweeping `lr`, not `lr_scale`.
+
+## Side finding: lr_scale is inert
+
+The 10× sweep that does nothing is itself a finding: the per-row scale dynamics are very weakly coupled to `lr_scale` over 200 steps. The scale moves slowly under gradient pressure regardless of `lr_scale`, because `grad_s` is a row-sum (low magnitude) and `clamp_(1e-5, 10.0)` caps excursions. This is a stability property, not a bug.
+
+## Next experiment (corrected)
+
+Fix `d=2048`. Sweep `lr` (the counter learning rate, default `3e-3`) over `{3e-3, 6e-3, 1e-2, 2e-2}`. Predict: if `|ticks| ~ lr * grad_eff` and `grad_eff` shrinks as `1/sqrt(d)` with LayerNorm, then doubling `lr` at d=2048 should approximately recover the d=512 flip rate (~4%) and bring val loss back toward ~2.6.
+
+If `lr` also fails to move flip rate, the bottleneck is upstream of the counter (gradient magnitude at the layer input, scale of `grad_out`), and the search moves to normalization or initialization.
+
