@@ -1,3 +1,6 @@
+# virtualenvs
+.venv/
+venv/
 # build / install artifacts
 *.egg-info/
 build/
