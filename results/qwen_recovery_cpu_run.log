@@ -1,0 +1,31 @@
+======================================================================
+FINAL EXPERIMENT — Qwen2.5-0.5B -> counter -> distill recovery (CPU)
+recipe: thr=0.5 fp_lr=0.0003 counter_lr=0.008 grad_clip=1.0 cgc=1.0 ce=0.3 T=2.0
+scale : SEQ=256 BATCH=2 steps=120
+======================================================================
+device=cpu dtype=torch.float32
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+Loading weights:   0%|          | 0/290 [00:00<?, ?it/s]Loading weights:   0%|          | 1/290 [00:00<02:47,  1.73it/s]Loading weights:  67%|██████▋   | 195/290 [00:00<00:00, 381.78it/s]Loading weights: 100%|██████████| 290/290 [00:00<00:00, 340.60it/s]
+Loading weights:   0%|          | 0/290 [00:00<?, ?it/s]Loading weights:  29%|██▉       | 85/290 [00:00<00:00, 823.48it/s]Loading weights:  72%|███████▏  | 208/290 [00:00<00:00, 1054.77it/s]Loading weights: 100%|██████████| 290/290 [00:00<00:00, 1071.43it/s]
+SwapReport(swapped=168 linears, 357,826,560 counter coeffs; skipped=1)
+Using the latest cached version of the dataset since wikitext couldn't be found on the Hugging Face Hub
+Found the latest cached dataset configuration 'wikitext-2-raw-v1' at C:\Users\Kharki\.cache\huggingface\datasets\wikitext\wikitext-2-raw-v1\0.0.0\b08601e04326c79dfdd32d625aee71d232d685c3 (last modified on Mon Apr 13 22:28:28 2026).
+Using the latest cached version of the dataset since wikitext couldn't be found on the Hugging Face Hub
+Found the latest cached dataset configuration 'wikitext-2-raw-v1' at C:\Users\Kharki\.cache\huggingface\datasets\wikitext\wikitext-2-raw-v1\0.0.0\b08601e04326c79dfdd32d625aee71d232d685c3 (last modified on Mon Apr 13 22:28:28 2026).
+corpus: 40 train batches, 24 val batches (2x256)
+
+PPL fp teacher       :   21.184
+PPL counter warm-start: 159267.634   (degraded by +159246.450)
+round  1/8  PPL 3529.689   residual gap   2.2%
+round  2/8  PPL 1634.499   residual gap   1.0%
+round  3/8  PPL 1025.839   residual gap   0.6%
+round  4/8  PPL  997.658   residual gap   0.6%
+round  5/8  PPL  626.622   residual gap   0.4%
+round  6/8  PPL  775.794   residual gap   0.5%
+round  7/8  PPL  588.685   residual gap   0.4%
+round  8/8  PPL  907.381   residual gap   0.6%
+
+recovery: 159267.634 -> 907.381  (closed 99.4% of the warm-start gap to the fp baseline 21.184)
+curve: 159267.63  3529.69  1634.50  1025.84  997.66  626.62  775.79  588.68  907.38
+
+total wall-clock: 48.6 min
