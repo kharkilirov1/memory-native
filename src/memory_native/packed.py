@@ -78,7 +78,7 @@ class PackedRMSCounterLinear(RMSCounterLinear):
         """
         from .fused_update import HAS_TRITON, triton_counter_update
         if not (HAS_TRITON and grad_w.is_cuda and self.use_rms
-                and self.pulse_mode == "direct" and self.local_grad_clip == 0
+                and self.pulse_mode == "direct"
                 and self.rms_mode == "exact" and self.scale_rebase == "eager"
                 and not self.decimate_updates):  # kernel doesn't report flip-rate; torch path does
             return False
@@ -86,9 +86,12 @@ class PackedRMSCounterLinear(RMSCounterLinear):
             return False
         seed = self._sr_step
         self._sr_step += 1
+        # local_grad_clip rides into the kernel (folded into the RMS denominator), so the
+        # stable recovery recipe (clip=1.0) gets the fused path too -- the clip==0 gate is gone.
         triton_counter_update(self.state[lo:hi], self.scale[lo:hi], self.v[lo:hi], grad_w.contiguous(),
                               C=self.C, lr=self.lr, lr_scale=self.lr_scale,
-                              rms_beta=self.rms_beta, rms_eps=self.rms_eps, seed=seed)
+                              rms_beta=self.rms_beta, rms_eps=self.rms_eps, seed=seed,
+                              clip=self.local_grad_clip)
         # The kernel mutates the packed state directly, bypassing _write_rows/_refresh_t_cache.
         # Refresh only the affected rows instead of rebuilding the whole derived T cache.
         if self.cache_mode != "none":

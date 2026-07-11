@@ -48,6 +48,27 @@ computed in the kernel's pass 1. Then the recovery recipe keeps its stabilizer A
 transition. (Expected end-to-end gain stays bounded by Amdahl: ~5% of a distill step at 0.5B —
 worth taking mainly as part of a larger kernel-side consolidation.)
 
+## v3 follow-up (same day): row clip landed INSIDE the kernel — verdict reversed to GO
+
+`local_grad_clip` now folds into the kernel/reference RMS denominator (zero extra passes) and
+the `clip==0` gate in `PackedRMSCounterLinear._fused_update` is gone. T4 witness
+(kernel v3, `results/cuda_witness_t4_v3.json`):
+
+- **Parity at clip=1** (hot grads, clip engaged on 88% of codes): kernel vs
+  `counter_update_hashsr` = **0 mismatched codes, 0 quanta drift**, scale/v allclose.
+- **Recovery with fused AT clip=1** (real Qwen2.5-0.5B, 150 steps, B4x512, same seed/corpus):
+
+| run | PPL warm -> end | loss | s/step | fused engaged |
+|---|---|---|---:|---:|
+| fused `counter_packed` clip=1 lr .008 | 117k -> **727** | 13.24 -> 13.54 | **4.31** | 25 200 |
+| control `counter_rms` clip=1 lr .008 | 117k -> 782 | 13.24 -> 13.55 | 4.54 | 0 |
+
+The stable recipe now runs on the fused kernel: recovery is healthy (slightly better end-PPL,
+within run-to-run noise), step is ~1.05x — the Amdahl bound predicted for a 0.5B T4 step.
+Local suite after the change: 170 passed / 12 skipped (4 new clip tests in
+`tests/test_kernel_clip.py`; clip=0 and huge-clip paths are bit-identical to unclipped).
+`finetune_qwen_counter.py` now defaults to `counter_packed` on CUDA.
+
 ## Bottom line for the recovery workflow on T4
 
 - NEW script defaults are **1.23x per step** end-to-end; with rounds >= 2 the teacher cache is

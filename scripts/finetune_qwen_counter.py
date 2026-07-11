@@ -48,9 +48,11 @@ SEED = 0
 ATTN_IMPL = "sdpa"                  # sdpa calls each projection once -> counter guard holds
 TEACHER_TOPK = 128                  # cache teacher top-k logits; epoch 2+ skips the teacher
                                     # forward entirely (0 = off, exact full-vocab KD every step)
-KIND = "counter_rms"                # "counter_packed" adds 6-bit storage + a fused Triton
-                                    # update on CUDA, BUT the fused kernel requires
-                                    # local_grad_clip=0 -- a separate T4 stability experiment.
+KIND = None                         # auto: counter_packed on CUDA (6-bit storage + fused Triton
+                                    # update; local_grad_clip now rides INSIDE the kernel --
+                                    # T4-verified: parity 0 mismatches, recovery healthy, ~1.05x
+                                    # step; results/cuda_witness_t4.md), counter_rms on CPU
+                                    # (packed pays pack/unpack on the torch path).
 
 
 def _pip(*pkgs):
@@ -117,9 +119,10 @@ def main():
     student = AutoModelForCausalLM.from_pretrained(
         MODEL, torch_dtype=dtype, attn_implementation=ATTN_IMPL
     ).to(device)
-    report = qwen_to_counter(student, kind=KIND, threshold_ratio=THRESHOLD_RATIO,
+    kind = KIND or ("counter_packed" if device == "cuda" else "counter_rms")
+    report = qwen_to_counter(student, kind=kind, threshold_ratio=THRESHOLD_RATIO,
                              lr=COUNTER_LR, local_grad_clip=LOCAL_GRAD_CLIP)
-    print(report)
+    print(f"kind={kind}", report)
 
     train_batches, val_batches = load_corpus(tokenizer, device)
     print(f"corpus: {len(train_batches)} train batches, {len(val_batches)} val batches "
