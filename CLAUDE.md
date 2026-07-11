@@ -100,6 +100,16 @@ weights HF **gated**) is deferred to a second pass. Phases 1–2 were kept donor
   Full-fuse incl. SR = 2.01× but changes the RNG stream (not the default design). Refuted on CPU:
   hash-SR RNG (0.46× vs rand_like), counter_update_hashsr one-call (0.54×). Remaining CPU levers:
   decimate_updates (period× fewer chain runs, bias caveat), bigger B×T (update is O(params)).
+- (2026-07-11) CUDA WITNESS on Kaggle T4 (results/cuda_witness_t4.md + .json; kernel
+  lirovkharki/mn-cuda-perf-witness v2, code @ 9cc4e1a as tarball): NEW script defaults = **1.23×**
+  full distill step (4.03→3.28 s, B4×T512; top-k teacher cache erases the 0.83 s teacher fwd);
+  compile_update on T4 = 1.32×/layer; fp16 T-cache fwd = 1.33×. REFUTED at this scale: the ~336
+  `.item()` syncs cost only +0.4%/step (fix stays — free), and "drop the clip to wake the fused
+  ×15.8 kernel" — without row-clip recovery STALLS (loss rises, end-PPL 21× worse than control)
+  while the full-step gain is only ~5% (Amdahl: T4 step is GEMM/attention-bound, not update-bound).
+  Fused engagement proven (25 200 tile-updates). NEXT lever: row clip INSIDE the Triton kernel —
+  free from existing row stats: row_norm(grad_eff)=sqrt(g_sq·in)/denom. Control run post-bugfix:
+  PPL 117k→782 in 150 steps (healthy).
 - (2026-07-11) BUGFIX carry saturation: the blocked/saturation branch of the counter transition was
   dead code in ALL torch paths (`clamp_` in-place aliasing made `blocked` all-False) while the fused
   Triton kernel + its CPU reference (fused_update.counter_update_hashsr) implement it live — a real
