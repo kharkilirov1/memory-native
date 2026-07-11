@@ -81,6 +81,82 @@ def ternary_gradient_unbiased(g: torch.Tensor) -> torch.Tensor:
     return torch.sign(g) * event * amplitude
 
 
+# --- compile-able update math ----------------------------------------------------------
+# The elementwise update chain is ~15 separate memory passes over an [out,in] tile and
+# dominates a CPU/torch training step (profiled: >70% of a distill step at small batch).
+# These two PURE functions hold the deterministic parts so an opt-in torch.compile can fuse
+# them; stochastic_round stays OUTSIDE, so the global RNG stream -- and with it the DDP
+# bit-identity contract documented in _FusedCounterLinearFn.backward -- is untouched.
+
+def _rms_eager_pre_sr(grad_w, t_f, c_f, s_i, v_io, g_sq, use_rms: bool, rms_eps: float,
+                      rms_beta: float, clip: float, lr: float, lr_scale: float,
+                      C: int, sqrt_fan: float):
+    """Deterministic pre-SR chain of the direct-pulse / eager-rebase RMS update.
+    Mutates v_io (the layer's RMS slice) in place exactly like the inline path did;
+    returns (pre_round, s_new)."""
+    if use_rms:
+        v_io.mul_(rms_beta).add_(g_sq, alpha=1.0 - rms_beta)
+        denom = v_io.sqrt().clamp_min(rms_eps)
+        grad_eff = grad_w / denom
+    else:
+        grad_eff = grad_w
+    if clip > 0:
+        row_norm = grad_eff.norm(dim=1, keepdim=True).clamp_min(1e-30)
+        grad_eff = grad_eff * (clip / row_norm).clamp_max(1.0)
+    grad_s = (grad_w * t_f).sum(dim=1, keepdim=True) / sqrt_fan
+    s_new = (s_i - lr_scale * grad_s).clamp_(1e-5, 10.0)
+    c_rebased = c_f * (s_i / s_new)
+    ticks = (-lr * grad_eff) * (C / s_new)
+    return c_rebased + ticks, s_new
+
+
+def _carry_resolve(cc, t_f, C: int):
+    """Post-SR carry/remainder -> new ternary + residual.
+
+    A BLOCKED flip (carry would push t past +-1) pins the residual to the counter edge
+    +-(C-1): the weight keeps its accumulated pressure at the wall, matching the fused
+    kernel and its CPU reference (fused_update.counter_update_hashsr). The historical
+    inline code clamped in place, which aliased `proposed_t`/`new_t` and made `blocked`
+    all-False -- silently RESETTING that pressure (fixed 2026-07-11; see
+    tests/test_carry_saturation.py)."""
+    carry = torch.trunc(cc / C)
+    remainder = cc - carry * C
+    proposed_t = t_f + carry
+    new_t = proposed_t.clamp(-1, 1)
+    blocked = proposed_t != new_t
+    remainder = torch.where(
+        blocked, torch.sign(cc) * (C - 1), remainder
+    ).clamp_(-(C - 1), C - 1)
+    return new_t, remainder
+
+
+# One-way fuse for the opt-in compiled path: dynamo traces on fake tensors, so a failure
+# during compilation happens before any real mutation -- falling back to eager is safe.
+# After the compiled fn has succeeded once, later errors are real and re-raised.
+# dynamic=False is measured, not a guess: on CPU the static kernels run the chain 1.46x
+# faster than eager, while dynamic=True generated code SLOWER than eager (0.61x). A model
+# has only a handful of distinct layer shapes, so per-shape recompilation (~17s each on
+# CPU) is a one-time cost.
+_COMPILE_STATE: dict = {"broken": False, "ok": False, "fns": {}}
+
+
+def _call_maybe_compiled(fn, want: bool, *args):
+    if want and not _COMPILE_STATE["broken"]:
+        cfn = _COMPILE_STATE["fns"].get(fn.__name__)
+        if cfn is None:
+            cfn = torch.compile(fn, dynamic=False)
+            _COMPILE_STATE["fns"][fn.__name__] = cfn
+        try:
+            out = cfn(*args)
+            _COMPILE_STATE["ok"] = True
+            return out
+        except Exception:
+            if _COMPILE_STATE["ok"]:
+                raise
+            _COMPILE_STATE["broken"] = True     # compiler unavailable -> permanent eager
+    return fn(*args)
+
+
 def weight_to_counter_state(
     weight: torch.Tensor, C: int = C_DEFAULT, threshold_ratio: float = 0.7
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -286,6 +362,7 @@ class CompactCounterLinear(nn.Module):
         cache_patch: str = "full",
         update_compute: str = "fp",
         forward_compute: str = "fp",
+        compile_update: bool = False,
     ) -> None:
         super().__init__()
         if 3 * (2 * C - 1) > 256:
@@ -311,6 +388,12 @@ class CompactCounterLinear(nn.Module):
         self.pulse_mode = pulse_mode
         self.update_enabled = True
         self._outstanding_forward = False
+        # Opt-in torch.compile of the deterministic update chain (fuses ~15 elementwise passes
+        # into one; SR stays eager, so the RNG stream is unchanged). Falls back to eager
+        # permanently if no compiler backend is available (e.g. no MSVC on Windows CPU).
+        # NOTE: a *working* compiled path may differ in the last float bit (fma fusion), so
+        # leave this off when bit-identity across runs/ranks matters.
+        self.compile_update = bool(compile_update)
         # Adaptive update decimation (memo M8): when on, a near-stable layer (tiny flip-rate)
         # updates only every _dec_period steps with lr scaled by the period to compensate.
         self.decimate_updates = bool(decimate_updates)
@@ -441,7 +524,9 @@ class CompactCounterLinear(nn.Module):
         """Set the next update period from the flip-rate just observed (smaller flips -> rarer)."""
         if not self.decimate_updates:
             return
-        r = self._dec_flip_rate
+        # flip-rate is accumulated on-device; this float() is the single host sync of the
+        # decimation feature, paid only on a fire step with decimate_updates=True.
+        r = float(self._dec_flip_rate)
         # Data-parallel lockstep guard. Flips are counted on the ALREADY-averaged grad_w (and, in
         # proxy mode, an averaged proxy_gsq), so the per-rank flip-rate is normally identical and
         # the period stays synced on its own -> the `if fire` collective is symmetric. This MAX
@@ -490,7 +575,7 @@ class CompactCounterLinear(nn.Module):
                 changed = view != tt
                 if changed.any():
                     view[changed] = tt[changed]
-                    self.cache_patches.add_(int(changed.sum().item()))
+                    self.cache_patches.add_(changed.sum())
             else:
                 self._t_cache[lo:hi] = t.to(self._t_cache.dtype)
 
@@ -516,21 +601,15 @@ class CompactCounterLinear(nn.Module):
         ticks = (-self._eff_lr() * update_signal) * (self.C / s_new)
         cc = stochastic_round(c_rebased + ticks)
 
-        carry = torch.trunc(cc / self.C)
-        remainder = cc - carry * self.C
-        proposed_t = t_i.float() + carry
-        new_t = proposed_t.clamp_(-1, 1)
-        blocked = proposed_t != new_t
-        remainder = torch.where(
-            blocked, torch.sign(cc) * (self.C - 1), remainder
-        ).clamp_(-(self.C - 1), self.C - 1)
+        new_t, remainder = _carry_resolve(cc, t_i.float(), self.C)
 
         self._write_rows(lo, hi, new_t, remainder)
         self.scale[lo:hi].copy_(s_new)
-        flips = int((new_t != t_i).sum().item())
-        self._dec_flips_step += flips           # accumulate across tiles -> per-layer flip-rate
+        # on-device diagnostic accumulation -- no per-tile host sync (see _finish_update).
+        flips = (new_t != t_i).sum()
+        self._dec_flips_step = self._dec_flips_step + flips
         self._dec_elems_step += new_t.numel()
-        self.update_events.add_(int((cc != c_i).sum().item()))
+        self.update_events.add_((cc != c_i).sum())
         self.weight_flips.add_(flips)
 
     @torch.no_grad()
@@ -636,6 +715,25 @@ class RMSCounterLinear(CompactCounterLinear):
 
     @torch.no_grad()
     def _update_tile(self, lo, hi, grad_w, t_i, c_i, s_i, proxy_gsq=None) -> None:
+        # Fast path (the default direct-pulse / eager-rebase / exact-or-proxy-RMS config):
+        # the deterministic chain lives in _rms_eager_pre_sr so opt-in torch.compile can fuse
+        # its ~15 elementwise passes into one; SR stays outside (RNG stream untouched).
+        if (self.pulse_mode == "direct" and self.scale_rebase == "eager"
+                and not (self.use_rms and self.rms_mode == "lagged")):
+            g_sq = None
+            if self.use_rms:
+                g_sq = proxy_gsq if (self.rms_mode == "proxy" and proxy_gsq is not None) \
+                    else grad_w.pow(2).mean(dim=1, keepdim=True)
+            pre, s_new = _call_maybe_compiled(
+                _rms_eager_pre_sr, self.compile_update,
+                grad_w, t_i.float(), c_i.float(), s_i, self.v[lo:hi], g_sq,
+                self.use_rms, self.rms_eps, self.rms_beta, self.local_grad_clip,
+                self._eff_lr(), self.lr_scale, self.C, math.sqrt(self.in_features),
+            )
+            cc = stochastic_round(pre)
+            return self._finish_update(lo, hi, cc, t_i, c_i, s_new)
+
+        # Rare configurations (lagged RMS, lazy rebase, ternary pulse): original inline chain.
         if self.use_rms:
             # proxy mode takes the row second-moment from grad_out norms (passed in) instead of
             # the full ||G_o||^2 reduction; lagged uses the previous v, else the freshly-updated v.
@@ -679,19 +777,15 @@ class RMSCounterLinear(CompactCounterLinear):
     def _finish_update(self, lo, hi, cc, t_i, c_i, s_new) -> None:
         # carry/remainder -> ternary flip + residual, then write state + scale (shared by the
         # eager and the lazy-rebase paths).
-        carry = torch.trunc(cc / self.C)
-        remainder = cc - carry * self.C
-        proposed_t = t_i.float() + carry
-        new_t = proposed_t.clamp_(-1, 1)
-        blocked = proposed_t != new_t
-        remainder = torch.where(
-            blocked, torch.sign(cc) * (self.C - 1), remainder
-        ).clamp_(-(self.C - 1), self.C - 1)
+        new_t, remainder = _call_maybe_compiled(
+            _carry_resolve, self.compile_update, cc, t_i.float(), self.C)
 
         self._write_rows(lo, hi, new_t, remainder)
         self.scale[lo:hi].copy_(s_new)
-        flips = int((new_t != t_i).sum().item())
-        self._dec_flips_step += flips           # accumulate across tiles -> per-layer flip-rate
+        # diagnostics accumulate as on-device tensors: .item() here would force a host sync
+        # per layer per step (~2x n_layers stalls on CUDA); readers int()/float() them lazily.
+        flips = (new_t != t_i).sum()
+        self._dec_flips_step = self._dec_flips_step + flips   # per-layer flip-rate accumulator
         self._dec_elems_step += new_t.numel()
-        self.update_events.add_(int((cc != c_i).sum().item()))
+        self.update_events.add_((cc != c_i).sum())
         self.weight_flips.add_(flips)

@@ -84,6 +84,32 @@ weights HF **gated**) is deferred to a second pass. Phases 1–2 were kept donor
   preinstalled torch (no pip), unpack to /tmp (clean output). donor/qwen.py now re-.to(device) after
   swap (counter buffers build on CPU) — fixes a cpu/cuda mismatch on GPU donors.
   NEXT: scale the mixed corpus (B-token, pretraining-like) for FULL ability-preserving recovery.
+- (2026-07-11) PERF pass (results/perf_audit_cpu.md): profiled the distill step — backward+counter
+  update is 75–80%; `uniform_` (SR rand) alone is 20%, more than all matmuls. Landed, bit-identical
+  (state hashes across 6 configs) + suite 163 passed / 12 skipped: sdpa default (reuse-guard-safe,
+  verified by test), cache_mode="fp16" default in qwen_to_counter, TopKLogitCache (epoch 2+ skips
+  the teacher forward; top-k-renorm KD — check the T4 curve or set TEACHER_TOPK=0), no `.item()`
+  host syncs in the update path (was 2/layer/step ≈ 336 CUDA stalls on the 0.5B), opt-in
+  compile_update (SR stays eager → RNG stream + DDP bit-identity intact; auto-fallback w/o a
+  backend). Steady CPU step 43.2s → 32.0s (1.35×); tests tests/test_perf_paths.py (7).
+  T4 TODO: counter_packed fused kernel requires local_grad_clip=0 but the stable recipe uses 1.0
+  (stability experiment or extend the kernel); measure the sync/compile wins on CUDA.
+- (2026-07-11) compile_update MEASURED on CPU (MSVC Build Tools 14.44 present on this box; reachable
+  via vcvars64): dynamic=False REQUIRED (static kernels: update chain 1.46× RNG-preserving, real
+  layer step 1.30×, ~15s one-time per shape; dynamic=True emitted 0.61× SLOWER code — fixed).
+  Full-fuse incl. SR = 2.01× but changes the RNG stream (not the default design). Refuted on CPU:
+  hash-SR RNG (0.46× vs rand_like), counter_update_hashsr one-call (0.54×). Remaining CPU levers:
+  decimate_updates (period× fewer chain runs, bias caveat), bigger B×T (update is O(params)).
+- (2026-07-11) BUGFIX carry saturation: the blocked/saturation branch of the counter transition was
+  dead code in ALL torch paths (`clamp_` in-place aliasing made `blocked` all-False) while the fused
+  Triton kernel + its CPU reference (fused_update.counter_update_hashsr) implement it live — a real
+  torch-vs-kernel divergence: a saturated weight's residual silently RESET instead of pinning to
+  +-(C-1). Fixed in `_carry_resolve` (counter.py); group_counter.py and memory_ffn.py now call the
+  same function (single source of truth). TDD witness tests/test_carry_saturation.py (3, incl.
+  exhaustive torch==kernel-reference); suite 166 passed / 12 skipped; toy distill recovery improved
+  87% -> 98.7% (KL 0.0012 -> 0.0001, same test/seed). Dynamics legitimately changed (all fixed-seed
+  state hashes moved): pre-fix run results are not bit-comparable; re-validate the stable recipe on
+  the next T4 run.
 
 ### Honest finding to respect (encoded in tests)
 Recovering a *full-precision* donor's own outputs is NOT a single-layer win: the TWN warm-start
