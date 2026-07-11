@@ -110,6 +110,15 @@ weights HF **gated**) is deferred to a second pass. Phases 1–2 were kept donor
   Fused engagement proven (25 200 tile-updates). NEXT lever: row clip INSIDE the Triton kernel —
   free from existing row stats: row_norm(grad_eff)=sqrt(g_sq·in)/denom. Control run post-bugfix:
   PPL 117k→782 in 150 steps (healthy).
+- (2026-07-11) KERNEL CLIP landed + T4-verified (results/cuda_witness_t4.md v3 section, .json v3):
+  `local_grad_clip` folds into the fused Triton kernel + hashsr reference via the RMS denominator
+  (row_norm(grad_eff)=sqrt(g_sq·in)/denom — zero extra passes); the clip==0 gate in
+  PackedRMSCounterLinear._fused_update is REMOVED. T4: parity at clip=1 (clip engaged on 88% of
+  codes) = **0 mismatches, 0 quanta drift**; recovery with fused at the STABLE recipe (clip=1,
+  lr .008): PPL 117k→727 vs torch control 782, step 4.31 vs 4.54 s (~1.05×, the Amdahl bound).
+  finetune script now auto-picks counter_packed on CUDA / counter_rms on CPU. Local suite
+  170 passed / 12 skipped (tests/test_kernel_clip.py: clip=0 and huge-clip bit-identical to
+  unclipped; folded row-norm == layer clip norm).
 - (2026-07-11) BUGFIX carry saturation: the blocked/saturation branch of the counter transition was
   dead code in ALL torch paths (`clamp_` in-place aliasing made `blocked` all-False) while the fused
   Triton kernel + its CPU reference (fused_update.counter_update_hashsr) implement it live — a real
