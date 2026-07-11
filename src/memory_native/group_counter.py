@@ -26,7 +26,7 @@ import math
 import torch
 import torch.nn as nn
 
-from .counter import decode_state, encode_state, stochastic_round
+from .counter import _carry_resolve, decode_state, encode_state, stochastic_round
 
 __all__ = ["GroupCounterLinear", "two_four_mask"]
 
@@ -145,13 +145,7 @@ class GroupCounterLinear(nn.Module):
         c_rebased = c * (s_i / s_new)
         ticks = (-self.lr * grad_eff) * (self.C / s_new)
         cc = stochastic_round(c_rebased + ticks)
-        carry = torch.trunc(cc / self.C)
-        remainder = cc - carry * self.C
-        proposed_t = t + carry
-        new_t = proposed_t.clamp_(-1, 1)
-        blocked = proposed_t != new_t
-        remainder = torch.where(blocked, torch.sign(cc) * (self.C - 1), remainder
-                                ).clamp_(-(self.C - 1), self.C - 1)
+        new_t, remainder = _carry_resolve(cc, t, self.C)   # blocked flips pin to the edge
         self.state.copy_(encode_state(new_t.to(torch.int16), remainder.to(torch.int16), self.C))
         self.scale.copy_(s_new)
         self.weight_flips += int((new_t != t).sum().item())

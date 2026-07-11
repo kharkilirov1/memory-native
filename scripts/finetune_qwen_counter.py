@@ -44,6 +44,13 @@ LOCAL_GRAD_CLIP = 1.0               # per-counter-layer row-grad clip
 GRAD_CLIP = 1.0                     # fp-param global grad-norm clip before each AdamW step
 THRESHOLD_RATIO = 0.5               # TWN keep-threshold: 0.5 gave the least-bad warm-start here
 SEED = 0
+# --- perf knobs (verified on CPU: sdpa+cache = 1.79x/step; see results/perf_audit_cpu.md) ---
+ATTN_IMPL = "sdpa"                  # sdpa calls each projection once -> counter guard holds
+TEACHER_TOPK = 128                  # cache teacher top-k logits; epoch 2+ skips the teacher
+                                    # forward entirely (0 = off, exact full-vocab KD every step)
+KIND = "counter_rms"                # "counter_packed" adds 6-bit storage + a fused Triton
+                                    # update on CUDA, BUT the fused kernel requires
+                                    # local_grad_clip=0 -- a separate T4 stability experiment.
 
 
 def _pip(*pkgs):
@@ -95,20 +102,22 @@ def main():
 
     from memory_native.donor.qwen import qwen_to_counter
     from memory_native.eval import perplexity
-    from memory_native.recovery import ResidentTeacher, distill_finetune
+    from memory_native.recovery import ResidentTeacher, TopKLogitCache, distill_finetune
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL)
 
     # teacher: the untouched fp donor, resident and frozen
     teacher = AutoModelForCausalLM.from_pretrained(
-        MODEL, torch_dtype=dtype, attn_implementation="eager"
+        MODEL, torch_dtype=dtype, attn_implementation=ATTN_IMPL
     ).to(device).eval()
 
     # student: a second copy, warm-started in place into the counter format
+    # (qwen_to_counter defaults cache_mode="fp16": forward reads the derived T-cache
+    # instead of re-decoding the packed state every call)
     student = AutoModelForCausalLM.from_pretrained(
-        MODEL, torch_dtype=dtype, attn_implementation="eager"
+        MODEL, torch_dtype=dtype, attn_implementation=ATTN_IMPL
     ).to(device)
-    report = qwen_to_counter(student, threshold_ratio=THRESHOLD_RATIO,
+    report = qwen_to_counter(student, kind=KIND, threshold_ratio=THRESHOLD_RATIO,
                              lr=COUNTER_LR, local_grad_clip=LOCAL_GRAD_CLIP)
     print(report)
 
@@ -121,7 +130,11 @@ def main():
     print(f"\nPPL fp teacher       : {ppl_fp:8.3f}")
     print(f"PPL counter warm-start: {ppl_warm:8.3f}   (degraded by {ppl_warm - ppl_fp:+.3f})")
 
+    # one cache OUTSIDE the round loop: batches repeat every ~97 steps, so rounds 2+ replay
+    # cached top-k logits instead of running the 0.5B teacher forward each step.
     teacher_src = ResidentTeacher(teacher)
+    if TEACHER_TOPK:
+        teacher_src = TopKLogitCache(teacher_src, k=TEACHER_TOPK)
     curve = [ppl_warm]
     for r in range(ROUNDS):
         distill_finetune(
@@ -134,6 +147,9 @@ def main():
         gap = (ppl - ppl_fp) / max(ppl_warm - ppl_fp, 1e-9)
         print(f"round {r+1:2d}/{ROUNDS}  PPL {ppl:8.3f}   residual gap {gap*100:5.1f}%")
 
+    if TEACHER_TOPK:
+        print(f"teacher top-{TEACHER_TOPK} cache: {teacher_src.hits} hits / "
+              f"{teacher_src.misses} misses (hits skip the teacher forward)")
     recovered = 1.0 - (curve[-1] - ppl_fp) / max(ppl_warm - ppl_fp, 1e-9)
     print(f"\nrecovery: {curve[0]:.3f} -> {curve[-1]:.3f}  (closed {recovered*100:.1f}% of the "
           f"warm-start gap to the fp baseline {ppl_fp:.3f})")

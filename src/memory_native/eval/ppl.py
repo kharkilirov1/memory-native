@@ -20,8 +20,8 @@ def perplexity(model, batches, *, device=None) -> float:
     train/eval mode on exit."""
     was_training = model.training
     model.eval()
-    total_nll = 0.0
-    total_tok = 0
+    total_nll = None                                      # on-device accumulator: one host
+    total_tok = 0                                         # sync at the end, not per batch
     try:
         for ids in batches:
             if device is not None:
@@ -30,10 +30,11 @@ def perplexity(model, batches, *, device=None) -> float:
             n_shift = ids.numel() - ids.shape[0]          # (T-1) * B tokens actually scored
             if n_shift <= 0:
                 continue
-            total_nll += float(out.loss) * n_shift
+            nll = out.loss.detach() * n_shift
+            total_nll = nll if total_nll is None else total_nll + nll
             total_tok += n_shift
     finally:
         model.train(was_training)
     if total_tok == 0:
         return float("nan")
-    return math.exp(total_nll / total_tok)
+    return math.exp(float(total_nll) / total_tok)

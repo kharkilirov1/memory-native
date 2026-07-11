@@ -34,11 +34,17 @@ def qwen_to_counter(
     checkpointing is disabled: counter layers are eager-only (one forward per backward), and
     checkpointing re-runs the forward, which would trip the reuse guard.
 
+    ``cache_mode`` defaults to "fp16" here (override via ``counter_kw``): without the derived
+    T-cache every forward re-decodes the whole state, which profiled at ~2x the student forward
+    cost. The cache is a non-persistent derived view (+2 bytes/weight resident) -- pass
+    ``cache_mode="none"`` to trade that memory back.
+
     ``extra_skip`` adds more substrings/predicate targets to leave fp (e.g. a specific layer).
     Extra ``counter_kw`` flow through to each counter layer's constructor. Returns a ``SwapReport``.
     """
     if getattr(model, "is_gradient_checkpointing", False):
         model.gradient_checkpointing_disable()
+    counter_kw.setdefault("cache_mode", "fp16")
 
     skip = ["lm_head"]
     if extra_skip is not None:
@@ -69,14 +75,17 @@ def load_qwen_donor(
     name: str = DEFAULT_QWEN,
     *,
     dtype=None,
-    attn_implementation: str = "eager",
+    attn_implementation: str = "sdpa",
     **from_pretrained_kw,
 ):
     """Load a Qwen2.5 donor (weights + tokenizer) from HuggingFace.
 
-    ``attn_implementation="eager"`` is the counter-safe default: each projection is called exactly
-    once per forward, so the eager-only counter guard holds. Real weights download on first use;
-    do the download + finetune on the GPU box (see the T4 script/notebook).
+    ``attn_implementation="sdpa"`` is the default: SDPA fuses only the attention *math* --
+    each q/k/v/o projection is still called exactly once per forward, so the eager-only counter
+    guard holds (verified: a full swap + forward + backward step raises no reuse guard, and it
+    profiled ~2.8x faster than "eager" on CPU). The thing that DOES break the guard is gradient
+    checkpointing (re-runs forwards), which ``qwen_to_counter`` disables. Real weights download
+    on first use; do the download + finetune on the GPU box (see the T4 script/notebook).
     """
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
