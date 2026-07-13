@@ -177,8 +177,9 @@ def run_session(*, student, teacher, tokenizer, mix: DomainMix, device,
         if (step + 1) % 50 == 0:
             dt = (time.perf_counter() - t_last) / 50
             t_last = time.perf_counter()
-            print(f"step {step+1:6d}/{steps}  loss {float(loss):.3f}  {dt:.2f}s/step", flush=True)
-            emit(step + 1, {"loss": float(loss), "s_per_step": dt})
+            lv = float(loss.detach())          # detach: no requires_grad->scalar warning
+            print(f"step {step+1:6d}/{steps}  loss {lv:.3f}  {dt:.2f}s/step", flush=True)
+            emit(step + 1, {"loss": lv, "s_per_step": dt})
         if (step + 1) % eval_every == 0:
             r = eval_all(student, tokenizer, val, device)
             print("  eval", {k: round(v, 1) for k, v in r.items() if k.startswith("ppl")},
