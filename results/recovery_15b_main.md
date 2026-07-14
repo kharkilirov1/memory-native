@@ -64,3 +64,44 @@ Tail experiment: resume final checkpoint, decay counter lr 0.008 -> 0.002 -> 0.0
   dominant wall at 87/46/19/65 -- the accumulator ceiling would bite closer to fp, not here.
 
 Resolution in ~2h after the epoch finishes and the tail runs.
+
+## TAIL RESULT (resolved) — LR-floor confirmed, accumulator ceiling refuted
+
+Ran run_tail from the step-36622 checkpoint, counter lr 0.008 -> 0.002 -> 0.0005, 3000 steps.
+
+| rung | steps | PPL EN | RU | code | math | behavior |
+|---|---|---|---|---|---|---|
+| 0.008 (control) | 0-1000 | 84-94 osc | 44-47 | 17-20 | 62-73 | NO trend = the plateau's noise ball reproduced |
+| 0.002 | 1000-2000 | 88.5->78.5 | 44->38 | 20->15 | 68->57 | clean monotone descent |
+| 0.0005 | 2000-3000 | 78.5->75.4 | 38->37 | 15->14.6 | 57->54 | still descending, slower |
+
+`counter_edge` (saturation) = **0.081 constant** across the whole tail.
+
+**Verdict:**
+- **LR-floor CONFIRMED** — the 0.008 control rung reproduced the plateau (oscillation, no trend);
+  0.002 broke it into a monotone descent. The plateau was the constant-LR noise ball (Prop 1).
+- **Accumulator ceiling (OPEN 1) REFUTED as the wall** — saturation held flat at 0.081, no growth;
+  recovery is LR-schedule-limited, not accumulator-limited. No ceiling in sight (0.0005 was still
+  descending at step 3000).
+- **Magnitude:** ~6-17% off the shelf in this short 3k-step ladder (EN 84->75, RU 45->37,
+  code 17->14.6, math 58->54). A proper long cosine (0.008 -> ~1e-4, tens of k steps) would push
+  further -- the user's 30-50% is plausible for a real schedule, not this crude ladder.
+
+## OWNED: telemetry bug + wrong distinctive prediction (Claude)
+
+1. **flip_rate telemetry was DEAD on the CUDA fused path.** weight_flips is never incremented by
+   the Triton kernel (documented in CLAUDE.md; missed when building run_tail), so flip_rate read
+   0.0000 at ALL rungs including 0.008 where weights obviously moved. The distinctive-prediction
+   instrument was broken. FIXED: telemetry now measures the true flip fraction by diffing decoded
+   ternary state t across the interval (validated: catches a forced 0.65 state change, 0 false
+   positives, on both counter_rms and counter_packed).
+2. **Claude's "0.0005 freezes flips (sub-quantum)" prediction is REFUTED** by the working channel:
+   PPL kept dropping at 0.0005 (78.5->75.4), so weights kept updating -- no hard freeze. The user
+   read the tail better ("decay keeps helping"); Claude was closer on the magnitude range but wrong
+   on the mechanism. Net on the differentiator: draw leaning user.
+
+## NEXT (clean experiment, now instrumented correctly)
+
+Long cosine schedule (0.008 -> ~1e-4 over ~20k steps) from the checkpoint, with the fixed flip
+telemetry, to (a) push PPL toward the teacher and (b) close the sub-quantum question with real
+flip_frac numbers at low lr.
