@@ -39,7 +39,10 @@ SEQ = int(os.environ.get("SEQ", "512"))
 BATCH = int(os.environ.get("BATCH", "8"))
 TAIL_STEPS = int(os.environ.get("TAIL_STEPS", "3000"))
 FP_LR0 = 3e-4
+SCHEDULE = os.environ.get("SCHEDULE", "rungs")          # "cosine" or "rungs"
 RUNGS = [float(x) for x in os.environ.get("LR_RUNGS", "0.008,0.002,0.0005").split(",")]
+LR_MAX = float(os.environ.get("LR_MAX", str(RUNGS[0])))  # cosine start = constant-run lr
+LR_MIN = float(os.environ.get("LR_MIN", "1e-4"))         # cosine floor
 EVAL_EVERY = int(os.environ.get("EVAL_EVERY", "200"))
 SEED = int(os.environ.get("SEED", "0"))
 
@@ -76,10 +79,14 @@ def set_counter_lr(lr):
         m.lr = float(lr)
 
 
-def rung_for(step):
-    frac = step / max(TAIL_STEPS, 1)
-    idx = min(int(frac * len(RUNGS)), len(RUNGS) - 1)
-    return RUNGS[idx]
+import math
+
+
+def lr_for(step):
+    if SCHEDULE == "cosine":                            # smooth LR_MAX -> LR_MIN over the run
+        return LR_MIN + 0.5 * (LR_MAX - LR_MIN) * (1 + math.cos(math.pi * step / max(TAIL_STEPS, 1)))
+    frac = step / max(TAIL_STEPS, 1)                    # stepped rungs
+    return RUNGS[min(int(frac * len(RUNGS)), len(RUNGS) - 1)]
 
 
 # weight_flips is DEAD on the CUDA fused path: the Triton kernel mutates packed state directly
@@ -138,16 +145,14 @@ print("[tail start]", {k: round(v, 1) for k, v in base.items() if k.startswith("
 emit(0, {"phase": "tail_start", **base, **tel0})
 
 prev_scale = tel0["scale_mean"]
-cur_lr = None
+print(f"[schedule] {SCHEDULE} lr {LR_MAX} -> {LR_MIN if SCHEDULE=='cosine' else RUNGS[-1]} "
+      f"over {TAIL_STEPS} steps", flush=True)
 t_last = time.perf_counter()
 for step in range(TAIL_STEPS):
-    lr = rung_for(step)
-    if lr != cur_lr:
-        set_counter_lr(lr)
-        for g in opt.param_groups:
-            g["lr"] = FP_LR0 * (lr / RUNGS[0])
-        cur_lr = lr
-        print(f"[rung] step {step}: counter_lr={lr} fp_lr={FP_LR0*(lr/RUNGS[0]):.2e}", flush=True)
+    lr = lr_for(step)                                   # set every step (cheap; cosine changes each step)
+    set_counter_lr(lr)
+    for g in opt.param_groups:
+        g["lr"] = FP_LR0 * (lr / LR_MAX)
 
     ids = mix.batch_at(step, dev)
     with torch.no_grad():
