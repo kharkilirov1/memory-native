@@ -82,6 +82,22 @@ def rung_for(step):
     return RUNGS[idx]
 
 
+# weight_flips is DEAD on the CUDA fused path: the Triton kernel mutates packed state directly
+# and never increments the buffer (CLAUDE.md: "kernel doesn't report flip-rate; torch path
+# does"). So measure flips the only reliable way -- diff the decoded ternary state t of a
+# sampled set of layers across the interval. Sampled (not all 196) to keep the decode cheap.
+_FLIP_SAMPLE = counter_layers[::max(len(counter_layers) // 12, 1)]
+
+
+@torch.no_grad()
+def _decode_t(m):
+    t, _ = m._decode_rows(0, m.out_features)   # int ternary {-1,0,1} [out,in]
+    return t.clone()
+
+
+_prev_t = {id(m): _decode_t(m) for m in _FLIP_SAMPLE}
+
+
 @torch.no_grad()
 def telemetry():
     edge = zero = cabs = smean = 0.0
@@ -92,9 +108,16 @@ def telemetry():
         cabs += s.get("counter_abs_mean", 0.0)
         smean += s.get("scale_mean", 0.0)
     n = len(counter_layers)
-    flips = sum(int(m.weight_flips) for m in counter_layers)
+    # true flip fraction over the interval: sign-of-t changes on the sampled layers
+    changed = total = 0
+    for m in _FLIP_SAMPLE:
+        t = _decode_t(m)
+        changed += int((t != _prev_t[id(m)]).sum())
+        total += t.numel()
+        _prev_t[id(m)] = t
     return {"counter_edge": edge / n, "zero_frac": zero / n,
-            "counter_abs_mean": cabs / n, "scale_mean": smean / n, "cum_flips": flips}
+            "counter_abs_mean": cabs / n, "scale_mean": smean / n,
+            "flip_frac_interval": changed / max(total, 1)}
 
 
 mix = DomainMix(DATA_DIR, seq=SEQ, batch=BATCH, seed=SEED + 777)  # fresh stream offset
@@ -114,7 +137,6 @@ print("[tail start]", {k: round(v, 1) for k, v in base.items() if k.startswith("
       "edge", round(tel0["counter_edge"], 3), flush=True)
 emit(0, {"phase": "tail_start", **base, **tel0})
 
-prev_flips = tel0["cum_flips"]
 prev_scale = tel0["scale_mean"]
 cur_lr = None
 t_last = time.perf_counter()
@@ -140,10 +162,9 @@ for step in range(TAIL_STEPS):
     if (step + 1) % EVAL_EVERY == 0:
         r = eval_all(student, tokenizer, val, dev)
         tel = telemetry()
-        interval = (step + 1)  # steps since start for flip-rate normalization
-        flip_rate = (tel["cum_flips"] - prev_flips) / max(total_coeffs, 1)
+        flip_rate = tel["flip_frac_interval"]   # true t-diff over the interval (fused-safe)
         d_scale = abs(tel["scale_mean"] - prev_scale)
-        prev_flips, prev_scale = tel["cum_flips"], tel["scale_mean"]
+        prev_scale = tel["scale_mean"]
         dt = (time.perf_counter() - t_last) / EVAL_EVERY
         t_last = time.perf_counter()
         print(f"tail {step+1:5d}/{TAIL_STEPS} lr={lr:<6} "
