@@ -105,3 +105,39 @@ Ran run_tail from the step-36622 checkpoint, counter lr 0.008 -> 0.002 -> 0.0005
 Long cosine schedule (0.008 -> ~1e-4 over ~20k steps) from the checkpoint, with the fixed flip
 telemetry, to (a) push PPL toward the teacher and (b) close the sub-quantum question with real
 flip_frac numbers at low lr.
+
+## COSINE TAIL (20k steps, 0.008 -> 1e-4) — clean resolution with fixed flip telemetry
+
+Resumed the plateau checkpoint (EN 84.3), single cosine decay over 20000 steps.
+
+| lr | step | EN | RU | code | math | flip_rate | edge |
+|---|---|---:|---:|---:|---:|---:|---:|
+| ~.008 | 1000 | 88.8 | 44.5 | 19.7 | 68.1 | 0.192 | 0.080 |
+| ~.005 | 8000 | 81.2 | 40.2 | 16.1 | 58.8 | 0.147 | 0.081 |
+| ~.002 | 13000| 75.9 | 37.8 | 13.9 | 53.7 | 0.077 | 0.082 |
+| 1e-4  | 20000| **71.9** | **35.3** | **12.8** | **48.8** | 0.004 | 0.082 |
+
+**Best recovered model: EN 71.9 / RU 35.3 / code 12.8 / math 48.8** (fp teacher 11.6/9.2/3.0/6.7)
+-> the 1.5B in 6-bit counter format recovered to ~4-7x the fp baseline, all domains alive.
+
+**Three regimes cleanly separated:**
+- LR noise ball: confirmed (PPL descends as lr decays).
+- Sub-quantum freeze: **confirmed + measured** -- flip_rate tracks lr DOWN 0.192 -> 0.004 (50x)
+  as lr 0.008 -> 1e-4. Finite-state flips progressively freeze; LR decay has diminishing returns
+  bounded by the quantum.
+- Accumulator ceiling (OPEN 1): **refuted** -- counter_edge flat at 0.081-0.082 across all 20k.
+
+**Forecast scoring (owned):**
+- Claude predicted EN 58-65 / RU 28-33 / code 11-13 / math 42-48 (~30-40% off plateau). Actual:
+  72/35/12.8/49 (~19%). Only code hit; EN/RU/math all worse than predicted -> OVERSHOT. This is
+  Claude's SECOND consecutive optimism overshoot on LR-decay magnitude (stepped tail: predicted
+  15-30%, got 12%). Stable bias: the counter-format floor is HIGHER than Claude keeps predicting.
+- Sub-quantum: the fixed telemetry VINDICATES Claude's ORIGINAL (stepped-tail) prediction that
+  low lr freezes flips -- which Claude wrongly RETRACTED after the dead telemetry read 0. flip_rate
+  0.192->0.004 proves the freeze is real and gradual. The retraction was the error.
+
+**Real next lever: MORE DATA, not more schedule.** At step 20000 PPL had nearly flattened
+(72.4->71.9) and flips were frozen (lr at floor) -- more schedule steps won't help. The floor
+here (~EN 72 / code 13) is set by the 150M-token data budget + the counter format, not by LR.
+The pilot named the data wall; the main run named the schedule wall; the cosine tail removed the
+schedule wall and returned to the data wall. To push lower: a B-token pretraining-scale corpus.
