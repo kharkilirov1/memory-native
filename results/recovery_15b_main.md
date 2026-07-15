@@ -172,3 +172,29 @@ from 17k instead of 575k -- PTQ + recovery is the combined recipe going forward.
 Next measurement: short recovery (e.g. 2000 steps) from the GPTQ start vs the recorded naive
 curve (naive reached EN 109 @ step 2000) -- does the calibrated start reach a lower floor or
 the same floor faster?
+
+## GROUP-128 GRANULARITY PROBE (Bonsai layout, dense inference quantization, no counter format)
+
+| variant | EN | RU | code | math |
+|---|---:|---:|---:|---:|
+| fp | 11.6 | 9.2 | 3.0 | 6.7 |
+| naive TWN (per-row) | 575,347 | 20,672,417 | 454,477 | 369,272 |
+| optimal ternary (per-row) | 187,431 | 2,211,696 | 164,113 | 178,622 |
+| GPTQ (per-row, act-order) | 17,553 | 11,971 | 35,064 | 22,812 |
+| **GPTQ group-128 (Bonsai granularity)** | **5,639** | **20,217** | **11,317** | **4,936** |
+
+- Granularity buys another 3.1-4.6x on EN/code/math over per-row GPTQ (whole chain
+  naive->group128 = ~100x on EN), BUT RU got WORSE (12k->20k) -- our group variant runs
+  without act-order (groups pinned to input layout), a plausible cause; open question.
+- **GATE VERDICT: NOT PASSED.** Even at Bonsai's scale granularity, a 1.5B stays at
+  thousands of PPL without retraining -- nowhere near usable, nowhere near "90% retention".
+  The Bonsai gap is NOT explained by granularity alone at this model size; what remains is
+  27B-scale redundancy and/or their undisclosed solver. Per the pre-registered decision rule
+  ("if the probe shows the expected quality, THEN think about training that format"):
+  a group-scale training format is NOT justified by this evidence. Recovery training remains
+  the essential ingredient at 1.5B; PTQ (best: group128/gptq) is a warm-start booster only.
+- Forecast scoring (owned): predicted EN 30-120; actual 5,639 -- FOURTH consecutive optimism
+  overshoot (x47 this time). The systematic bias is now unmistakable: Claude's absolute-PPL
+  forecasts for PTQ-only quality run 3-50x optimistic. Future PTQ forecasts should be
+  multiplied by ~10x pessimism, or better: predict only ORDERINGS and ratios (those were
+  correct all four times), not absolutes.
