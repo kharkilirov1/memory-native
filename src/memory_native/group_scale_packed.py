@@ -62,15 +62,18 @@ class PackedGroupScaleCounterLinear(nn.Module):
     contiguous 6-bit range and makes state updates race-free. ``perm[p]`` maps a packed position to
     its original input column; forward gathers x through perm and grad_x scatters back through it.
 
-    On CUDA+Triton the training path never materializes a dense weight or dense weight-gradient.
-    CPU/no-Triton transparently falls back to a dense reference for correctness.
+    Default ("auto"/"gemm") training path: decode the dense weight per matmul (temporary, freed
+    immediately) and use cuBLAS; the update's correlation is a cuBLAS GEMM feeding the bit-exact
+    reference chain (semi-strict: one temporary [out,in] grad, no persistent pools).
+    kernel_mode="triton" selects decode-in-GEMM matmuls and (with strict_update) the 3-launch
+    O(out*groups)-scratch update -- the low-memory path, ~10-20x slower at Qwen shapes (T4 gate).
 
     Salient channel (A4.1): an optional sparse set of EXACT fp16 overrides
     (``salient_idx`` flat original-order, ``salient_val``) for the top-|w|*sqrt(diag H)
     weights the ternary grid cannot represent (BiLLM-style split, made BEFORE the GPTQ
     sweep by the solver). Base (t, c) is zero at salient entries and kept zero by the
     update path, so the override is additive everywhere: Triton kernels add it as a sparse
-    correction, the dense reference scatters it into ``visible_weight``. Salient entries
+    correction, the dense paths scatter it into ``visible_weight``. Salient entries
     are frozen (no counter movement); training them is a separate future lever.
     """
 
@@ -101,8 +104,8 @@ class PackedGroupScaleCounterLinear(nn.Module):
             raise ValueError("group must be positive and divisible by 4")
         if 3 * (2 * C - 1) > 256:
             raise ValueError("C is too large for uint8 state encoding")
-        if kernel_mode not in {"auto", "triton", "torch"}:
-            raise ValueError("kernel_mode must be 'auto', 'triton' or 'torch'")
+        if kernel_mode not in {"auto", "gemm", "triton", "torch"}:
+            raise ValueError("kernel_mode must be 'auto', 'gemm', 'triton' or 'torch'")
         self.in_features = int(in_features)
         self.out_features = int(out_features)
         self.group = int(group)
@@ -287,12 +290,19 @@ class PackedGroupScaleCounterLinear(nn.Module):
         return A
 
     def _use_triton(self, tensor: torch.Tensor) -> bool:
-        if self.kernel_mode == "torch":
+        # Mode matrix (optimization plan L1/L2, T4-measured: decode-in-GEMM is 10-20x slower
+        # than decode-once + cuBLAS at these shapes, while the strict no-grad_w update only
+        # bounds a TEMPORARY 52 MiB per layer -- not a pool):
+        #   "gemm"/"auto"/"torch" -> dense decode + cuBLAS matmuls; update goes through the
+        #       reference path, whose correlation is already a cuBLAS GEMM (semi-strict).
+        #   "triton" -> decode-in-GEMM matmuls + (with strict_update) the 3-launch bounded-
+        #       scratch update. The low-memory path for cards where 52 MiB matters.
+        if self.kernel_mode != "triton":
             return False
         available = HAS_TRITON and tensor.is_cuda and tensor.dtype in {
             torch.float32, torch.float16, torch.bfloat16
         }
-        if self.kernel_mode == "triton" and not available:
+        if not available:
             raise RuntimeError("kernel_mode='triton' requires CUDA + Triton and a floating input")
         return available
 

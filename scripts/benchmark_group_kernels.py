@@ -12,7 +12,7 @@ import torch
 from memory_native.counter import decode_state
 from memory_native.group_scale_kernels import HAS_TRITON
 from memory_native.group_scale_packed import PackedGroupScaleCounterLinear
-from memory_native.packed import unpack_codes
+from memory_native.packed import pack_codes, unpack_codes
 
 
 def sync_ms(fn, warmup=5, iters=20):
@@ -72,6 +72,50 @@ def main():
     forward_ms = sync_ms(lambda: layer(x), iters=args.iters)
     gradx_ms = sync_ms(lambda: layer._grad_x_2d(go), iters=args.iters)
 
+    # Stage-0 references (optimization plan L0): what the same math costs via decode + cuBLAS.
+    decode_ms = sync_ms(lambda: layer.visible_weight(dtype=dtype), iters=args.iters)
+    cublas_fwd_ms = sync_ms(lambda: x @ dense_w.t(), iters=args.iters)
+    cublas_gx_ms = sync_ms(lambda: go @ dense_w, iters=args.iters)
+
+    # Update-path timings: strict 3-launch from-IO kernel vs cuBLAS grad_w + GPU reference chain.
+    from memory_native.group_scale_kernels import (
+        group_counter_update_from_io_hashsr, triton_group_counter_update_from_io,
+    )
+    state0, scale0, v0 = layer.state.clone(), layer.scale.clone(), layer.v.clone()
+    upd_kw = dict(group=group, C=layer.C, lr=layer.lr, lr_scale=layer.lr_scale,
+                  rms_beta=layer.rms_beta, rms_eps=layer.rms_eps, seed=0,
+                  residual_alpha=layer.residual_alpha, clip=layer.local_grad_clip)
+
+    def strict_update():
+        triton_group_counter_update_from_io(
+            layer.state, layer.scale, layer.v, x, go, layer.perm, **upd_kw)
+
+    def semi_update():                       # cuBLAS correlation + bit-exact reference on GPU
+        codes = unpack_codes(layer.state, k)
+        new_codes = group_counter_update_from_io_hashsr(
+            codes, layer.scale, layer.v, x, go, layer.perm, **upd_kw)
+        layer.state.copy_(pack_codes(new_codes))
+
+    strict_upd_ms = sync_ms(strict_update, iters=args.iters)
+    layer.state.copy_(state0); layer.scale.copy_(scale0); layer.v.copy_(v0)
+    torch.cuda.reset_peak_memory_stats()
+    semi_upd_ms = sync_ms(semi_update, iters=args.iters)
+    semi_peak = torch.cuda.max_memory_allocated()
+    layer.state.copy_(state0); layer.scale.copy_(scale0); layer.v.copy_(v0)
+
+    # Stage-1 witness: the "gemm" layer mode end-to-end (decode + cuBLAS each call).
+    gemm_layer = PackedGroupScaleCounterLinear(
+        k, n, group=group, C=11, perm=perm, residual_alpha=0.35,
+        kernel_mode="gemm", local_grad_clip=1.0,
+    ).to(device)
+    gemm_layer.load_group_state(scales, t, c, perm)
+    gemm_layer.eval()
+    with torch.no_grad():
+        gemm_y_err = (gemm_layer(x).float() - ref_y.float()).abs().max().item()
+        gemm_gx_err = (gemm_layer._grad_x_2d(go).float() - ref_gx.float()).abs().max().item()
+        gemm_fwd_ms = sync_ms(lambda: gemm_layer(x), iters=args.iters)
+        gemm_gx_ms = sync_ms(lambda: gemm_layer._grad_x_2d(go), iters=args.iters)
+
     # One strict update correctness/peak-memory witness. No dense grad_w is built on this path.
     state_before = layer.state.clone()
     torch.cuda.reset_peak_memory_stats()
@@ -90,6 +134,17 @@ def main():
     print(f"shape M={m} N={n} K={k} group={group} dtype={args.dtype}")
     print(f"forward max_abs={y_err:.6g}  {forward_ms:.3f} ms")
     print(f"grad_x max_abs={gx_err:.6g}  {gradx_ms:.3f} ms")
+    print(f"[L0] decode(visible_weight)={decode_ms:.3f} ms  cublas_fwd={cublas_fwd_ms:.3f} ms  "
+          f"cublas_grad_x={cublas_gx_ms:.3f} ms")
+    print(f"[L0] torch-path fwd(decode+cublas)={decode_ms + cublas_fwd_ms:.3f} ms  "
+          f"triton/cublas fwd ratio={forward_ms / max(cublas_fwd_ms, 1e-9):.1f}x")
+    print(f"[L0] update strict(3-launch from-IO)={strict_upd_ms:.3f} ms  "
+          f"semi(cublas grad_w + reference)={semi_upd_ms:.3f} ms  "
+          f"semi peak={semi_peak / 2**20:.1f} MiB")
+    print(f"[L1] gemm-mode fwd={gemm_fwd_ms:.3f} ms (max_abs={gemm_y_err:.6g})  "
+          f"grad_x={gemm_gx_ms:.3f} ms (max_abs={gemm_gx_err:.6g})  "
+          f"speedup vs triton: fwd={forward_ms / max(gemm_fwd_ms, 1e-9):.1f}x "
+          f"grad_x={gradx_ms / max(gemm_gx_ms, 1e-9):.1f}x")
     print(f"strict update changed_state={changed} finite={torch.isfinite(layer.scale).all().item()}")
     print(f"strict scratch={scratch / 2**20:.3f} MiB vs dense grad_w={dense_grad_bytes / 2**20:.3f} MiB")
     print(f"measured peak allocated={peak / 2**20:.3f} MiB")
