@@ -657,6 +657,21 @@ class CompactCounterLinear(nn.Module):
         self._write_rows(0, self.out_features, t, c)
         self.scale.copy_(s.to(self.scale.dtype))
 
+    def load_counter_state(self, scale: torch.Tensor, t: torch.Tensor,
+                           c: torch.Tensor) -> None:
+        """Overwrite this layer's state directly from a precomputed (scale, ternary, counter)
+        triple — the entry point for *calibrated* warm-starts (donor/ptq.py: exact per-row
+        optimal ternary, Hessian/GPTQ reconstruction), where the naive TWN of
+        ``weight_to_counter_state`` is not the best available quantizer."""
+        if tuple(t.shape) != (self.out_features, self.in_features):
+            raise ValueError(
+                f"t shape {tuple(t.shape)} != layer ({self.out_features}, {self.in_features})")
+        dev = self.scale.device
+        self._write_rows(0, self.out_features,
+                         t.to(device=dev, dtype=torch.int16),
+                         c.to(device=dev, dtype=torch.int16))
+        self.scale.copy_(scale.reshape(self.out_features, 1).to(dev, self.scale.dtype))
+
     @classmethod
     def from_dense(cls, weight: torch.Tensor, *, C: int = C_DEFAULT,
                    threshold_ratio: float = 0.7, **counter_kw) -> "CompactCounterLinear":
@@ -710,6 +725,13 @@ class RMSCounterLinear(CompactCounterLinear):
         """Warm-start from a dense weight, then reset the RMS second moment and recalibrate s_base
         to the imported scale so the counter dynamics start clean from the pretrained init."""
         super().load_dense_weight(weight, threshold_ratio=threshold_ratio)
+        self.v.zero_()
+        self.s_base.copy_(self.scale)
+
+    def load_counter_state(self, scale: torch.Tensor, t: torch.Tensor,
+                           c: torch.Tensor) -> None:
+        """Direct (scale, t, c) import + the same optimizer-state reset as load_dense_weight."""
+        super().load_counter_state(scale, t, c)
         self.v.zero_()
         self.s_base.copy_(self.scale)
 
