@@ -7,6 +7,7 @@ import torch.nn as nn
 from ..convert import CounterLinearWithBias, SwapReport
 from ..counter import C_DEFAULT
 from ..group_scale_counter import GroupScaleCounterLinear
+from ..group_scale_packed import PackedGroupScaleCounterLinear
 
 __all__ = [
     "optimal_ternary", "gptq_ternary", "gptq_group_ternary", "residual_counter",
@@ -139,12 +140,7 @@ def _group_sweep(W0: torch.Tensor, Hinv: torch.Tensor, S: torch.Tensor, group: i
 
 def _refit_scales(W: torch.Tensor, T: torch.Tensor, H: torch.Tensor, group: int,
                   mode: str, previous: torch.Tensor) -> torch.Tensor:
-    """Refit scales after the achieved ternary support is known.
-
-    ``hdiag`` is the stable default: exact minimizer under diag(H), so calibration salience
-    participates without an O(groups^2) state. ``hessian_cd`` performs exact-H coordinate
-    updates and is intended for research/small group counts because it is much more expensive.
-    """
+    """Refit scales after the achieved ternary support is known."""
     _, cols = W.shape
     n_groups = previous.shape[1]
     S = previous.clone()
@@ -204,17 +200,7 @@ def gptq_group_ternary(
     scale_refit: str = "hdiag",
     return_perm: bool = False,
 ):
-    """Group-scale GPTQ v3 with true post-sweep s<->t alternation.
-
-    v2 estimated a scale before the sequential GPTQ sweep and never refit against the support
-    actually produced by error feedback. v3 alternates: fixed-S GPTQ sweep -> Hessian-weighted
-    scale refit on achieved T -> fresh GPTQ sweep. Candidate iterations are accepted only when
-    the calibration Hessian objective does not increase.
-
-    Returns ``(Q, S, T)`` for compatibility, or ``(Q, S, T, perm, W_adjusted)`` with
-    ``return_perm=True``. Q/T are restored to original input order; S indexes groups in
-    permuted act-order.
-    """
+    """Group-scale GPTQ v3 with true post-sweep s<->t alternation."""
     W = w.detach().to(torch.float32).clone()
     Hwork = H.detach().to(torch.float32).clone()
     cols = W.shape[1]
@@ -347,9 +333,10 @@ def ptq_warm_start(
 ) -> SwapReport:
     """Swap body linears to a calibrated counter format.
 
-    ``mode='gptq_group'`` is solver-v3's end-to-end bridge: it preserves group scales and
-    act-order metadata in a trainable ``GroupScaleCounterLinear`` instead of collapsing the
-    strong group PTQ solution back to a single row scale.
+    For ``mode='gptq_group'``, packed kinds preserve `(S,t,c,perm)` in
+    ``PackedGroupScaleCounterLinear``. On CUDA+Triton this gives group-aware decode-in-GEMM,
+    group-aware grad_x, and strict update-from-IO with no dense W/grad_w. Non-packed kinds keep the
+    pure-PyTorch ``GroupScaleCounterLinear`` reference.
     """
     skip = ["lm_head"] + (list(extra_skip) if extra_skip is not None else [])
     targets = _target_paths(model, skip)
@@ -391,15 +378,37 @@ def ptq_warm_start(
 
     if is_group:
         report = SwapReport()
-        supported = {"lr", "lr_scale", "rms_beta", "rms_eps", "local_grad_clip", "residual_alpha"}
-        group_kw = {k: v for k, v in counter_kw.items() if k in supported}
+        packed_kinds = {
+            "counter_packed", "counter_triton", "group_packed", "group_scale_packed",
+        }
+        want_packed = kind in packed_kinds
+        reference_supported = {
+            "lr", "lr_scale", "rms_beta", "rms_eps", "local_grad_clip", "residual_alpha",
+        }
+        packed_supported = reference_supported | {"kernel_mode", "strict_update"}
+        warned_fallback = False
         for path in targets:
             parent, name = _parent_and_name(model, path)
             lin = getattr(parent, name)
             S, t, c, perm = states[path]
-            counter = GroupScaleCounterLinear(
-                lin.in_features, lin.out_features, group=group, C=C, perm=perm, **group_kw
-            )
+            packed_ok = want_packed and lin.in_features % 4 == 0 and group % 4 == 0
+            if packed_ok:
+                kw = {k: v for k, v in counter_kw.items() if k in packed_supported}
+                counter: nn.Module = PackedGroupScaleCounterLinear(
+                    lin.in_features, lin.out_features, group=group, C=C, perm=perm, **kw
+                )
+            else:
+                if want_packed and progress and not warned_fallback:
+                    print(
+                        "[ptq:gptq_group] packed kernel requires in_features%4==0 and group%4==0; "
+                        "falling back to the torch group layer for unsupported shapes",
+                        flush=True,
+                    )
+                    warned_fallback = True
+                kw = {k: v for k, v in counter_kw.items() if k in reference_supported}
+                counter = GroupScaleCounterLinear(
+                    lin.in_features, lin.out_features, group=group, C=C, perm=perm, **kw
+                )
             counter.load_group_state(S, t, c, perm)
             replacement: nn.Module = counter
             if lin.bias is not None and keep_bias:
