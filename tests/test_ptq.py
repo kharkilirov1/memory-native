@@ -69,6 +69,35 @@ def test_gptq_beats_optimal_on_activation_error():
     assert set(t_g.unique().tolist()) <= {-1, 0, 1}
 
 
+def test_group_ternary_beats_rowwise_gptq_on_activation_error():
+    torch.manual_seed(4)
+    n, in_f, out_f = 1024, 256, 32
+    X = torch.randn(n, in_f) @ torch.randn(in_f, in_f) * 0.1
+    H = X.t() @ X
+    w = torch.randn(out_f, in_f) * 0.05
+
+    from memory_native.donor.ptq import gptq_group_ternary
+    s_r, t_r, _ = gptq_ternary(w, H)                       # per-row scale
+    w_row = s_r * t_r.float()
+    w_grp, S, t_g = gptq_group_ternary(w, H, group=64)     # per-(row,group-64) scale
+
+    def act_err(w_hat):
+        return float(((X @ (w - w_hat).t()) ** 2).sum())
+
+    e_row, e_grp = act_err(w_row), act_err(w_grp)
+    # On outlier-free gaussian synthetic weights the granularity win is small (measured ~2-7%);
+    # the big group-scale gains appear on real LLM weights with outliers (the 1.5B witness).
+    # Here we only pin the ORDERING: finer scales must not lose, even to act-ordered row-wise.
+    assert e_grp < e_row, (e_grp, e_row)
+    assert S.shape == (out_f, in_f // 64)
+    assert set(t_g.unique().tolist()) <= {-1, 0, 1}
+    # reconstruction consistency: w_hat == s_g * t group-wise
+    rec = torch.zeros_like(w_grp)
+    for g in range(in_f // 64):
+        rec[:, g*64:(g+1)*64] = S[:, g:g+1] * t_g[:, g*64:(g+1)*64].float()
+    assert torch.allclose(rec, w_grp, atol=1e-5)
+
+
 def test_load_counter_state_roundtrip():
     for cls in (RMSCounterLinear, PackedRMSCounterLinear):
         torch.manual_seed(3)

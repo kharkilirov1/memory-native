@@ -16,7 +16,7 @@ import time
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from memory_native.donor.ptq import ptq_warm_start
+from memory_native.donor.ptq import ptq_warm_start, quantize_dense_group_ternary
 from memory_native.donor.qwen import qwen_to_counter
 from memory_native.eval import perplexity
 from recovery_session import DomainMix
@@ -40,14 +40,19 @@ mix = DomainMix(DATA_DIR, seq=SEQ, batch=BATCH, seed=123)
 val = mix.val_batches(dev)
 calib = [mix.batch_at(i, dev) for i in range(CALIB_BATCHES)]
 
+json_path = os.path.join(CKPT_DIR, "ptq_witness.json")
 results = {}
-fp = AutoModelForCausalLM.from_pretrained(
-    MODEL, torch_dtype=dtype, attn_implementation="sdpa").to(dev).eval()
-results["fp"] = {f"ppl_{n}": perplexity(fp, b) for n, b in val.items()}
+if os.path.exists(json_path):                       # merge with earlier variants
+    results.update(json.load(open(json_path)))
+
+if "fp" not in results:
+    fp = AutoModelForCausalLM.from_pretrained(
+        MODEL, torch_dtype=dtype, attn_implementation="sdpa").to(dev).eval()
+    results["fp"] = {f"ppl_{n}": perplexity(fp, b) for n, b in val.items()}
+    del fp
+    gc.collect()
+    torch.cuda.empty_cache() if dev == "cuda" else None
 print("fp teacher:", {k: round(v, 1) for k, v in results["fp"].items()}, flush=True)
-del fp
-gc.collect()
-torch.cuda.empty_cache() if dev == "cuda" else None
 
 for mode in MODES:
     t0 = time.perf_counter()
@@ -56,6 +61,8 @@ for mode in MODES:
     if mode == "naive":
         qwen_to_counter(student, kind=KIND, threshold_ratio=0.5,
                         lr=0.008, local_grad_clip=1.0, cache_mode="int8")
+    elif mode == "group128":
+        quantize_dense_group_ternary(student, calib, group=128)   # dense probe, no counter
     else:
         ptq_warm_start(student, calib if mode == "gptq" else [], mode=mode, kind=KIND,
                        lr=0.008, local_grad_clip=1.0, cache_mode="int8")
@@ -69,7 +76,7 @@ for mode in MODES:
     torch.cuda.empty_cache() if dev == "cuda" else None
 
 os.makedirs(CKPT_DIR, exist_ok=True)
-with open(os.path.join(CKPT_DIR, "ptq_witness.json"), "w") as f:
+with open(json_path, "w") as f:
     json.dump(results, f, indent=1)
 
 print("\n=== warm-start PPL (NO recovery training) ===", flush=True)
