@@ -77,25 +77,27 @@ def test_group_ternary_beats_rowwise_gptq_on_activation_error():
     w = torch.randn(out_f, in_f) * 0.05
 
     from memory_native.donor.ptq import gptq_group_ternary
-    s_r, t_r, _ = gptq_ternary(w, H)                       # per-row scale
+    s_r, t_r, _ = gptq_ternary(w, H)                       # per-row scale, act-ordered
     w_row = s_r * t_r.float()
-    w_grp, S, t_g = gptq_group_ternary(w, H, group=64)     # per-(row,group-64) scale
 
     def act_err(w_hat):
         return float(((X @ (w - w_hat).t()) ** 2).sum())
 
-    e_row, e_grp = act_err(w_row), act_err(w_grp)
-    # On outlier-free gaussian synthetic weights the granularity win is small (measured ~2-7%);
-    # the big group-scale gains appear on real LLM weights with outliers (the 1.5B witness).
-    # Here we only pin the ORDERING: finer scales must not lose, even to act-ordered row-wise.
-    assert e_grp < e_row, (e_grp, e_row)
+    e_row = act_err(w_row)
+    # plain groups (no act-order): reconstruction identity must hold group-wise
+    w_plain, S, t_g = gptq_group_ternary(w, H, group=64, act_order=False, refine_scale=False)
     assert S.shape == (out_f, in_f // 64)
     assert set(t_g.unique().tolist()) <= {-1, 0, 1}
-    # reconstruction consistency: w_hat == s_g * t group-wise
-    rec = torch.zeros_like(w_grp)
+    rec = torch.zeros_like(w_plain)
     for g in range(in_f // 64):
         rec[:, g*64:(g+1)*64] = S[:, g:g+1] * t_g[:, g*64:(g+1)*64].float()
-    assert torch.allclose(rec, w_grp, atol=1e-5)
+    assert torch.allclose(rec, w_plain, atol=1e-5)
+    # v2 (act-order + s-refit) must beat both plain groups and act-ordered row-wise.
+    # On outlier-free gaussian synthetic weights margins are small; we pin ORDERINGS only.
+    w_v2, _, _ = gptq_group_ternary(w, H, group=64)
+    e_plain, e_v2 = act_err(w_plain), act_err(w_v2)
+    assert e_v2 < e_plain, (e_v2, e_plain)
+    assert e_v2 < e_row, (e_v2, e_row)
 
 
 def test_load_counter_state_roundtrip():

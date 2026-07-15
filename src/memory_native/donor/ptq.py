@@ -130,35 +130,56 @@ def _prep_hinv(H: torch.Tensor, W: torch.Tensor, percdamp: float):
 
 @torch.no_grad()
 def gptq_group_ternary(w: torch.Tensor, H: torch.Tensor, *, group: int = 128,
-                       percdamp: float = 0.01,
+                       percdamp: float = 0.01, act_order: bool = True,
+                       refine_scale: bool = True,
                        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Bonsai-granularity probe: GPTQ ternary with a scale PER (row, group-of-`group`-inputs)
-    instead of per row -- ~in/group times finer, i.e. the ~1.71 bpw ternary layout
-    (log2(3) + 16/group). Group scales are recomputed from the error-ADJUSTED weights on
-    entry to each group (AutoGPTQ-style dynamic groups); no act-order (groups stay aligned
-    to the input layout). This is an INFERENCE-quantization experiment -- it returns the
-    reconstructed dense weight, not a counter-format state.
+    """Bonsai-granularity solver: GPTQ ternary with a scale PER (row, group-of-`group`-inputs)
+    -- the ~1.71 bpw ternary g128 layout (log2(3) + 16/group).
 
-    Returns (w_hat [out,in] fp32, s [out, ceil(in/group)] fp32, t [out,in] int16)."""
+    v2 upgrades (mn-solver design A1/A2):
+      * act_order: columns are processed in descending diag(H) order, groups are formed in
+        the PERMUTED order (AutoGPTQ g_idx style). Storage stays layout-aligned because we
+        return the reconstructed dense weight; a packed deployment would ship g_idx.
+      * refine_scale: after each group's sweep, refit the row scale by least squares against
+        the achieved ternary support (s = <w,t>/<t,t>) and re-round once (ARB-style s<->t
+        alternation, one iteration).
+
+    INFERENCE-quantization probe: returns (w_hat [out,in] fp32, s [out,n_groups] fp32,
+    t [out,in] int16 in PERMUTED group order aligned with w_hat's reconstruction)."""
     W = w.detach().to(torch.float32).clone()
     out, cols = W.shape
-    Hinv = _prep_hinv(H, W, percdamp)
+    Hfp = H.detach().to(torch.float32)
+    if act_order:
+        perm = torch.argsort(torch.diagonal(Hfp), descending=True)
+        W = W[:, perm]
+        Hfp = Hfp[perm][:, perm]
+        invperm = torch.argsort(perm)
+    Hinv = _prep_hinv(Hfp, W, percdamp)
 
     n_groups = (cols + group - 1) // group
     S = torch.zeros(out, n_groups, dtype=torch.float32, device=W.device)
     Q = torch.zeros_like(W)
+    T = torch.zeros_like(W)
     for g in range(n_groups):
         i1, i2 = g * group, min((g + 1) * group, cols)
-        Wb = W[:, i1:i2].clone()
-        sg = optimal_ternary(Wb)[0].squeeze(1)            # per-row scale for THIS group
+        Wb0 = W[:, i1:i2].clone()                          # pre-sweep (for the s refit)
+        Wb = Wb0.clone()
+        sg = optimal_ternary(Wb)[0].squeeze(1)
+        if refine_scale:
+            tb = (Wb / sg.unsqueeze(1)).round_().clamp_(-1, 1)
+            num = (Wb0 * tb).sum(dim=1)
+            den = (tb * tb).sum(dim=1).clamp_min(1.0)
+            sg = torch.where(num > 0, num / den, sg).clamp_min(1e-8)
         S[:, g] = sg
         Qb = torch.zeros_like(Wb)
         Eb = torch.zeros_like(Wb)
         Hb = Hinv[i1:i2, i1:i2]
         for j in range(i2 - i1):
             wcol = Wb[:, j]
-            q = (wcol / sg).round_().clamp_(-1, 1) * sg
+            tcol = (wcol / sg).round_().clamp_(-1, 1)
+            q = tcol * sg
             Qb[:, j] = q
+            T[:, i1 + j] = tcol
             e = (wcol - q) / Hb[j, j]
             Eb[:, j] = e
             if j + 1 < i2 - i1:
@@ -168,11 +189,12 @@ def gptq_group_ternary(w: torch.Tensor, H: torch.Tensor, *, group: int = 128,
         if i2 < cols:
             W[:, i2:] -= Eb @ Hinv[i1:i2, i2:]
 
-    t = torch.zeros_like(Q, dtype=torch.int16)
-    for g in range(n_groups):                             # decode t group-wise (sign of Q/s)
-        i1, i2 = g * group, min((g + 1) * group, cols)
-        t[:, i1:i2] = (Q[:, i1:i2] / S[:, g:g + 1].clamp_min(1e-12)).round().to(torch.int16)
-    return Q, S, t
+    if act_order:
+        Q = Q[:, invperm]
+        T = T[:, invperm]
+        # NOTE: S stays indexed by PERMUTED groups; Q is already the reconstruction, and a
+        # packed deployment would ship g_idx = perm exactly like AutoGPTQ does.
+    return Q, S, T.to(torch.int16)
 
 
 def _target_paths(model: nn.Module, skip) -> list[str]:
