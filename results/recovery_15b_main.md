@@ -198,3 +198,25 @@ the same floor faster?
   forecasts for PTQ-only quality run 3-50x optimistic. Future PTQ forecasts should be
   multiplied by ~10x pessimism, or better: predict only ORDERINGS and ratios (those were
   correct all four times), not absolutes.
+
+## SOLVER V2 (A1 act-ordered groups + A2 s<->t refit) — engagement-verified run
+
+First v2 attempt silently re-ran v1 (sys.modules cached the old module across notebook runs;
+identical-to-the-decimal PPL exposed it -- engagement rule applied). After a module-cache
+purge the real v2 numbers landed:
+
+| variant | EN | RU | code | math |
+|---|---:|---:|---:|---:|
+| group128 v1 (no act-order, no refit) | 5,639 | 20,217 | 11,317 | 4,936 |
+| **group128 v2 (act-order + s-refit)** | **895.5** | **618.0** | **1,211.9** | **924.8** |
+
+- v2 over v1: 6.3x (EN), **32.7x (RU)**, 9.3x (code), 5.3x (math). The RU anomaly was indeed
+  the missing act-order (as diagnosed), and with it RU became the BEST domain.
+- Whole no-training solver chain: naive 575k -> v2 895 on EN = **642x**; RU 20.7M -> 618 =
+  ~33,000x. Ternary g128, calibration-only, zero training.
+- Ordering forecast (v2 > v1 everywhere) confirmed; absolute magnitudes remain surprising
+  (this time pleasantly) -- absolutes stay retired.
+- Gate status: hundreds of PPL is still not "usable without training" (tens), but two of the
+  four designed ingredients (A3 rotations, A4 salient residuals pending) closed most of the
+  distance, and Stage-B recovery now starts from ~900 instead of 575k -- a true last-mile
+  starting point.
