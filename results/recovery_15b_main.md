@@ -141,3 +141,34 @@ Resumed the plateau checkpoint (EN 84.3), single cosine decay over 20000 steps.
 here (~EN 72 / code 13) is set by the 150M-token data budget + the counter format, not by LR.
 The pilot named the data wall; the main run named the schedule wall; the cosine tail removed the
 schedule wall and returned to the data wall. To push lower: a B-token pretraining-scale corpus.
+
+## PTQ WARM-START WITNESS (Bonsai-inspired; NO recovery training anywhere)
+
+Three quantizers into the SAME counter format (per-row scale + ternary, counter_packed),
+warm-start PPL on the held-out domains, Qwen2.5-1.5B, calib = 64x8x512 from the mix corpus.
+Whole witness ran in 150s on the G4-class GPU.
+
+| variant | EN | RU | code | math |
+|---|---:|---:|---:|---:|
+| fp teacher | 11.6 | 9.2 | 3.0 | 6.7 |
+| naive TWN thr=0.5 (old default) | 575,347 | 20,672,417 | 454,477 | 369,272 |
+| optimal ternary (exact per-row L2) | 187,431 | 2,211,696 | 164,113 | 178,622 |
+| GPTQ (Hessian error feedback, act-order) | **17,553** | **11,971** | **35,064** | **22,812** |
+
+- optimal vs naive: 2.1-9.3x better -- matches the frozen "3-10x, same order" call exactly.
+- GPTQ vs naive: 33x (EN), 1727x (RU), 13x (code), 16x (math). Calibration is worth orders
+  of magnitude, with the biggest wins where naive was worst.
+- Forecast scoring (owned): predicted GPTQ warm PPL "~500-5000"; actual 12k-35k. Direction
+  right, magnitude OVERSHOT for the THIRD consecutive time. RU crossed the naive-vs-optimal
+  gap by 3 orders, but absolute quality is still far from usable.
+
+**Verdict on the "no-retrain PTQ is enough" hypothesis (Bonsai claim, our scale/format):**
+REFUTED at 1.5B with per-row scales -- 12k-35k PPL is still a broken model. Whatever carries
+Bonsai's ~90%-retention-without-retraining at 27B (group-128 scale granularity = 12-70x finer
+than our per-row, 27B redundancy, or undisclosed extras), it does NOT transfer down to this
+regime. Recovery training remains essential here. The actionable win: the recovery now starts
+from 17k instead of 575k -- PTQ + recovery is the combined recipe going forward.
+
+Next measurement: short recovery (e.g. 2000 steps) from the GPTQ start vs the recorded naive
+curve (naive reached EN 109 @ step 2000) -- does the calibrated start reach a lower floor or
+the same floor faster?
