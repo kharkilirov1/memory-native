@@ -220,3 +220,34 @@ purge the real v2 numbers landed:
   four designed ingredients (A3 rotations, A4 salient residuals pending) closed most of the
   distance, and Stage-B recovery now starts from ~900 instead of 575k -- a true last-mile
   starting point.
+
+## STAGE B WITNESS — PTQ start COMPOUNDS with recovery (and exposes a recipe change)
+
+Recovery from ptq_warm_start(mode="gptq") (counter format, per-row): warm EN 14.3k
+(off-stream calib), same recipe/data stream as the main run, 2000 steps.
+
+| step | EN | RU | code | math |
+|---:|---:|---:|---:|---:|
+| gptq warm | 14293 | 15510 | 27423 | 16542 |
+| **400** | **74.8** | 69.8 | **22.3** | **62.0** |
+| 800 | 89.8 | 64.0 | 28.2 | 90.0 |
+| 1200 | 89.2 | 58.8 | 27.9 | 74.8 |
+| 1600 | 94.0 | 68.1 | 31.9 | 79.2 |
+| 2000 | 97.7 | 58.7 | 26.3 | 80.5 |
+| naive-start reference @2000 | 109.0 | 76.7 | 41.8 | 91.4 |
+
+**Verdicts:**
+1. **Frozen ordering forecast CONFIRMED**: below the naive curve at 2000 on ALL domains.
+2. **The headline: @step 400 (0.8M tokens) the PTQ start hit EN 74.8 / code 22.3** — a level
+   the naive path needed the FULL main run + cosine tail (36k+20k steps, ~115M tokens) to
+   approach (best-ever 71.9 / 12.8). That is a ~100x compute reduction to the same
+   quality neighborhood. PTQ-init + counter-recovery is now the project's default recipe.
+3. **New finding: constant lr 0.008 DAMAGES a good PTQ start.** After the step-400 peak the
+   EN curve climbed back (74.8 -> 97.7): the lr-0.008 noise ball is WIDER than the distance
+   from the GPTQ start to the optimum, so the constant-lr recipe (tuned for resurrecting a
+   575k warm start) overheats a 14k warm start. RU/code kept improving; EN/math degraded.
+   Recipe implication, consistent with the whole LR investigation: from a PTQ start, begin
+   the schedule LOW (e.g. cosine 0.002 -> 1e-4), skip the hot phase entirely.
+4. Combined mn-recipe status vs Bonsai: Stage A (open solver v2) + Stage B (counter
+   recovery) = open, trainable, and now cheap. The remaining distance to "95% retention"
+   is scale (27B vs 1.5B) and their undisclosed transformation internals.
