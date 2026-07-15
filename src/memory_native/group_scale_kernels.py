@@ -20,6 +20,7 @@ __all__ = [
     "triton_group_decode_matmul",
     "triton_group_grad_x",
     "triton_group_counter_update_from_io",
+    "triton_group_counter_update_dense",
 ]
 
 
@@ -403,6 +404,89 @@ if HAS_TRITON:
         tl.store(state_ptr + base + 1, p1b.to(tl.uint8), mask=gmask)
         tl.store(state_ptr + base + 2, p2b.to(tl.uint8), mask=gmask)
 
+    @triton.jit
+    def _group_stats_dense_kernel(
+        state_ptr, gw_ptr, grad_scale_ptr, gsq_ptr,
+        K, G, C, group_size, residual_alpha,
+        stride_sn, stride_gwn,
+        BLOCK_K: tl.constexpr,
+    ):
+        # Same outputs as _group_stats_from_io_kernel, but gw is READ from a precomputed
+        # act-ordered [N,K] fp32 correlation (cuBLAS) instead of an M-loop dot -- the L2
+        # "semi-strict" path of the optimization plan. Group-boundary mask included.
+        row = tl.program_id(0)
+        grp = tl.program_id(1)
+        offs = tl.arange(0, BLOCK_K)
+        p = grp * group_size + offs
+        pmask = (offs < group_size) & (p < K)
+        gw = tl.load(gw_ptr + row * stride_gwn + p, mask=pmask, other=0.0)
+        packed_group = p // 4
+        lane = p % 4
+        base = row * stride_sn + packed_group * 3
+        b0 = tl.load(state_ptr + base + 0, mask=pmask, other=0).to(tl.int32)
+        b1 = tl.load(state_ptr + base + 1, mask=pmask, other=0).to(tl.int32)
+        b2 = tl.load(state_ptr + base + 2, mask=pmask, other=0).to(tl.int32)
+        code = _decode6(b0, b1, b2, lane)
+        lv = 2 * C - 1
+        Cf = C * 1.0
+        t = code // lv - 1
+        c = code % lv - (C - 1)
+        visible = t.to(tl.float32) + residual_alpha * c.to(tl.float32) / Cf
+        count = tl.sum(pmask.to(tl.float32), axis=0)
+        gscale = tl.sum(gw * visible, axis=0) / tl.sqrt(tl.maximum(count, 1.0))
+        g2 = tl.sum(gw * gw, axis=0)
+        tl.store(grad_scale_ptr + row * G + grp, gscale)
+        tl.store(gsq_ptr + row * G + grp, g2)
+
+    @triton.jit
+    def _group_state_dense_kernel(
+        state_ptr, scale_old_ptr, scale_ptr, denom_ptr, gw_ptr, perm_ptr, seed_ptr,
+        K, G, C, group_size, lr,
+        stride_sn, stride_gwn,
+        BLOCK_PG: tl.constexpr,
+    ):
+        # Same transition as _group_state_from_io_kernel with the correlation read from gw_ptr.
+        row = tl.program_id(0)
+        grp = tl.program_id(1)
+        seed = tl.load(seed_ptr).to(tl.uint32)
+        packed_per_group = group_size // 4
+        local_pg = tl.arange(0, BLOCK_PG)
+        packed_group = grp * packed_per_group + local_pg
+        p0 = packed_group * 4
+        gmask = (local_pg < packed_per_group) & (p0 < K)
+        c0_orig = tl.load(perm_ptr + p0 + 0, mask=gmask, other=0).to(tl.int32)
+        c1_orig = tl.load(perm_ptr + p0 + 1, mask=gmask, other=0).to(tl.int32)
+        c2_orig = tl.load(perm_ptr + p0 + 2, mask=gmask, other=0).to(tl.int32)
+        c3_orig = tl.load(perm_ptr + p0 + 3, mask=gmask, other=0).to(tl.int32)
+        gw_base = gw_ptr + row * stride_gwn
+        gw0 = tl.load(gw_base + p0 + 0, mask=gmask, other=0.0)
+        gw1 = tl.load(gw_base + p0 + 1, mask=gmask, other=0.0)
+        gw2 = tl.load(gw_base + p0 + 2, mask=gmask, other=0.0)
+        gw3 = tl.load(gw_base + p0 + 3, mask=gmask, other=0.0)
+        base = row * stride_sn + packed_group * 3
+        b0 = tl.load(state_ptr + base + 0, mask=gmask, other=0).to(tl.int32)
+        b1 = tl.load(state_ptr + base + 1, mask=gmask, other=0).to(tl.int32)
+        b2 = tl.load(state_ptr + base + 2, mask=gmask, other=0).to(tl.int32)
+        code0 = b0 & 0x3F
+        code1 = ((b0 >> 6) | (b1 << 2)) & 0x3F
+        code2 = ((b1 >> 4) | (b2 << 4)) & 0x3F
+        code3 = (b2 >> 2) & 0x3F
+        s_old = tl.load(scale_old_ptr + row * G + grp)
+        s_new = tl.load(scale_ptr + row * G + grp)
+        denom = tl.load(denom_ptr + row)
+        lv = 2 * C - 1
+        Cf = C * 1.0
+        nc0 = _tick(code0, gw0, row, c0_orig, K, lv, C, Cf, lr, denom, s_old, s_new, seed)
+        nc1 = _tick(code1, gw1, row, c1_orig, K, lv, C, Cf, lr, denom, s_old, s_new, seed)
+        nc2 = _tick(code2, gw2, row, c2_orig, K, lv, C, Cf, lr, denom, s_old, s_new, seed)
+        nc3 = _tick(code3, gw3, row, c3_orig, K, lv, C, Cf, lr, denom, s_old, s_new, seed)
+        p0b = (nc0 | (nc1 << 6)) & 0xFF
+        p1b = ((nc1 >> 2) | (nc2 << 4)) & 0xFF
+        p2b = ((nc2 >> 4) | (nc3 << 2)) & 0xFF
+        tl.store(state_ptr + base + 0, p0b.to(tl.uint8), mask=gmask)
+        tl.store(state_ptr + base + 1, p1b.to(tl.uint8), mask=gmask)
+        tl.store(state_ptr + base + 2, p2b.to(tl.uint8), mask=gmask)
+
 
 def _dtype_flags(tensor: torch.Tensor) -> tuple[bool, bool]:
     return tensor.dtype == torch.bfloat16, tensor.dtype == torch.float16
@@ -549,4 +633,67 @@ def triton_group_counter_update_from_io(
         M, N, K, G, C, group, float(lr),
         state.stride(0), x2.stride(0), x2.stride(1), go2.stride(0), go2.stride(1),
         BLOCK_PG=block_pg, BLOCK_M=16,
+    )
+
+
+@torch.no_grad()
+def triton_group_counter_update_dense(
+    state_packed_perm: torch.Tensor,
+    scale: torch.Tensor,
+    v: torch.Tensor,
+    grad_w_perm: torch.Tensor,
+    perm: torch.Tensor,
+    *,
+    group: int,
+    C: int,
+    lr: float,
+    lr_scale: float,
+    rms_beta: float,
+    rms_eps: float,
+    seed: int,
+    residual_alpha: float = 0.0,
+    lagged: bool = False,
+    clip: float = 0.0,
+) -> None:
+    """Semi-strict update (plan L2): the correlation arrives as a precomputed act-ordered
+    [N,K] fp32 grad (one cuBLAS GEMM + gather at the caller), and three cheap launches do
+    group stats, scale/RMS finalization and the SR state transition. Same math and SR keys
+    as the from-IO kernels/reference; the O(M) in-kernel dot loops are gone."""
+    if not HAS_TRITON:
+        raise RuntimeError("triton not available")
+    state = state_packed_perm
+    N, G = scale.shape
+    K = perm.numel()
+    gw = grad_w_perm.contiguous()
+    if not all(t.is_cuda for t in (state, scale, v, gw, perm)):
+        raise ValueError("dense group update requires CUDA tensors")
+    if gw.shape != (N, K) or gw.dtype != torch.float32:
+        raise ValueError("grad_w_perm must be fp32 [out, in] in act-order")
+    if K % 4 or group % 4 or G != (K + group - 1) // group:
+        raise ValueError("invalid group layout")
+    scale_old = scale.clone()
+    grad_scale = torch.empty_like(scale, dtype=torch.float32)
+    gsq = torch.empty_like(scale, dtype=torch.float32)
+    denom = torch.empty((N,), device=scale.device, dtype=torch.float32)
+    seed_t = torch.tensor([int(seed) & 0xFFFFFFFF], dtype=torch.int64, device=gw.device)
+
+    block_k = triton.next_power_of_2(group)
+    _group_stats_dense_kernel[(N, G)](
+        state, gw, grad_scale, gsq,
+        K, G, C, group, float(residual_alpha),
+        state.stride(0), gw.stride(0),
+        BLOCK_K=block_k,
+    )
+    block_g = triton.next_power_of_2(G)
+    _group_finalize_stats_kernel[(N,)](
+        scale, v.reshape(N), grad_scale, gsq, denom,
+        N, K, G, float(lr_scale), float(rms_beta), float(rms_eps), float(clip),
+        BLOCK_G=block_g, LAGGED=lagged,
+    )
+    block_pg = triton.next_power_of_2(group // 4)
+    _group_state_dense_kernel[(N, G)](
+        state, scale_old, scale, denom, gw, perm, seed_t,
+        K, G, C, group, float(lr),
+        state.stride(0), gw.stride(0),
+        BLOCK_PG=block_pg,
     )
