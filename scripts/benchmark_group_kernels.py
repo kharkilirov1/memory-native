@@ -79,7 +79,9 @@ def main():
 
     # Update-path timings: strict 3-launch from-IO kernel vs cuBLAS grad_w + GPU reference chain.
     from memory_native.group_scale_kernels import (
-        group_counter_update_from_io_hashsr, triton_group_counter_update_from_io,
+        group_counter_update_from_io_hashsr,
+        triton_group_counter_update_dense,
+        triton_group_counter_update_from_io,
     )
     state0, scale0, v0 = layer.state.clone(), layer.scale.clone(), layer.v.clone()
     upd_kw = dict(group=group, C=layer.C, lr=layer.lr, lr_scale=layer.lr_scale,
@@ -96,11 +98,20 @@ def main():
             codes, layer.scale, layer.v, x, go, layer.perm, **upd_kw)
         layer.state.copy_(pack_codes(new_codes))
 
+    def dense_update():                      # L2 final: cuBLAS grad_w + slim dense kernels
+        gw = (go.transpose(0, 1).float() @ x.float())[:, perm.long()]
+        triton_group_counter_update_dense(
+            layer.state, layer.scale, layer.v, gw.contiguous(), layer.perm, **upd_kw)
+
     strict_upd_ms = sync_ms(strict_update, iters=args.iters)
     layer.state.copy_(state0); layer.scale.copy_(scale0); layer.v.copy_(v0)
     torch.cuda.reset_peak_memory_stats()
     semi_upd_ms = sync_ms(semi_update, iters=args.iters)
     semi_peak = torch.cuda.max_memory_allocated()
+    layer.state.copy_(state0); layer.scale.copy_(scale0); layer.v.copy_(v0)
+    torch.cuda.reset_peak_memory_stats()
+    dense_upd_ms = sync_ms(dense_update, iters=args.iters)
+    dense_peak = torch.cuda.max_memory_allocated()
     layer.state.copy_(state0); layer.scale.copy_(scale0); layer.v.copy_(v0)
 
     # Stage-1 witness: the "gemm" layer mode end-to-end (decode + cuBLAS each call).
@@ -141,6 +152,10 @@ def main():
     print(f"[L0] update strict(3-launch from-IO)={strict_upd_ms:.3f} ms  "
           f"semi(cublas grad_w + reference)={semi_upd_ms:.3f} ms  "
           f"semi peak={semi_peak / 2**20:.1f} MiB")
+    print(f"[L2] update dense(cublas grad_w + slim kernels)={dense_upd_ms:.3f} ms  "
+          f"peak={dense_peak / 2**20:.1f} MiB  "
+          f"vs strict={strict_upd_ms / max(dense_upd_ms, 1e-9):.0f}x "
+          f"vs semi={semi_upd_ms / max(dense_upd_ms, 1e-9):.1f}x")
     print(f"[L1] gemm-mode fwd={gemm_fwd_ms:.3f} ms (max_abs={gemm_y_err:.6g})  "
           f"grad_x={gemm_gx_ms:.3f} ms (max_abs={gemm_gx_err:.6g})  "
           f"speedup vs triton: fwd={forward_ms / max(gemm_fwd_ms, 1e-9):.1f}x "

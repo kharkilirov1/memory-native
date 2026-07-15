@@ -10,6 +10,7 @@ from .group_scale_kernels import (
     HAS_TRITON,
     group_counter_update_from_io_hashsr,
     group_update_scratch_bytes,
+    triton_group_counter_update_dense,
     triton_group_counter_update_from_io,
     triton_group_decode_matmul,
     triton_group_grad_x,
@@ -346,11 +347,27 @@ class PackedGroupScaleCounterLinear(nn.Module):
                 "strict Triton group update requires a power-of-two group size; "
                 "use group=32/64/128/256 or kernel_mode='torch'"
             )
+        # Semi-strict fast path (plan L2): gemm/auto mode on CUDA computes the correlation
+        # with one cuBLAS GEMM and hands it to the slim dense kernels. Same SR keys/math as
+        # the from-IO kernels; only the O(M) in-kernel dot loops are gone. Salient layers
+        # fall back to the reference path, which re-zeroes the frozen salient codes.
+        use_dense = (
+            not want_triton and HAS_TRITON and x2.is_cuda
+            and _is_power_of_two(self.group) and not self._has_salient()
+        )
         seed = self._sr_step
         if want_triton and not self._has_salient():
             # No [out,in] grad_w and no dense W are created on this path.
             triton_group_counter_update_from_io(
                 self.state, self.scale, self.v, x2, go2, self.perm,
+                group=self.group, C=self.C, lr=self.lr, lr_scale=self.lr_scale,
+                rms_beta=self.rms_beta, rms_eps=self.rms_eps, seed=seed,
+                residual_alpha=self.residual_alpha, clip=self.local_grad_clip,
+            )
+        elif use_dense:
+            gw = (go2.transpose(0, 1).float() @ x2.float())[:, self.perm.long()]
+            triton_group_counter_update_dense(
+                self.state, self.scale, self.v, gw.contiguous(), self.perm,
                 group=self.group, C=self.C, lr=self.lr, lr_scale=self.lr_scale,
                 rms_beta=self.rms_beta, rms_eps=self.rms_eps, seed=seed,
                 residual_alpha=self.residual_alpha, clip=self.local_grad_clip,
