@@ -1,14 +1,18 @@
-"""Solver-v3 recovery: group-PTQ -> trainable group counters -> low-LR distillation.
+"""Solver-v3 recovery: group-PTQ -> packed group counters -> low-LR distillation.
 
 Defaults deliberately differ from the old per-row witness:
   * PTQ_MODE=gptq_group keeps v3 group-128 scales and act-order metadata.
+  * COUNTER_KIND=counter_packed selects PackedGroupScaleCounterLinear for the group path.
+  * GROUP_KERNEL_MODE=auto + STRICT_UPDATE=1 use group-aware Triton forward, grad_x, and
+    update-from-IO on CUDA; no dense W or grad_w is materialized.
   * C=11 uses all 63 reachable 6-bit states.
   * counter LR is cosine 2e-3 -> 1e-4; there is no destructive lr=0.008 hot phase.
   * residual homotopy alpha is held, then cosine-decayed to zero.
   * optional hidden-state KD repairs internal representations, not only final logits.
 
-Environment: MODEL, DATA_DIR, CKPT_DIR, STEPS, CALIB_BATCHES, SEQ, BATCH,
-GROUP, C, COUNTER_LR_START/END, HOMOTOPY_HOLD, FEATURE_KD_ALPHA/STRIDE.
+Environment: MODEL, DATA_DIR, CKPT_DIR, STEPS, CALIB_BATCHES, SEQ, BATCH, GROUP, C,
+COUNTER_KIND, GROUP_KERNEL_MODE, STRICT_UPDATE, COUNTER_LR_START/END, HOMOTOPY_HOLD,
+FEATURE_KD_ALPHA/STRIDE.
 """
 from __future__ import annotations
 
@@ -22,8 +26,17 @@ import torch.nn.functional as F
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from memory_native.donor.ptq import ptq_warm_start
+from memory_native.group_scale_packed import PackedGroupScaleCounterLinear
 from memory_native.recovery.distill import kd_divergence
 from recovery_session import DomainMix, eval_all
+
+
+def env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in {"0", "false", "no", "off"}
+
 
 MODEL = os.environ.get("MODEL", "Qwen/Qwen2.5-1.5B")
 DATA_DIR = os.environ.get("DATA_DIR", "/content/data/mix_full")
@@ -36,6 +49,9 @@ CALIB_BATCHES = int(os.environ.get("CALIB_BATCHES", "128"))
 GROUP = int(os.environ.get("GROUP", "128"))
 C = int(os.environ.get("C", "11"))
 PTQ_MODE = os.environ.get("PTQ_MODE", "gptq_group")
+COUNTER_KIND = os.environ.get("COUNTER_KIND", "counter_packed")
+GROUP_KERNEL_MODE = os.environ.get("GROUP_KERNEL_MODE", "auto")
+STRICT_UPDATE = env_bool("STRICT_UPDATE", True)
 REFINE_ITERS = int(os.environ.get("REFINE_ITERS", "2"))
 SCALE_REFIT = os.environ.get("SCALE_REFIT", "hdiag")
 COUNTER_LR_START = float(os.environ.get("COUNTER_LR_START", "0.002"))
@@ -108,7 +124,8 @@ torch.manual_seed(SEED)
 dev = "cuda" if torch.cuda.is_available() else "cpu"
 dtype = torch.bfloat16 if dev == "cuda" else torch.float32
 print(
-    f"solver-v3 recovery: device={dev} mode={PTQ_MODE} group={GROUP} C={C} steps={STEPS}",
+    f"solver-v3 recovery: device={dev} mode={PTQ_MODE} kind={COUNTER_KIND} "
+    f"kernel={GROUP_KERNEL_MODE} strict={STRICT_UPDATE} group={GROUP} C={C} steps={STEPS}",
     flush=True,
 )
 
@@ -123,11 +140,18 @@ teacher = AutoModelForCausalLM.from_pretrained(
 student = AutoModelForCausalLM.from_pretrained(
     MODEL, torch_dtype=dtype, attn_implementation="sdpa"
 ).to(dev)
+
+group_kernel_kw = {}
+if PTQ_MODE in {"gptq_group", "group128v3", "group"}:
+    group_kernel_kw = {
+        "kernel_mode": GROUP_KERNEL_MODE,
+        "strict_update": STRICT_UPDATE,
+    }
 report = ptq_warm_start(
     student,
     calib,
     mode=PTQ_MODE,
-    kind="counter_packed",
+    kind=COUNTER_KIND,
     C=C,
     group=GROUP,
     refine_iters=REFINE_ITERS,
@@ -136,9 +160,19 @@ report = ptq_warm_start(
     lr_scale=2e-4,
     residual_alpha=HOMOTOPY_ALPHA_START,
     local_grad_clip=1.0,
-    cache_mode="int8",
+    cache_mode="int8",  # used only by legacy row-scale counter kinds
+    **group_kernel_kw,
 )
 print("swap:", report, flush=True)
+packed_group_layers = [m for m in student.modules() if isinstance(m, PackedGroupScaleCounterLinear)]
+if packed_group_layers:
+    max_scratch = max(m.strict_scratch_bytes() for m in packed_group_layers)
+    max_dense_grad = max(m.out_features * m.in_features * 4 for m in packed_group_layers)
+    print(
+        f"packed-group layers={len(packed_group_layers)}; largest strict scratch="
+        f"{max_scratch / 2**20:.2f} MiB vs dense grad_w={max_dense_grad / 2**20:.2f} MiB",
+        flush=True,
+    )
 
 log = open(LOG, "a", encoding="utf-8")
 
@@ -152,7 +186,14 @@ student.eval()
 warm = eval_all(student, tokenizer, val, dev)
 student.train()
 print("[v3 warm]", {k: round(v, 2) for k, v in warm.items() if k.startswith("ppl")}, flush=True)
-emit(0, {"phase": "warm", "mode": PTQ_MODE, "group": GROUP, "C": C, **warm})
+emit(
+    0,
+    {
+        "phase": "warm", "mode": PTQ_MODE, "kind": COUNTER_KIND,
+        "kernel_mode": GROUP_KERNEL_MODE, "strict_update": STRICT_UPDATE,
+        "group": GROUP, "C": C, **warm,
+    },
+)
 
 fp = [p for p in student.parameters() if p.requires_grad]
 opt = torch.optim.AdamW(fp, lr=FP_LR_START) if fp else None
