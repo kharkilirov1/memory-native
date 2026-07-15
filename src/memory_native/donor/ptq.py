@@ -24,7 +24,8 @@ import torch.nn as nn
 from ..convert import CounterLinearWithBias, SwapReport, swap_linears_to_counter
 from ..counter import C_DEFAULT
 
-__all__ = ["optimal_ternary", "gptq_ternary", "residual_counter", "ptq_warm_start"]
+__all__ = ["optimal_ternary", "gptq_ternary", "gptq_group_ternary", "residual_counter",
+           "collect_hessians", "quantize_dense_group_ternary", "ptq_warm_start"]
 
 
 @torch.no_grad()
@@ -113,6 +114,67 @@ def gptq_ternary(w: torch.Tensor, H: torch.Tensor, *, C: int = C_DEFAULT,
     return s, t.to(torch.int16), c
 
 
+def _prep_hinv(H: torch.Tensor, W: torch.Tensor, percdamp: float):
+    """Shared GPTQ Hessian prep: dead-column handling, damping, Cholesky-inverse-Cholesky."""
+    H = H.detach().to(torch.float32).clone()
+    diag = torch.diagonal(H)
+    dead = diag == 0
+    if dead.any():
+        H[dead, dead] = 1.0
+        W[:, dead] = 0.0
+    damp = percdamp * torch.mean(torch.diagonal(H))
+    H += torch.eye(H.shape[0], device=H.device) * damp
+    Hinv = torch.cholesky_inverse(torch.linalg.cholesky(H))
+    return torch.linalg.cholesky(Hinv, upper=True)
+
+
+@torch.no_grad()
+def gptq_group_ternary(w: torch.Tensor, H: torch.Tensor, *, group: int = 128,
+                       percdamp: float = 0.01,
+                       ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Bonsai-granularity probe: GPTQ ternary with a scale PER (row, group-of-`group`-inputs)
+    instead of per row -- ~in/group times finer, i.e. the ~1.71 bpw ternary layout
+    (log2(3) + 16/group). Group scales are recomputed from the error-ADJUSTED weights on
+    entry to each group (AutoGPTQ-style dynamic groups); no act-order (groups stay aligned
+    to the input layout). This is an INFERENCE-quantization experiment -- it returns the
+    reconstructed dense weight, not a counter-format state.
+
+    Returns (w_hat [out,in] fp32, s [out, ceil(in/group)] fp32, t [out,in] int16)."""
+    W = w.detach().to(torch.float32).clone()
+    out, cols = W.shape
+    Hinv = _prep_hinv(H, W, percdamp)
+
+    n_groups = (cols + group - 1) // group
+    S = torch.zeros(out, n_groups, dtype=torch.float32, device=W.device)
+    Q = torch.zeros_like(W)
+    for g in range(n_groups):
+        i1, i2 = g * group, min((g + 1) * group, cols)
+        Wb = W[:, i1:i2].clone()
+        sg = optimal_ternary(Wb)[0].squeeze(1)            # per-row scale for THIS group
+        S[:, g] = sg
+        Qb = torch.zeros_like(Wb)
+        Eb = torch.zeros_like(Wb)
+        Hb = Hinv[i1:i2, i1:i2]
+        for j in range(i2 - i1):
+            wcol = Wb[:, j]
+            q = (wcol / sg).round_().clamp_(-1, 1) * sg
+            Qb[:, j] = q
+            e = (wcol - q) / Hb[j, j]
+            Eb[:, j] = e
+            if j + 1 < i2 - i1:
+                Wb[:, j + 1:] -= e.unsqueeze(1) * Hb[j, j + 1:].unsqueeze(0)
+        Q[:, i1:i2] = Qb
+        W[:, i1:i2] = Wb
+        if i2 < cols:
+            W[:, i2:] -= Eb @ Hinv[i1:i2, i2:]
+
+    t = torch.zeros_like(Q, dtype=torch.int16)
+    for g in range(n_groups):                             # decode t group-wise (sign of Q/s)
+        i1, i2 = g * group, min((g + 1) * group, cols)
+        t[:, i1:i2] = (Q[:, i1:i2] / S[:, g:g + 1].clamp_min(1e-12)).round().to(torch.int16)
+    return Q, S, t
+
+
 def _target_paths(model: nn.Module, skip) -> list[str]:
     out = []
     for parent_path, parent in model.named_modules():
@@ -122,6 +184,54 @@ def _target_paths(model: nn.Module, skip) -> list[str]:
                 if not any(sub in path for sub in skip):
                     out.append(path)
     return out
+
+
+@torch.no_grad()
+def collect_hessians(model: nn.Module, targets: list[str], calib_batches) -> dict:
+    """Accumulate H = X^T X (fp32, on-device) per target linear over the calibration batches."""
+    hessians: dict[str, torch.Tensor] = {}
+    hooks = []
+    was_training = model.training
+    model.eval()
+
+    def make_hook(path, in_features):
+        def hook(_mod, inputs):
+            x = inputs[0].detach().reshape(-1, in_features).to(torch.float32)
+            h = hessians.get(path)
+            if h is None:
+                h = torch.zeros(in_features, in_features, dtype=torch.float32, device=x.device)
+                hessians[path] = h
+            h.addmm_(x.t(), x)
+        return hook
+
+    for path in targets:
+        lin = model.get_submodule(path)
+        hooks.append(lin.register_forward_pre_hook(make_hook(path, lin.in_features)))
+    for ids in calib_batches:
+        model(ids)
+    for h in hooks:
+        h.remove()
+    model.train(was_training)
+    return hessians
+
+
+@torch.no_grad()
+def quantize_dense_group_ternary(model: nn.Module, calib_batches, *, group: int = 128,
+                                 percdamp: float = 0.01, extra_skip=None,
+                                 progress: bool = True) -> None:
+    """INFERENCE-quantization probe (Bonsai layout, our solver): overwrite every body linear's
+    dense weight with its group-`group` GPTQ-ternary reconstruction, in place. No counter
+    format, no training semantics -- this measures what scale GRANULARITY alone buys."""
+    skip = ["lm_head"] + (list(extra_skip) if extra_skip is not None else [])
+    targets = _target_paths(model, skip)
+    hessians = collect_hessians(model, targets, calib_batches)
+    for i, path in enumerate(targets):
+        lin = model.get_submodule(path)
+        w_hat, _, _ = gptq_group_ternary(lin.weight, hessians.pop(path),
+                                         group=group, percdamp=percdamp)
+        lin.weight.copy_(w_hat.to(lin.weight.dtype))
+        if progress and (i + 1) % 25 == 0:
+            print(f"[group{group}] {i+1}/{len(targets)} layers quantized", flush=True)
 
 
 @torch.no_grad()
@@ -146,32 +256,7 @@ def ptq_warm_start(model: nn.Module, calib_batches, *, mode: str = "gptq",
     except StopIteration:
         device = None
 
-    hessians: dict[str, torch.Tensor] = {}
-    if mode == "gptq":
-        hooks = []
-        was_training = model.training
-        model.eval()
-
-        def make_hook(path, in_features):
-            def hook(_mod, inputs):
-                x = inputs[0].detach()
-                x = x.reshape(-1, in_features).to(torch.float32)
-                h = hessians.get(path)
-                if h is None:
-                    h = torch.zeros(in_features, in_features, dtype=torch.float32,
-                                    device=x.device)
-                    hessians[path] = h
-                h.addmm_(x.t(), x)
-            return hook
-
-        for path in targets:
-            lin = model.get_submodule(path)
-            hooks.append(lin.register_forward_pre_hook(make_hook(path, lin.in_features)))
-        for ids in calib_batches:
-            model(ids)
-        for h in hooks:
-            h.remove()
-        model.train(was_training)
+    hessians = collect_hessians(model, targets, calib_batches) if mode == "gptq" else {}
 
     # per-layer PTQ states BEFORE the swap frees the fp weights
     states: dict[str, tuple] = {}
