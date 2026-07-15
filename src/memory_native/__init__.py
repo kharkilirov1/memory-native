@@ -34,6 +34,7 @@ from .memory_ffn import CounterMemoryFFN, CounterValueMemory
 from .moe_ffn import CounterMoEFFN
 from .mtp import MultiTokenHead, MTPGPT, mtp_loss, shift_targets
 from .group_counter import GroupCounterLinear
+from .group_scale_counter import GroupScaleCounterLinear
 from .stack_linear import StackCounterLinear
 from .mod import MoDBlock
 from .glm import MNGLM, ReversibleMNGLM, GLMBlock, GLMAttention, RMSNorm
@@ -92,6 +93,7 @@ __all__ = [
     "mtp_loss",
     "shift_targets",
     "GroupCounterLinear",
+    "GroupScaleCounterLinear",
     "StackCounterLinear",
     "MoDBlock",
     "MNGLM",
