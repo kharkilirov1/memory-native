@@ -66,3 +66,15 @@ reach a lower floor than the naive-start floor (EN 72 / RU 35 / code 13 / math 4
   usable-without-training territory on a 1.5B.
 - Stage A+B together is the only path we expect to approach "retention"-style numbers, and
   the fair comparison target at our scale is recovery-from-PTQ-start vs recovery-from-naive.
+
+## A3 VERDICT (2026-07-16, measured): rotations RETIRED for the ternary grid
+
+Local witness (rotation module correct: logits identical after fold+rotate, atol 1e-4):
+on outlier-heavy weights the group-ternary activation error got WORSE under rotation
+(17.0 -> 23.4; with row outliers 205 -> 418). Mechanism: ternary+group-scale thrives on
+CONCENTRATED outliers (the outlier group takes its own large s); incoherence gaussianizes
+the weights -- the best case for uniform 2-bit lattices (QuIP/QuaRot) and the worst case
+for a 3-level alphabet. The open literature agrees in hindsight: binary/ternary lines
+(BiLLM/ARB) go the opposite way -- they ISOLATE outliers (salient residuals) rather than
+spread them. rotate.py stays in the tree (correct, runtime-free, useful for any future
+uniform-grid path); A4 (salient residual binarization) is the next ternary ingredient.
