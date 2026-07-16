@@ -20,6 +20,13 @@ in **pure PyTorch** — no custom engine, runs on stock CPU/CUDA. Pure-Python pa
 > memory-efficient *optimizers* only shrink optimizer state — a small slice of the
 > activation-bound peak.
 
+> **🍎 MLX / Apple-silicon port:** the method now runs on MLX (Metal on macOS; CPU backend
+> anywhere) — same 6-bit state, same packed 0.75 B/weight layout, same deterministic hash-SR
+> update, validated bit-for-bit against this torch implementation. Counter models cross
+> torch↔MLX losslessly, so you can PTQ/train on CUDA and fine-tune on a MacBook's unified
+> memory. See [`docs/MLX_PORT.md`](docs/MLX_PORT.md), package
+> [`src/memory_native_mlx/`](src/memory_native_mlx/), demo [`scripts/mlx_demo.py`](scripts/mlx_demo.py).
+
 The method attacks all four memory pools of training at once:
 
 | Pool | Lever | What it is |
@@ -169,7 +176,14 @@ src/memory_native/
   memory.py         memory_report, peak_training_memory, compare_training_peak
   data.py           char corpus loader with offline synthetic fallback
   cli.py            memory-native-charlm / memory-native-memgate entry points
+src/memory_native_mlx/
+  counter.py        RMSCounterLinear on MLX (custom-VJP self-update, deterministic hash-SR)
+  packed.py         PackedRMSCounterLinear — same 0.75 B/weight packed layout, bit-identical
+  reversible.py     whole-chain reversible sequence (O(1)-in-depth) + anchored mode
+  metal_update.py   fused RMS+SR update as a custom Metal kernel (mirror of the Triton one)
+  interop.py        lossless torch <-> MLX counter-state transfer (the CUDA->MacBook handoff)
 scripts/            run_scale_validation.sh (one-command GPU sweep -> results/)
+                    mlx_demo.py (counter+reversible char-LM on MLX; Metal or CPU)
 tests/              pytest: encode/decode, learning, reversible grad-check, packed round-trip,
                     optimizers, memory gate, triton (CUDA-skipped)
 ```
