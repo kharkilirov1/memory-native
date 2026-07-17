@@ -13,19 +13,9 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from .counter import decode_state, encode_state, stochastic_round
+from .counter import _carry_resolve, decode_state, encode_state, stochastic_round
 
 __all__ = ["GroupScaleCounterLinear"]
-
-
-def _carry_resolve(cc: torch.Tensor, t: torch.Tensor, C: int):
-    carry = torch.trunc(cc / C)
-    remainder = cc - carry * C
-    proposed = t + carry
-    new_t = proposed.clamp(-1, 1)
-    blocked = proposed != new_t
-    remainder = torch.where(blocked, torch.sign(cc) * (C - 1), remainder)
-    return new_t, remainder.clamp(-(C - 1), C - 1)
 
 
 class _GroupScaleCounterFn(torch.autograd.Function):
@@ -104,6 +94,10 @@ class GroupScaleCounterLinear(nn.Module):
         self.register_buffer("update_events", torch.zeros((), dtype=torch.int64), persistent=False)
         self.register_buffer("perm", torch.empty(in_features, dtype=torch.long))
         self.register_buffer("group_index", torch.empty(in_features, dtype=torch.long))
+        # Salient channel (A4.1): exact fp16 overrides at flat original-order indices;
+        # base (t, c) is zero and kept zero there. Mirrors PackedGroupScaleCounterLinear.
+        self.register_buffer("salient_idx", torch.zeros(0, dtype=torch.int32))
+        self.register_buffer("salient_val", torch.zeros(0, dtype=torch.float16))
         self.set_permutation(torch.arange(in_features) if perm is None else perm)
 
     @torch.no_grad()
@@ -132,6 +126,11 @@ class GroupScaleCounterLinear(nn.Module):
         t, c = self._decode()
         code = t + self.residual_alpha * c / self.C
         w = self.column_scales() * code
+        if self.salient_idx.numel():
+            # Exact overrides; base is zero at salient entries, so copy == add.
+            w = w.clone()
+            w.reshape(-1).index_copy_(0, self.salient_idx.long(),
+                                      self.salient_val.float())
         return w if dtype is None else w.to(dtype)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -147,6 +146,8 @@ class GroupScaleCounterLinear(nn.Module):
         t: torch.Tensor,
         c: torch.Tensor | None = None,
         perm: torch.Tensor | None = None,
+        salient_idx: torch.Tensor | None = None,
+        salient_val: torch.Tensor | None = None,
     ) -> None:
         scales = scales.to(device=self.state.device, dtype=torch.float32)
         t = t.to(device=self.state.device, dtype=torch.int16)
@@ -159,10 +160,28 @@ class GroupScaleCounterLinear(nn.Module):
             raise ValueError("t must be ternary")
         if c.abs().max().item() > self.C - 1:
             raise ValueError("counter residual exceeds representable range")
+        salient_idx = torch.zeros(0, dtype=torch.int32) if salient_idx is None else salient_idx
+        salient_val = torch.zeros(0, dtype=torch.float16) if salient_val is None else salient_val
+        salient_idx = salient_idx.to(device=self.state.device, dtype=torch.int32).reshape(-1)
+        salient_val = salient_val.to(device=self.state.device, dtype=torch.float16).reshape(-1)
+        if salient_idx.numel() != salient_val.numel():
+            raise ValueError("salient_idx/salient_val length mismatch")
+        if salient_idx.numel():
+            if int(salient_idx.min()) < 0 or int(salient_idx.max()) >= t.numel():
+                raise ValueError("salient_idx out of range")
+            if salient_idx.unique().numel() != salient_idx.numel():
+                raise ValueError("salient_idx must not contain duplicates")
+            # The salient component owns these entries: base (t, c) is zero there.
+            t = t.clone()
+            c = c.clone()
+            t.reshape(-1)[salient_idx.long()] = 0
+            c.reshape(-1)[salient_idx.long()] = 0
         if perm is not None:
             self.set_permutation(perm)
         self.scale.copy_(scales.clamp_min(1e-8))
         self.state.copy_(encode_state(t, c, self.C))
+        self.salient_idx = salient_idx
+        self.salient_val = salient_val
         self.v.zero_()
         self.weight_flips.zero_()
         self.update_events.zero_()
@@ -200,6 +219,12 @@ class GroupScaleCounterLinear(nn.Module):
         ticks = (-self.lr * grad_eff) * (self.C / new_col)
         cc = stochastic_round(c_rebased + ticks)
         new_t, new_c = _carry_resolve(cc, t, self.C)
+        if self.salient_idx.numel():
+            # Salient entries are frozen: the salient component owns them.
+            new_t = new_t.clone()
+            new_c = new_c.clone()
+            new_t.reshape(-1)[self.salient_idx.long()] = 0
+            new_c.reshape(-1)[self.salient_idx.long()] = 0
         self.weight_flips.add_((new_t != t).sum().to(self.weight_flips.dtype))
         self.update_events.add_(grad_w.numel())
         self.scale.copy_(new_scale)
@@ -222,6 +247,8 @@ class GroupScaleCounterLinear(nn.Module):
             + self.v.numel() * self.v.element_size()
             + self.group_index.numel() * self.group_index.element_size()
             + self.perm.numel() * self.perm.element_size()
+            + self.salient_idx.numel() * self.salient_idx.element_size()
+            + self.salient_val.numel() * self.salient_val.element_size()
         )
 
     def extra_repr(self) -> str:
