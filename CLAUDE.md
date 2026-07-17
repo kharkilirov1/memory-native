@@ -156,3 +156,13 @@ python -m pytest tests/test_from_dense.py tests/test_convert.py -q
 
 Everything worth keeping is pushed to the branch — the cloud container is ephemeral. Do the
 gated Gemma download and any GPU finetune locally (HF credentials + disk + CUDA live there).
+
+## Сессия 2026-07-17 — консолидированный мердж solver v3 (kimi/solver-v3-consolidated)
+
+- Ветка `kimi/solver-v3-consolidated` от `agent/solver-v3-group-recovery` @ ad44753: поглощает kimi/solver-v3-stage-a, расширяет packed-формат salient-каналом, сворачивает review_fixes в исходники (файл удалён).
+- Новое в ptq.py: `itf_grid` (A5, асимметричная {−s_neg,0,+s_pos} сетка + точный per-lobe init), `align_scales_output` (A7, точный совместный refit масштабов строки в H-метрике; `scale_refit="align"` заменяет greedy hessian_cd), `salient_first` (A4.1, BiLLM-style сплит до sweep, внутри error feedback). A6/SSR измеренно вреден (+94% smoke / +14% layerwise) — не включён.
+- group_scale_packed.py / group_scale_counter.py: буферы `salient_idx` int32 (flat original-order) + `salient_val` fp16, override в `visible_weight`, `load_group_state(..., salient_idx=, salient_val=)`, базовые (t,c) обнулены и заморожены через апдейты, Triton fwd/grad + sparse COO коррекция, strict Triton update off при salient, учёт в persistent_bytes/stats.
+- Свёрнуто из review_fixes: `_carry_resolve` (канон из counter.py), pow2-check для strict Triton update, персистентный `sr_step` буфер, flip-sample телеметрия (`flip_sample_size`, `observe_flip_sample`, `flip_rate_alt`, `counter_edge_sample`), фильтрация counter-only kwargs в ptq_warm_start.
+- Gate (Qwen2.5-0.5B, слои 0+23, WikiText-2): v3_base 0.01765 → v3_full 0.01371 (−22.3%); align 0.01485 < hessian_cd 0.01511; честно: старая ветка 0.01292 всё ещё ниже — следующий рычаг: in-sweep per-group refit как опция.
+- Тесты: tests/test_solver_v3_consolidated.py (13 шт), вся суита зелёная (CPU; GLM/MoE-тесты требуют torch._grouped_mm — env-ограничение torch 2.8 CPU, не регрессия).
+- Документация: docs/solver_v3_consolidated.md; результаты: results/solver_v3_consolidated_layerwise.{json,md}.
