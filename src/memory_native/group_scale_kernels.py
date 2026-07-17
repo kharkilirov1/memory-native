@@ -507,6 +507,11 @@ def triton_group_counter_update_from_io(
     """
     if not HAS_TRITON:
         raise RuntimeError("triton not available")
+    if group & (group - 1):
+        raise ValueError(
+            "strict Triton group update requires a power-of-two group size; "
+            "use group=32/64/128/256 or the torch reference path"
+        )
     x2 = x.reshape(-1, x.shape[-1]).contiguous()
     go2 = grad_out.reshape(-1, grad_out.shape[-1]).contiguous()
     state = state_packed_perm
