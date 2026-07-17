@@ -148,9 +148,3 @@ __all__ = [
     "__version__",
 ]
 
-# Apply the post-review compatibility/correctness layer after all public objects are bound.
-# The patch mutates the existing class/function objects, so imports above and downstream aliases
-# all observe the same fixed behavior.
-from .review_fixes import apply_review_fixes as _apply_review_fixes
-_apply_review_fixes()
-del _apply_review_fixes
