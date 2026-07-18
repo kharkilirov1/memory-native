@@ -100,6 +100,16 @@ class GroupScaleCounterLinear(nn.Module):
         self.register_buffer("salient_val", torch.zeros(0, dtype=torch.float16))
         self.set_permutation(torch.arange(in_features) if perm is None else perm)
 
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        # Salient buffers are size-[K] with K decided by the solver; resize ours to the
+        # incoming shapes so checkpoints with a salient channel load into fresh layers.
+        for name in ("salient_idx", "salient_val"):
+            key = prefix + name
+            if key in state_dict and state_dict[key].shape != getattr(self, name).shape:
+                setattr(self, name, torch.empty_like(
+                    state_dict[key], device=getattr(self, name).device))
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
+
     @torch.no_grad()
     def set_permutation(self, perm: torch.Tensor) -> None:
         perm = perm.detach().to(device=self.state.device, dtype=torch.long)
