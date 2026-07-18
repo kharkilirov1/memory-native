@@ -9,7 +9,7 @@ witness -- a PPL-recovery curve on held-out WikiText:
   PPL(counter, distilled)   recovered -- pulled back toward the baseline by the distill finetune
 
 Recovery is a NETWORK-level effect (composed layers + distill loss), not a per-layer self-fix
-(see CLAUDE.md). The counter body self-updates inside backward (no Adam moments, no fp master, no
+(see the project notes). The counter body self-updates inside backward (no Adam moments, no fp master, no
 full grad buffer); only the fp slice (embeddings / final norm / tied lm_head / preserved q,k,v
 bias) is trained by AdamW -- exactly the pools the method is designed NOT to zero.
 

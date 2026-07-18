@@ -2,7 +2,7 @@
 
 The bridge for the MacBook fine-tuning story: a counter model produced on CUDA — from
 scratch, or PTQ-warm-started from a pretrained checkpoint (the gptq_group_ternary +
-recovery path on the claude/finetune-pretrained-model / solver-v3 branches) — moves to
+recovery/solver-v3 path in this repo) — moves to
 MLX losslessly, because both sides use the exact same 6-bit code space and the exact same
 4-codes/3-bytes packing (bit-for-bit, both match the engine's cc_pack4). Training then
 CONTINUES with the same dynamics: both sides implement the same hash-SR update.

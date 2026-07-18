@@ -1,7 +1,6 @@
 # Design — Qwen2.5-0.5B → counter warm-start + recovery finetune
 
 Date: 2026-07-06
-Branch: `claude/finetune-pretrained-model-fwyuun`
 Status: approved (chat), implementation via TDD
 
 ## Goal / witness
@@ -15,7 +14,7 @@ counter format (Phase 1–2 already done), and **recover quality with a distilla
 - `PPL(counter, post-distill)` — recovered, approaching the fp baseline.
 
 Recovery is a **network-level effect** (composed layers + task/distill loss), per the honest
-finding recorded in `CLAUDE.md`: a single full-precision layer does NOT self-improve.
+finding recorded in the project notes: a single full-precision layer does NOT self-improve.
 
 ## Decisions (locked)
 

@@ -1,6 +1,6 @@
 # Qwen2.5-0.5B → counter → distill recovery — real run (CPU)
 
-Date: 2026-07-06 · Branch: `claude/finetune-pretrained-model-fwyuun` · Box: 20-core CPU, no GPU
+Date: 2026-07-06 · Box: 20-core CPU, no GPU
 
 First real end-to-end run of the finetune-pretrained pipeline on the actual donor and real text
 (WikiText-2-raw). CPU-sized (the box has no CUDA); it proves the mechanism on the real model, not
@@ -32,7 +32,7 @@ batches), not a method limit — it needs a GPU run (thousands of steps, more da
 ## What this establishes (and the honest caveat)
 
 - The full pipeline runs on the **real** donor: load → in-place counter swap → distill → PPL.
-- Warm-start alone is unusable (as CLAUDE.md predicted: forward sees only `s·t`); recovery is a
+- Warm-start alone is unusable (as the project notes predicted: forward sees only `s·t`); recovery is a
   **network-level distill effect**, and it works — 175× PPL reduction (159k → 0.9k).
 - NOT full recovery to the fp baseline. That is out of CPU reach; the T4 script/notebook are for it.
 

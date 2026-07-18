@@ -1,6 +1,6 @@
 # Group-kernel optimization — Stage 0+1 results (T4-measured)
 
-Date: 2026-07-16. Branch: `claude/v3-kernel-opt` (@8944e20, on top of solver-v3 @ad44753).
+Date: 2026-07-16. Code @8944e20 (on top of solver-v3 @ad44753).
 Plan: docs/group_kernel_optimization_plan.md. Witness kernel:
 `lirovkharki/mn-v3-group-kernel-gate` v2 (baseline, @4f762a6) and v3 (final, @8944e20),
 Tesla T4, torch 2.10.0+cu128, triton 3.6.0, bf16, group=128. Parity gate v3: **18 passed**

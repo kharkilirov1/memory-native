@@ -90,7 +90,7 @@ def lr_for(step):
 
 
 # weight_flips is DEAD on the CUDA fused path: the Triton kernel mutates packed state directly
-# and never increments the buffer (CLAUDE.md: "kernel doesn't report flip-rate; torch path
+# and never increments the buffer (project notes: "kernel doesn't report flip-rate; torch path
 # does"). So measure flips the only reliable way -- diff the decoded ternary state t of a
 # sampled set of layers across the interval. Sampled (not all 196) to keep the decode cheap.
 _FLIP_SAMPLE = counter_layers[::max(len(counter_layers) // 12, 1)]

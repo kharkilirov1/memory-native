@@ -2,7 +2,7 @@
 
 The warm-started counter student starts degraded (ternarization is lossy for a full-precision
 donor). Recovery is a *network-level* effect -- composed layers driven by a task/distill loss --
-NOT a per-layer self-improvement (see CLAUDE.md). Here the loss is the KD divergence to the
+NOT a per-layer self-improvement (see the project notes). Here the loss is the KD divergence to the
 resident fp teacher (optionally plus the true-token CE). The counter body updates itself in the
 backward pass; the remaining fp params (embeddings, norms, tied lm_head, preserved biases) are
 trained by AdamW.

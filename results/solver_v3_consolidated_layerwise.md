@@ -1,6 +1,6 @@
 # Solver v3 CONSOLIDATED — layerwise gate
 
-Date: 2026-07-17. Branch: `kimi/solver-v3-consolidated`.
+Date: 2026-07-17.
 Donor: Qwen/Qwen2.5-0.5B, bf16; calib WikiText-2 train 8×[2,128]; sampled layers 0+23
 (14 linears); metric: relative H-weighted layer output error Σ(w−q)ᵀH(w−q)/ΣwᵀHw
 (the exact objective the solver optimizes). NO training anywhere. bpw ≈ 1.71 +
