@@ -55,6 +55,10 @@ STRICT_UPDATE = env_bool("STRICT_UPDATE", True)
 FLIP_SAMPLE_SIZE = int(os.environ.get("FLIP_SAMPLE_SIZE", "4096"))
 REFINE_ITERS = int(os.environ.get("REFINE_ITERS", "2"))
 SCALE_REFIT = os.environ.get("SCALE_REFIT", "hdiag")
+# Consolidated solver ingredients (defaults unchanged: sym grid, no salient split).
+GRID = os.environ.get("GRID", "sym")
+ITF_ITERS = int(os.environ.get("ITF_ITERS", "3"))
+SALIENT_FIRST = float(os.environ.get("SALIENT_FIRST", "0.0"))
 COUNTER_LR_START = float(os.environ.get("COUNTER_LR_START", "0.002"))
 COUNTER_LR_END = float(os.environ.get("COUNTER_LR_END", "0.0001"))
 FP_LR_START = float(os.environ.get("FP_LR_START", "0.0001"))
@@ -147,6 +151,7 @@ def checkpoint_payload(
             "model": MODEL, "ptq_mode": PTQ_MODE, "counter_kind": COUNTER_KIND,
             "group": GROUP, "C": C, "kernel_mode": GROUP_KERNEL_MODE,
             "strict_update": STRICT_UPDATE, "flip_sample_size": FLIP_SAMPLE_SIZE,
+            "grid": GRID, "salient_first": SALIENT_FIRST,
         },
     }
     payload.update(capture_rng_state())
@@ -198,7 +203,8 @@ if resume_payload is None:
     calib = [mix.batch_at(100_000 + i, dev) for i in range(CALIB_BATCHES)]
     report = ptq_warm_start(
         student, calib, mode=PTQ_MODE, kind=COUNTER_KIND, C=C, group=GROUP,
-        refine_iters=REFINE_ITERS, scale_refit=SCALE_REFIT, **counter_kwargs,
+        refine_iters=REFINE_ITERS, scale_refit=SCALE_REFIT,
+        grid=GRID, itf_iters=ITF_ITERS, salient_first=SALIENT_FIRST, **counter_kwargs,
     )
     print("swap:", report, flush=True)
 else:
