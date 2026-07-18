@@ -325,3 +325,53 @@ def test_warm_start_itf_packs_through_exact_sym_resolve():
     # and it does not regress vs the plain sym-grid packed start on these weights
     q_plain, _, _ = gptq_group_ternary(w, H, group=8, refine_iters=2)
     assert _herr(w, counter.visible_weight(), H) <= _herr(w, q_plain, H) * 1.05
+
+
+def test_packed_salient_state_dict_roundtrip_into_fresh_layer():
+    """Checkpoints with a salient channel must load into freshly built layers (the resume
+    path constructs layers with EMPTY salient buffers) and keep behaving identically:
+    same visible weight, rebuilt non-persistent act-order positions, salient still frozen."""
+    layer, _, _, idx, val, perm = _packed_with_salient(seed=11)
+    x_warm = torch.randn(9, layer.in_features)
+    layer.train()
+    (layer(x_warm).square().mean()).backward()          # sr_step=1, state moved
+    layer.eval()
+    sd = copy.deepcopy(layer.state_dict())
+
+    fresh = PackedGroupScaleCounterLinear(
+        layer.in_features, layer.out_features, group=layer.group, C=layer.C,
+        perm=perm, kernel_mode="torch")
+    fresh.load_state_dict(sd)                            # was: RuntimeError size mismatch
+    assert fresh.salient_idx.numel() == idx.numel()
+    assert torch.equal(fresh._salient_perm_flat, layer._salient_perm_flat)
+    assert int(fresh.sr_step) == int(layer.sr_step)
+    with torch.no_grad():
+        assert torch.equal(fresh.visible_weight(), layer.visible_weight())
+
+    # identical updates after the restore: bit-exact state AND salient stays frozen
+    x2 = torch.randn(7, layer.in_features)
+    go2 = torch.randn(7, layer.out_features)
+    layer._update_from_io(x2, go2)
+    fresh._update_from_io(x2, go2)
+    assert torch.equal(layer.state, fresh.state)
+    assert torch.equal(layer.scale, fresh.scale)
+    with torch.no_grad():
+        kept = fresh.visible_weight().reshape(-1)[idx.long()]
+    assert torch.allclose(kept, val.half().float(), atol=1e-3)
+
+
+def test_reference_salient_state_dict_roundtrip_into_fresh_layer():
+    layer, _, _, idx, val, perm = _packed_with_salient(seed=12)
+    ref = GroupScaleCounterLinear(layer.in_features, layer.out_features,
+                                  group=layer.group, C=layer.C, perm=perm)
+    t, c = decode_state(unpack_codes(layer.state, layer.in_features), layer.C)
+    inv = torch.argsort(perm)
+    ref.load_group_state(layer.scale, t[:, inv].to(torch.int16), c[:, inv].to(torch.int16),
+                         perm, salient_idx=idx, salient_val=val)
+    sd = copy.deepcopy(ref.state_dict())
+    fresh = GroupScaleCounterLinear(layer.in_features, layer.out_features,
+                                    group=layer.group, C=layer.C, perm=perm)
+    fresh.load_state_dict(sd)
+    assert fresh.salient_idx.numel() == idx.numel()
+    with torch.no_grad():
+        assert torch.equal(fresh.visible_weight(), ref.visible_weight())

@@ -82,3 +82,31 @@ def test_group_strict_update_bitquantified_against_reference():
     assert latent_quanta <= 1.0 / C + 1e-6, latent_quanta
     assert torch.allclose(got_scale, ref_scale, atol=2e-4, rtol=2e-4)
     assert torch.allclose(got_v, ref_v, atol=2e-4, rtol=2e-4)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_salient_correction_on_triton_path(dtype):
+    """Salient sparse override on the CUDA path: fp32 COO vs bf16/fp16 activations must not
+    dtype-crash (sparse.mm requires matching dtypes) and must match the dense reference."""
+    from memory_native.group_scale_packed import PackedGroupScaleCounterLinear
+
+    torch.manual_seed(3)
+    k, out, group, C = 64, 16, 32, 11
+    perm = torch.randperm(k)
+    layer = PackedGroupScaleCounterLinear(
+        k, out, group=group, C=C, perm=perm, kernel_mode="triton").cuda()
+    t = torch.randint(-1, 2, (out, k), dtype=torch.int16)
+    c = torch.zeros_like(t)
+    scale = torch.rand(out, k // group) * 0.15 + 0.05
+    idx = torch.tensor([5, 70, 131, 200], dtype=torch.int32)
+    val = torch.tensor([0.7, -0.4, 0.9, -1.1], dtype=torch.float16)
+    layer.load_group_state(scale, t, c, perm, salient_idx=idx, salient_val=val)
+
+    x = torch.randn(12, k, device="cuda", dtype=dtype)
+    with torch.no_grad():
+        ref_w = layer.visible_weight()
+        y = layer(x)                                   # triton base + sparse correction
+        assert torch.allclose(y.float(), (x.float() @ ref_w.t()), atol=5e-2)
+    go = torch.randn(12, out, device="cuda", dtype=dtype)
+    gx = layer._grad_x_2d(go)
+    assert torch.allclose(gx.float(), (go.float() @ ref_w), atol=5e-2)

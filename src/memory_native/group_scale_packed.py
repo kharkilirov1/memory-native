@@ -158,9 +158,34 @@ class PackedGroupScaleCounterLinear(nn.Module):
 
         def _sync_after_load(module, _incompatible):
             module._sr_step = int(module.sr_step.detach().cpu())
+            module._rebuild_salient_runtime()
             module.observe_flip_sample(reset=True)
 
         self.register_load_state_dict_post_hook(_sync_after_load)
+
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        # Salient buffers are size-[K] with K decided by the solver; resize ours to the
+        # incoming shapes so checkpoints with a salient channel load into fresh layers.
+        for name in ("salient_idx", "salient_val"):
+            key = prefix + name
+            if key in state_dict and state_dict[key].shape != getattr(self, name).shape:
+                setattr(self, name, torch.empty_like(
+                    state_dict[key], device=getattr(self, name).device))
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
+
+    @torch.no_grad()
+    def _rebuild_salient_runtime(self) -> None:
+        """Derive the non-persistent salient runtime (act-order flat positions, sparse cache)
+        from the persistent salient_idx/perm — needed after load_group_state AND state_dict load."""
+        if self.salient_idx.numel():
+            p = self.perm.long()
+            inv = torch.argsort(p)
+            o = self.salient_idx.long() // self.in_features
+            j = self.salient_idx.long() % self.in_features
+            self._salient_perm_flat = o * self.in_features + inv[j]
+        else:
+            self._salient_perm_flat = torch.zeros(0, dtype=torch.int64, device=self.state.device)
+        self._salient_sparse_cache = None
 
     def _sample_codes(self) -> torch.Tensor:
         """Ternary codes at the flip-sample positions, read straight out of the 6-bit packing."""
@@ -280,7 +305,8 @@ class PackedGroupScaleCounterLinear(nn.Module):
             A = self._salient_sparse()
             if A is not None:
                 # Base is zero at salient entries: the sparse add IS the override.
-                y2 = y2 + torch.sparse.mm(A, x2.t()).t().to(y2.dtype)
+                # sparse.mm requires matching dtypes — A is fp32, activations bf16/fp16.
+                y2 = y2 + torch.sparse.mm(A, x2.t().float()).t().to(y2.dtype)
             return y2
         return x2 @ self.visible_weight(dtype=x2.dtype).t()
 
@@ -293,7 +319,7 @@ class PackedGroupScaleCounterLinear(nn.Module):
             )
             A = self._salient_sparse()
             if A is not None:
-                gx2 = gx2 + torch.sparse.mm(A.t(), go2.t()).t().to(gx2.dtype)
+                gx2 = gx2 + torch.sparse.mm(A.t(), go2.t().float()).t().to(gx2.dtype)
             return gx2
         return go2 @ self.visible_weight(dtype=go2.dtype)
 
@@ -393,14 +419,7 @@ class PackedGroupScaleCounterLinear(nn.Module):
         self.scale.copy_(scales.clamp_min(1e-8))
         self.salient_idx = salient_idx
         self.salient_val = salient_val
-        if salient_idx.numel():
-            inv = torch.argsort(p)
-            o = salient_idx.long() // self.in_features
-            j = salient_idx.long() % self.in_features
-            self._salient_perm_flat = o * self.in_features + inv[j]
-        else:
-            self._salient_perm_flat = torch.zeros(0, dtype=torch.int64, device=self.state.device)
-        self._salient_sparse_cache = None
+        self._rebuild_salient_runtime()
         self.v.zero_()
         self.weight_flips.zero_()
         self.update_events.zero_()
