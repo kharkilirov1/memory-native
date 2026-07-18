@@ -37,3 +37,21 @@ Donor: Qwen/Qwen2.5-0.5B, bf16; calib WikiText-2 train 8×[2,128]; sampled layer
 
 Raw: results/solver_v3_consolidated_layerwise.json. Протокол воспроизводим:
 scripts/solver_v3_calib_probe.py (субпроцесс) + scripts/run_solver_v3_consolidated_layerwise.py.
+
+## Follow-through: in-sweep per-group refit (2026-07-19, T4 rerun of the same protocol)
+
+Same donor/calibration/metric; arms rerun on a T4 box (base reproduces: 0.01761 vs 0.01765).
+
+| arm | rel_err | vs v3_base |
+|---|---|---|
+| v3_base | 0.01761 | — |
+| v3_full (itf+align+salient) | 0.01371 | −22.1% |
+| v3_insweep (base + in-sweep refit only) | 0.01438 | −18.4% |
+| **v3_full_insweep** | **0.01331** | **−24.5%** |
+
+The single in-sweep lever recovers the v2 start quality exactly as predicted (0.01438 vs
+the v2 reference 0.01437), and the full chain + in-sweep closes about half of the
+remaining gap to the old finetune-branch chain (0.01371 -> 0.01331 vs 0.01292). The
+recovery runner enables IN_SWEEP_REFIT by default; alternation sweeps stay at fixed
+candidate scales so the post-sweep align refit remains meaningful, and every accepted
+iteration is still guarded by the monotone Hessian gate.

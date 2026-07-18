@@ -14,6 +14,7 @@ from .group_scale_kernels import (
     triton_group_counter_update_from_io,
     triton_group_decode_matmul,
     triton_group_grad_x,
+    zero_packed_codes,
 )
 from .packed import pack_codes, unpack_codes
 
@@ -350,10 +351,12 @@ class PackedGroupScaleCounterLinear(nn.Module):
         # Semi-strict fast path (plan L2): gemm/auto mode on CUDA computes the correlation
         # with one cuBLAS GEMM and hands it to the slim dense kernels. Same SR keys/math as
         # the from-IO kernels; only the O(M) in-kernel dot loops are gone. Salient layers
-        # fall back to the reference path, which re-zeroes the frozen salient codes.
+        # stay on this path too: the kernels tick every code and the frozen salient codes
+        # are re-zeroed in place afterwards -- bit-identical to the reference path, which
+        # also updates everything and then zeroes the salient codes.
         use_dense = (
             not want_triton and HAS_TRITON and x2.is_cuda
-            and _is_power_of_two(self.group) and not self._has_salient()
+            and _is_power_of_two(self.group)
         )
         seed = self._sr_step
         if want_triton and not self._has_salient():
@@ -372,6 +375,9 @@ class PackedGroupScaleCounterLinear(nn.Module):
                 rms_beta=self.rms_beta, rms_eps=self.rms_eps, seed=seed,
                 residual_alpha=self.residual_alpha, clip=self.local_grad_clip,
             )
+            if self._has_salient():
+                zero_packed_codes(self.state, self._salient_perm_flat,
+                                  self.in_features, self.C)
         else:
             # Reference path. Also the salient path: salient entries are FROZEN — the
             # strict kernel has no freeze mask, so their codes are re-zeroed below.
