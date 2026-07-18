@@ -1,0 +1,30 @@
+{
+ "P1": {
+  "clip_engaged_frac": 0.8801419138908386,
+  "mismatch_frac": 0.0,
+  "max_quanta_move": 0.0,
+  "scale_close": true,
+  "v_close": true,
+  "parity_ok": true
+ },
+ "P2": {
+  "fused_clip1_lr008": {
+   "ppl_warm": 117066.68650378246,
+   "ppl_end": 727.5803928181329,
+   "s_per_step": 4.312511127113334,
+   "fused_calls": 25200,
+   "diverged": false,
+   "loss_first": 13.236797332763672,
+   "loss_last": 13.54199504852295
+  },
+  "control_torch_clip1": {
+   "ppl_warm": 117066.68650378246,
+   "ppl_end": 782.2862540466174,
+   "s_per_step": 4.53820246702,
+   "fused_calls": 0,
+   "diverged": false,
+   "loss_first": 13.236797332763672,
+   "loss_last": 13.547479629516602
+  }
+ }
+}

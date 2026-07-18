@@ -1,3 +1,6 @@
+# virtualenvs
+.venv/
+venv/
 # build / install artifacts
 *.egg-info/
 build/
@@ -7,3 +10,4 @@ __pycache__/
 .pytest_cache/
 # downloaded data
 tinyshakespeare.txt
+data/

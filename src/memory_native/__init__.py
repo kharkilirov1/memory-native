@@ -19,7 +19,9 @@ from .counter import (
     encode_state,
     stochastic_round,
     ternary_gradient_unbiased,
+    weight_to_counter_state,
 )
+from .convert import CounterLinearWithBias, SwapReport, swap_linears_to_counter
 from .reversible import ReversibleCouplingBlock, ReversibleSequence, ReversibleSequential
 from .packed import PackedRMSCounterLinear, pack_codes, unpack_codes
 from .slowfast import SlowFastCounterLinear
@@ -32,6 +34,16 @@ from .memory_ffn import CounterMemoryFFN, CounterValueMemory
 from .moe_ffn import CounterMoEFFN
 from .mtp import MultiTokenHead, MTPGPT, mtp_loss, shift_targets
 from .group_counter import GroupCounterLinear
+from .group_scale_counter import GroupScaleCounterLinear
+from .group_scale_packed import PackedGroupScaleCounterLinear
+from .group_scale_kernels import (
+    group_counter_update_from_io_hashsr,
+    group_counter_update_hashsr,
+    group_update_scratch_bytes,
+    triton_group_counter_update_from_io,
+    triton_group_decode_matmul,
+    triton_group_grad_x,
+)
 from .stack_linear import StackCounterLinear
 from .mod import MoDBlock
 from .glm import MNGLM, ReversibleMNGLM, GLMBlock, GLMAttention, RMSNorm
@@ -70,6 +82,10 @@ __all__ = [
     "decode_state",
     "stochastic_round",
     "ternary_gradient_unbiased",
+    "weight_to_counter_state",
+    "swap_linears_to_counter",
+    "SwapReport",
+    "CounterLinearWithBias",
     "ReversibleCouplingBlock",
     "ReversibleSequential",
     "ReversibleSequence",
@@ -86,6 +102,14 @@ __all__ = [
     "mtp_loss",
     "shift_targets",
     "GroupCounterLinear",
+    "GroupScaleCounterLinear",
+    "PackedGroupScaleCounterLinear",
+    "group_counter_update_hashsr",
+    "group_counter_update_from_io_hashsr",
+    "group_update_scratch_bytes",
+    "triton_group_decode_matmul",
+    "triton_group_grad_x",
+    "triton_group_counter_update_from_io",
     "StackCounterLinear",
     "MoDBlock",
     "MNGLM",
@@ -123,3 +147,4 @@ __all__ = [
     "synthetic_corpus",
     "__version__",
 ]
+
