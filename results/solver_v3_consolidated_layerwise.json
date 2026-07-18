@@ -1,0 +1,42 @@
+{
+ "v3_base": {
+  "rel_err": 0.01765,
+  "seconds": 40
+ },
+ "v3_hesscd": {
+  "rel_err": 0.01511,
+  "seconds": 131
+ },
+ "v3_align": {
+  "rel_err": 0.01485,
+  "seconds": 62
+ },
+ "v3_itf": {
+  "rel_err": 0.01457,
+  "seconds": 75
+ },
+ "v3_salient": {
+  "rel_err": 0.01604,
+  "seconds": 47
+ },
+ "v3_full": {
+  "rel_err": 0.01371,
+  "seconds": 86
+ },
+ "v3_full_ri4": {
+  "rel_err": 0.01349,
+  "seconds": 174
+ },
+ "v3_full_ri6": {
+  "rel_err": 0.01344,
+  "seconds": 183
+ },
+ "_denominator": 75613575.37784456,
+ "_config": {
+  "model": "Qwen/Qwen2.5-0.5B",
+  "layers": [0, 23],
+  "seq": 128,
+  "batch": 2,
+  "calib_batches": 8
+ }
+}

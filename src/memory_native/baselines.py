@@ -37,11 +37,10 @@ class TernaryQATLinear(nn.Module):
 
 def make_linear(kind: str, fin: int, fout: int, init_gain: float = 1.0, **counter_kw):
     """Factory used by the GPT harness.
-    kind in {dense, qat, counter, counter_rms, counter_packed, counter_triton, slowfast, group}.
-    'slowfast' (M3) and 'group' (M2) are counter-linear drop-ins: SlowFastCounterLinear folds a
-    low-rank fp residual into the base every K steps (cuts the base correlation 8-32x); the extra
-    rank/merge_every knobs ride in counter_kw. GroupCounterLinear is a 2:4 structured-sparse counter
-    linear (group/keep/hysteresis in counter_kw). Both replace any nn.Linear in the block."""
+
+    Counter kinds include row-scale packed/triton layers, 2:4 ``group``, and solver-v3's
+    ``group_scale`` / ``group_scale_packed`` act-ordered group-scale formats.
+    """
     from .counter import CompactCounterLinear, RMSCounterLinear
     from .packed import PackedRMSCounterLinear
 
@@ -60,6 +59,12 @@ def make_linear(kind: str, fin: int, fout: int, init_gain: float = 1.0, **counte
     if kind == "group":                                     # M2
         from .group_counter import GroupCounterLinear
         return GroupCounterLinear(fin, fout, init_gain=init_gain, **counter_kw)
+    if kind == "group_scale":
+        from .group_scale_counter import GroupScaleCounterLinear
+        return GroupScaleCounterLinear(fin, fout, **counter_kw)
+    if kind in {"group_scale_packed", "group_packed"}:
+        from .group_scale_packed import PackedGroupScaleCounterLinear
+        return PackedGroupScaleCounterLinear(fin, fout, init_gain=init_gain, **counter_kw)
     if kind == "qat":
         return TernaryQATLinear(fin, fout, init_gain)
     if kind == "dense":
