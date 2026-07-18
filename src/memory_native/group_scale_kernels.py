@@ -21,6 +21,7 @@ __all__ = [
     "triton_group_grad_x",
     "triton_group_counter_update_from_io",
     "triton_group_counter_update_dense",
+    "zero_packed_codes",
 ]
 
 
@@ -697,3 +698,45 @@ def triton_group_counter_update_dense(
         state.stride(0), gw.stride(0),
         BLOCK_PG=block_pg,
     )
+
+
+@torch.no_grad()
+def zero_packed_codes(state_packed: torch.Tensor, positions_flat: torch.Tensor,
+                      in_features: int, C: int) -> None:
+    """Set the 6-bit code at the given flat act-order positions (row*in_features + p) to
+    the (t=0, c=0) code, in place, without unpacking the full state.
+
+    Fast salient path: the dense/slim update kernels tick every code; re-zeroing the
+    salient positions afterwards is bit-identical to the reference path, which also
+    updates everything and then zeroes the salient codes. Lane passes run sequentially so
+    read-modify-writes of neighbouring codes sharing a 3-byte pack never race; within one
+    lane pass every (row, pack) pair is unique by construction."""
+    if positions_flat.numel() == 0:
+        return
+    zero_code = (2 * C - 1) + (C - 1)                      # encode(t=0, c=0)
+    pos = positions_flat.to(device=state_packed.device, dtype=torch.long)
+    row = torch.div(pos, in_features, rounding_mode="floor")
+    p = torch.remainder(pos, in_features)
+    base = torch.div(p, 4, rounding_mode="floor") * 3
+    lane = torch.remainder(p, 4)
+    for ln in range(4):
+        m = lane == ln
+        if not bool(m.any()):
+            continue
+        r, b = row[m], base[m]
+        if ln == 0:
+            b0 = state_packed[r, b].to(torch.int32)
+            state_packed[r, b] = ((b0 & 0xC0) | zero_code).to(torch.uint8)
+        elif ln == 1:
+            b0 = state_packed[r, b].to(torch.int32)
+            b1 = state_packed[r, b + 1].to(torch.int32)
+            state_packed[r, b] = ((b0 & 0x3F) | ((zero_code & 0x3) << 6)).to(torch.uint8)
+            state_packed[r, b + 1] = ((b1 & 0xF0) | (zero_code >> 2)).to(torch.uint8)
+        elif ln == 2:
+            b1 = state_packed[r, b + 1].to(torch.int32)
+            b2 = state_packed[r, b + 2].to(torch.int32)
+            state_packed[r, b + 1] = ((b1 & 0x0F) | ((zero_code & 0xF) << 4)).to(torch.uint8)
+            state_packed[r, b + 2] = ((b2 & 0xFC) | (zero_code >> 4)).to(torch.uint8)
+        else:
+            b2 = state_packed[r, b + 2].to(torch.int32)
+            state_packed[r, b + 2] = ((b2 & 0x03) | (zero_code << 2)).to(torch.uint8)

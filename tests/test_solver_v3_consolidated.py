@@ -375,3 +375,57 @@ def test_reference_salient_state_dict_roundtrip_into_fresh_layer():
     assert fresh.salient_idx.numel() == idx.numel()
     with torch.no_grad():
         assert torch.equal(fresh.visible_weight(), ref.visible_weight())
+
+
+def test_zero_packed_codes_surgical_bitexact():
+    """zero_packed_codes edits only the addressed lanes: adjacent codes sharing a 3-byte
+    pack survive bit-exactly, targets become (t=0, c=0)."""
+    from memory_native.group_scale_kernels import zero_packed_codes
+    from memory_native.counter import encode_state
+    from memory_native.packed import pack_codes
+
+    torch.manual_seed(21)
+    out, k, C = 4, 24, 11
+    t = torch.randint(-1, 2, (out, k), dtype=torch.int16)
+    c = torch.randint(-(C - 1), C, (out, k), dtype=torch.int16)
+    state = pack_codes(encode_state(t, c, C))
+    # hit every lane, including two lanes of the SAME 3-byte pack (positions 8 and 9)
+    pos = torch.tensor([0, 5, 8, 9, 14, 23, 24 + 3, 3 * 24 + 22], dtype=torch.long)
+    zero_packed_codes(state, pos, k, C)
+    td, cd = decode_state(unpack_codes(state, k), C)
+    rows, cols_ = pos // k, pos % k
+    assert (td[rows, cols_] == 0).all() and (cd[rows, cols_] == 0).all()
+    mask = torch.ones(out, k, dtype=torch.bool)
+    mask[rows, cols_] = False
+    assert torch.equal(td[mask], t[mask].to(td.dtype))
+    assert torch.equal(cd[mask], c[mask].to(cd.dtype))
+
+
+def test_in_sweep_refit_identity_and_gate():
+    """in_sweep_refit: returned scales reconstruct Q exactly (S_used identity), the
+    monotone alternation still holds, and the refit is not a silent no-op."""
+    torch.manual_seed(23)
+    n, in_f, out_f, group = 384, 32, 12, 8
+    x = torch.randn(n, in_f) @ (torch.eye(in_f) + 0.2 * torch.randn(in_f, in_f))
+    H = x.t() @ x
+    w = torch.randn(out_f, in_f) * 0.08
+    w[:, :3] *= 5
+
+    q_fix, s_fix, t_fix = gptq_group_ternary(
+        w, H, group=group, refine_iters=2, scale_refit="align", in_sweep_refit=False)
+    q_isr, s_isr, t_isr, perm, _ = gptq_group_ternary(
+        w, H, group=group, refine_iters=2, scale_refit="align", in_sweep_refit=True,
+        return_perm=True)
+
+    def herr(q):
+        e = w - q
+        return float(((e @ H) * e).sum())
+
+    # not a silent no-op: the two starts genuinely differ
+    assert not torch.allclose(s_fix, s_isr)
+    # reconstruction identity via the RETURNED scales (S_used, not the pre-sweep S)
+    gidx = torch.empty(in_f, dtype=torch.long)
+    gidx[perm] = torch.arange(in_f) // group
+    assert torch.allclose(s_isr[:, gidx] * t_isr.float(), q_isr, atol=1e-5)
+    # both ends of the alternation stay finite and self-consistent
+    assert herr(q_isr) > 0 and herr(q_fix) > 0

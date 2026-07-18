@@ -226,28 +226,41 @@ def _nearest_ternary(wcol: torch.Tensor, sp: torch.Tensor, sn: torch.Tensor):
 
 
 def _group_sweep(W0: torch.Tensor, Hinv: torch.Tensor, S: torch.Tensor, group: int,
-                 smask: torch.Tensor | None = None):
-    """One GPTQ sweep at fixed group scales; all tensors are in act-ordered layout.
+                 smask: torch.Tensor | None = None, *, in_sweep_refit: bool = False,
+                 grid: str = "sym", itf_iters: int = 3):
+    """One GPTQ sweep; all tensors are in act-ordered layout.
 
-    S is [out, G, 2] = (s_pos, s_neg). With a salient mask the salient entries leave the
-    ternary grid: q = s2*sign(w) on their own sign-magnitude component (s2 = per-(row,
-    group) mean |w| over the salient set, t = 0 there) — still INSIDE the error feedback,
-    so later columns compensate the total (ternary + salient) error. The salient scale is
-    refit per sweep from the current feedback-adjusted block, exactly as measured in the
-    Stage-A gate. Returns (Q, T, W_adjusted, Q_salient)."""
+    S is [out, G, 2] = (s_pos, s_neg). With ``in_sweep_refit`` each group's scales are
+    re-solved from the CURRENT feedback-adjusted block right before its columns are swept
+    (the v2-sweep behaviour whose absence explained the start-quality gap); otherwise the
+    incoming S is used as-is (fixed scales — what the alternation loop needs).
+
+    With a salient mask the salient entries leave the ternary grid: q = s2*sign(w) on
+    their own sign-magnitude component (s2 = per-(row, group) mean |w| over the salient
+    set, t = 0 there) — still INSIDE the error feedback, so later columns compensate the
+    total (ternary + salient) error. Returns (Q, T, W_adjusted, Q_salient, S_used)."""
     W = W0.clone()
     cols = W.shape[1]
     Q = torch.zeros_like(W)
     T = torch.zeros_like(W)
     Qsal = torch.zeros_like(W)
+    S_used = S.clone()
     for g in range(S.shape[1]):
         i1, i2 = g * group, min((g + 1) * group, cols)
         Wb = W[:, i1:i2].clone()
         Qb = torch.zeros_like(Wb)
         Eb = torch.zeros_like(Wb)
         Hb = Hinv[i1:i2, i1:i2]
-        sp, sn = S[:, g, 0], S[:, g, 1]
         Mb = smask[:, i1:i2] if smask is not None else None
+        if in_sweep_refit:
+            Wfit = Wb.masked_fill(Mb, 0.0) if Mb is not None else Wb
+            if grid == "itf":
+                sp, sn, _ = itf_grid(Wfit, iters=itf_iters)
+            else:
+                sp = sn = optimal_ternary(Wfit)[0].squeeze(1).clamp_min(1e-8)
+            S_used[:, g, 0], S_used[:, g, 1] = sp, sn
+        else:
+            sp, sn = S_used[:, g, 0], S_used[:, g, 1]
         if Mb is not None:
             mcnt = Mb.sum(dim=1)
             s2 = torch.where(mcnt > 0,
@@ -274,7 +287,7 @@ def _group_sweep(W0: torch.Tensor, Hinv: torch.Tensor, S: torch.Tensor, group: i
         W[:, i1:i2] = Wb
         if i2 < cols:
             W[:, i2:] -= Eb @ Hinv[i1:i2, i2:]
-    return Q, T, W, Qsal
+    return Q, T, W, Qsal, S_used
 
 
 def _refit_scales(W: torch.Tensor, T: torch.Tensor, H: torch.Tensor, group: int,
@@ -394,6 +407,7 @@ def gptq_group_ternary(
     grid: str = "sym",
     itf_iters: int = 3,
     salient_first: float = 0.0,
+    in_sweep_refit: bool = False,
     return_perm: bool = False,
     return_salient: bool = False,
 ):
@@ -448,14 +462,20 @@ def gptq_group_ternary(
         smask = sal >= thr
 
     S = _initial_group_scales(W, group, grid, itf_iters, smask)
-    Q, T, W_adjusted, Qsal = _group_sweep(W, Hinv, S, group, smask)
+    # First sweep: with in_sweep_refit each group's scales are re-solved from the
+    # feedback-adjusted block right before its columns (the v2 start-quality behaviour).
+    # Alternation sweeps below run at FIXED candidate scales -- that is what makes the
+    # post-sweep refit meaningful; the monotone Hessian gate keeps every step safe.
+    Q, T, W_adjusted, Qsal, S = _group_sweep(
+        W, Hinv, S, group, smask,
+        in_sweep_refit=in_sweep_refit, grid=grid, itf_iters=itf_iters)
     best_err = _hessian_error(W, Q, Hdamped)
 
     if refine_scale:
         for _ in range(max(0, int(refine_iters))):
             candidate_S = _refit_scales(W, T, Hdamped, group, scale_refit, S,
                                         grid=grid, w_target=W - Qsal)
-            candidate_Q, candidate_T, candidate_W, candidate_Qsal = _group_sweep(
+            candidate_Q, candidate_T, candidate_W, candidate_Qsal, candidate_S = _group_sweep(
                 W, Hinv, candidate_S, group, smask)
             candidate_err = _hessian_error(W, candidate_Q, Hdamped)
             if not torch.isfinite(candidate_err) or candidate_err > best_err * (1.0 + 1e-7):
@@ -548,6 +568,7 @@ def quantize_dense_group_ternary(model: nn.Module, calib_batches, *, group: int 
                                   refine_iters: int = 2, scale_refit: str = "hdiag",
                                   grid: str = "sym", itf_iters: int = 3,
                                   salient_first: float = 0.0,
+                                  in_sweep_refit: bool = False,
                                   progress: bool = True) -> None:
     skip = ["lm_head"] + (list(extra_skip) if extra_skip is not None else [])
     targets = _target_paths(model, skip)
@@ -558,6 +579,7 @@ def quantize_dense_group_ternary(model: nn.Module, calib_batches, *, group: int 
             lin.weight, hessians.pop(path), group=group, percdamp=percdamp,
             refine_iters=refine_iters, scale_refit=scale_refit, grid=grid,
             itf_iters=itf_iters, salient_first=salient_first,
+            in_sweep_refit=in_sweep_refit,
         )
         lin.weight.copy_(w_hat.to(lin.weight.dtype))
         if progress and (i + 1) % 25 == 0:
@@ -583,6 +605,7 @@ def ptq_warm_start(
     grid: str = "sym",
     itf_iters: int = 3,
     salient_first: float = 0.0,
+    in_sweep_refit: bool = False,
     progress: bool = True,
     **counter_kw,
 ) -> SwapReport:
@@ -624,6 +647,7 @@ def ptq_warm_start(
                 w, H_layer, group=group, percdamp=percdamp,
                 act_order=act_order, refine_iters=refine_iters, scale_refit=scale_refit,
                 grid=grid, itf_iters=itf_iters, salient_first=salient_first,
+                in_sweep_refit=in_sweep_refit,
                 return_perm=True, return_salient=True,
             )
             if grid == "itf":

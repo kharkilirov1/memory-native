@@ -46,6 +46,11 @@ ARM_KW = {
     "v3_itf": dict(grid="itf", scale_refit="align"),
     "v3_salient": dict(salient_first=SALIENT),
     "v3_full": dict(grid="itf", scale_refit="align", salient_first=SALIENT),
+    # in-sweep per-group refit: scales re-solved from the feedback-adjusted block inside
+    # the first sweep (the v2 start-quality behaviour the base cycle lacked).
+    "v3_insweep": dict(in_sweep_refit=True),
+    "v3_full_insweep": dict(grid="itf", scale_refit="align", salient_first=SALIENT,
+                            in_sweep_refit=True),
 }
 
 den = sum(float((W[p] @ H[p] * W[p]).sum()) for p in targets)

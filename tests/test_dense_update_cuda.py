@@ -70,3 +70,47 @@ def test_gemm_layer_on_cuda_uses_dense_update_and_learns():
     assert not torch.equal(layer.state, before) or not torch.allclose(
         layer.scale, torch.full_like(layer.scale, 0.1)
     )
+
+
+def test_dense_update_with_salient_matches_reference_and_freezes():
+    """Fast salient path: gemm/dense update + post re-zero must match the reference path
+    (which updates everything then zeroes salient codes) within the known SR-boundary
+    tolerance, and salient codes must stay (0,0)."""
+    from memory_native.group_scale_packed import PackedGroupScaleCounterLinear
+
+    torch.manual_seed(31)
+    k, out, group, C = 64, 12, 32, 11
+    perm = torch.randperm(k)
+    t = torch.randint(-1, 2, (out, k), dtype=torch.int16)
+    c = torch.zeros_like(t)
+    scale = torch.rand(out, k // group) * 0.15 + 0.05
+    idx = torch.tensor([3, 40, 77, 130, 400], dtype=torch.int32)
+    val = torch.tensor([0.6, -0.5, 0.8, -0.9, 0.4], dtype=torch.float16)
+
+    fast = PackedGroupScaleCounterLinear(
+        k, out, group=group, C=C, lr=2e-3, lr_scale=2e-4, local_grad_clip=1.0,
+        perm=perm, kernel_mode="gemm").cuda()
+    ref = PackedGroupScaleCounterLinear(
+        k, out, group=group, C=C, lr=2e-3, lr_scale=2e-4, local_grad_clip=1.0,
+        perm=perm, kernel_mode="torch").cuda()
+    for layer in (fast, ref):
+        layer.load_group_state(scale, t, c, perm, salient_idx=idx, salient_val=val)
+
+    x = torch.randn(16, k, device="cuda")
+    go = torch.randn(16, out, device="cuda")
+    fast._update_from_io(x, go)
+    ref._update_from_io(x, go)
+
+    ft, fc = decode_state(unpack_codes(fast.state, k), C)
+    rt, rc = decode_state(unpack_codes(ref.state, k), C)
+    different = (fast.state != ref.state).float().mean().item()
+    latent = ((ft.float() + fc.float() / C) - (rt.float() + rc.float() / C)).abs().max().item()
+    assert different < 5e-3, different
+    assert latent <= 1.0 / C + 1e-6, latent
+    assert torch.allclose(fast.scale, ref.scale, atol=2e-4, rtol=2e-4)
+    # salient codes frozen at (0,0) on BOTH paths
+    inv = torch.argsort(perm)
+    o, j = idx.long() // k, idx.long() % k
+    pf = o * k + inv[j]
+    flat_t, flat_c = ft.reshape(-1).cpu(), fc.reshape(-1).cpu()
+    assert (flat_t[pf] == 0).all() and (flat_c[pf] == 0).all()
