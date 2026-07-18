@@ -24,11 +24,17 @@ import numpy as np
 
 MODEL = "Qwen/Qwen2.5-1.5B"
 # (domain, train share, dataset, load kwargs, text field)
+# v2 mix: domain coverage IS ability coverage (measured). FineMath-4+ replaces OpenWebMath
+# (stronger per-token, HF SmolLM2 ablations); peS2o adds the science register; smoltalk
+# (field "messages" -> rendered through the donor's chat template) keeps instruct-tuned
+# donors in distribution -- KD on raw web text alone drifts an instruct model's register.
 SOURCES = [
-    ("en",   0.55, "HuggingFaceFW/fineweb-edu",    dict(name="sample-10BT", split="train"), "text"),
-    ("ru",   0.25, "HuggingFaceFW/fineweb-2",      dict(name="rus_Cyrl", split="train"),    "text"),
-    ("code", 0.15, "codeparrot/codeparrot-clean",  dict(split="train"),                     "content"),
-    ("math", 0.05, "open-web-math/open-web-math",  dict(split="train"),                     "text"),
+    ("en",       0.45, "HuggingFaceFW/fineweb-edu",   dict(name="sample-10BT", split="train"),      "text"),
+    ("ru",       0.20, "HuggingFaceFW/fineweb-2",     dict(name="rus_Cyrl", split="train"),         "text"),
+    ("code",     0.15, "codeparrot/codeparrot-clean", dict(split="train"),                          "content"),
+    ("math",     0.10, "HuggingFaceTB/finemath",      dict(name="finemath-4plus", split="train"),   "text"),
+    ("science",  0.05, "HuggingFaceTB/smollm-corpus", dict(name="cosmopedia-v2", split="train"),    "text"),
+    ("instruct", 0.05, "HuggingFaceTB/smoltalk",      dict(name="all", split="train"),              "messages"),
 ]
 BATCH_DOCS = 64          # tokenizer batch (fast tokenizer parallelizes inside)
 MAX_DOC_CHARS = 60_000   # clip pathological documents; keeps the stream diverse
@@ -40,10 +46,18 @@ def build_domain(tokenizer, eos: int, name: str, dataset: str, load_kw: dict, fi
     ds = load_dataset(dataset, streaming=True, **load_kw)
     it = iter(ds)
 
+    def extract(row) -> str:
+        if field == "messages":                  # chat data: render through the donor template
+            try:
+                return tokenizer.apply_chat_template(row["messages"], tokenize=False)
+            except Exception:
+                return ""
+        return row.get(field) or ""
+
     def token_batches():
         buf = []
         for row in it:
-            text = row.get(field) or ""
+            text = extract(row)
             if len(text) < 200:                  # skip near-empty docs
                 continue
             buf.append(text[:MAX_DOC_CHARS])
