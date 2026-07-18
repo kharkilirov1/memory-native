@@ -64,7 +64,9 @@ for mode in MODES:
     elif mode.startswith("group128"):     # "group128" (v1 recorded) / "group128v2" (act-order+refit)
         quantize_dense_group_ternary(student, calib, group=128)   # dense probe, no counter
     else:
-        ptq_warm_start(student, calib if mode == "gptq" else [], mode=mode, kind=KIND,
+        # calib goes to every mode: gptq/gptq_group collect Hessians from it, optimal
+        # ignores it — the old `if mode == "gptq"` gate silently starved group modes.
+        ptq_warm_start(student, calib, mode=mode, kind=KIND,
                        lr=0.008, local_grad_clip=1.0, cache_mode="int8")
     student.eval()
     ppl = {f"ppl_{n}": perplexity(student, b) for n, b in val.items()}

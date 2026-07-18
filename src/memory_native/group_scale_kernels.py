@@ -505,13 +505,14 @@ def triton_group_counter_update_from_io(
     update. The correlation is recomputed in the last launch; this trades FLOPs for bounded memory
     and avoids the giant one-row program used by the original strict kernel at Qwen FFN widths.
     """
-    if not HAS_TRITON:
-        raise RuntimeError("triton not available")
+    # Contract check first: the rejection must fire on any machine, with or without Triton.
     if group & (group - 1):
         raise ValueError(
             "strict Triton group update requires a power-of-two group size; "
             "use group=32/64/128/256 or the torch reference path"
         )
+    if not HAS_TRITON:
+        raise RuntimeError("triton not available")
     x2 = x.reshape(-1, x.shape[-1]).contiguous()
     go2 = grad_out.reshape(-1, grad_out.shape[-1]).contiguous()
     state = state_packed_perm
