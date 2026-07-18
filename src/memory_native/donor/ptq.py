@@ -398,7 +398,7 @@ def gptq_group_ternary(
     return_salient: bool = False,
 ):
     """Group-scale GPTQ v3, consolidated: the agent v3 refine cycle plus the measured
-    Stage-A solver ingredients (kimi/solver-v3-stage-a), defaults unchanged.
+    Stage-A solver ingredients (Stage-A pass), defaults unchanged.
 
     Base cycle: act-order, one sweep at fixed per-(row, group) scales, then refine_iters
     rounds of scale refit -> full re-sweep, keeping the best by measured Hessian error.

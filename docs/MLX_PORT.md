@@ -23,7 +23,7 @@ training state. That is "fine-tune on the laptop you own" territory, which is th
 
 The fine-tuning entry path already exists on the other branches: the PTQ warm-start
 (GPTQ-ternary import) and behavior-recovery pipeline on
-`claude/finetune-pretrained-model-fwyuun` / `agent/solver-v3-group-recovery` produces
+the recovery/solver work in this repo produces
 counter-format models from pretrained checkpoints. Because the MLX port shares the exact
 state encoding and packing, those models cross over losslessly (see *Interop* below): PTQ
 on any box with a GPU, recover/fine-tune on the MacBook.

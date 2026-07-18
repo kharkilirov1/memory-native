@@ -2,8 +2,6 @@
 
 Date: 2026-07-15
 
-Branch: `agent/solver-v3-group-recovery`
-Base: `claude/finetune-pretrained-model-fwyuun`
 
 ## Scope
 

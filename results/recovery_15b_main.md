@@ -26,7 +26,7 @@ is above zero mathematically but below the noise floor.
 
 ## FORECAST MISS (recorded as-is, per protocol; no retroactive rewrite)
 
-Claude predicted, twice, "final PPL to low-tens/single-digit, near the fp baseline." **Did NOT
+The pre-run forecast said, twice, "final PPL to low-tens/single-digit, near the fp baseline." **Did NOT
 happen.** The run plateaued at EN ~87 / RU ~46 / code ~19 / math ~65. Both misses came from
 extrapolating a power-law tail; both times the system LEFT the power-law regime earlier. Early
 phase was data-bound (why 150M easily beat the 12M pilot); the run then hit a different wall.
@@ -56,7 +56,7 @@ Tail experiment: resume final checkpoint, decay counter lr 0.008 -> 0.002 -> 0.0
 ~3000 steps, telemetry on.
 
 - **User's bet:** LR-floor dominates; decay removes 30-50% off the shelf; won't reach the teacher.
-- **Claude's bet:** LR-floor dominant too, but (a) magnitude more conservative, ~15-30% off the
+- **The competing bet:** LR-floor dominant too, but (a) magnitude more conservative, ~15-30% off the
   shelf, mostly delivered by the 0.002 rung (EN ~68, RU ~37, code ~16, math ~52), NOT reaching
   fp; (b) DISTINCTIVE: the 0.0005 rung will FREEZE flips (flip_rate -> ~0) while counter_edge
   stays moderate -> its flatline is the sub-quantum artifact, not OPEN 1 -- so a naive reader
@@ -87,17 +87,17 @@ Ran run_tail from the step-36622 checkpoint, counter lr 0.008 -> 0.002 -> 0.0005
   code 17->14.6, math 58->54). A proper long cosine (0.008 -> ~1e-4, tens of k steps) would push
   further -- the user's 30-50% is plausible for a real schedule, not this crude ladder.
 
-## OWNED: telemetry bug + wrong distinctive prediction (Claude)
+## OWNED: telemetry bug + wrong distinctive prediction
 
 1. **flip_rate telemetry was DEAD on the CUDA fused path.** weight_flips is never incremented by
-   the Triton kernel (documented in CLAUDE.md; missed when building run_tail), so flip_rate read
+   the Triton kernel (documented in the project notes; missed when building run_tail), so flip_rate read
    0.0000 at ALL rungs including 0.008 where weights obviously moved. The distinctive-prediction
    instrument was broken. FIXED: telemetry now measures the true flip fraction by diffing decoded
    ternary state t across the interval (validated: catches a forced 0.65 state change, 0 false
    positives, on both counter_rms and counter_packed).
-2. **Claude's "0.0005 freezes flips (sub-quantum)" prediction is REFUTED** by the working channel:
+2. **The "0.0005 freezes flips (sub-quantum)" prediction is REFUTED** by the working channel:
    PPL kept dropping at 0.0005 (78.5->75.4), so weights kept updating -- no hard freeze. The user
-   read the tail better ("decay keeps helping"); Claude was closer on the magnitude range but wrong
+   read the tail better ("decay keeps helping"); the other read was closer on the magnitude range but wrong
    on the mechanism. Net on the differentiator: draw leaning user.
 
 ## NEXT (clean experiment, now instrumented correctly)
@@ -128,12 +128,12 @@ Resumed the plateau checkpoint (EN 84.3), single cosine decay over 20000 steps.
 - Accumulator ceiling (OPEN 1): **refuted** -- counter_edge flat at 0.081-0.082 across all 20k.
 
 **Forecast scoring (owned):**
-- Claude predicted EN 58-65 / RU 28-33 / code 11-13 / math 42-48 (~30-40% off plateau). Actual:
+- The forecast said EN 58-65 / RU 28-33 / code 11-13 / math 42-48 (~30-40% off plateau). Actual:
   72/35/12.8/49 (~19%). Only code hit; EN/RU/math all worse than predicted -> OVERSHOT. This is
-  Claude's SECOND consecutive optimism overshoot on LR-decay magnitude (stepped tail: predicted
-  15-30%, got 12%). Stable bias: the counter-format floor is HIGHER than Claude keeps predicting.
-- Sub-quantum: the fixed telemetry VINDICATES Claude's ORIGINAL (stepped-tail) prediction that
-  low lr freezes flips -- which Claude wrongly RETRACTED after the dead telemetry read 0. flip_rate
+  the SECOND consecutive optimism overshoot on LR-decay magnitude (stepped tail: predicted
+  15-30%, got 12%). Stable bias: the counter-format floor is HIGHER than the forecasts keep saying.
+- Sub-quantum: the fixed telemetry VINDICATES the ORIGINAL (stepped-tail) prediction that
+  low lr freezes flips -- which was wrongly RETRACTED after the dead telemetry read 0. flip_rate
   0.192->0.004 proves the freeze is real and gradual. The retraction was the error.
 
 **Real next lever: MORE DATA, not more schedule.** At step 20000 PPL had nearly flattened
@@ -194,7 +194,7 @@ the same floor faster?
   a group-scale training format is NOT justified by this evidence. Recovery training remains
   the essential ingredient at 1.5B; PTQ (best: group128/gptq) is a warm-start booster only.
 - Forecast scoring (owned): predicted EN 30-120; actual 5,639 -- FOURTH consecutive optimism
-  overshoot (x47 this time). The systematic bias is now unmistakable: Claude's absolute-PPL
+  overshoot (x47 this time). The systematic bias is now unmistakable: the absolute-PPL
   forecasts for PTQ-only quality run 3-50x optimistic. Future PTQ forecasts should be
   multiplied by ~10x pessimism, or better: predict only ORDERINGS and ratios (those were
   correct all four times), not absolutes.

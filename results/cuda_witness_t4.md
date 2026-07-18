@@ -1,7 +1,7 @@
 # CUDA witness on Kaggle T4 (2026-07-11)
 
 Kernel: `lirovkharki/mn-cuda-perf-witness` v2 (private), code = branch
-`claude/finetune-pretrained-model-fwyuun` @ `9cc4e1a` embedded as tarball.
+code @ `9cc4e1a` embedded as tarball.
 Raw numbers: `results/cuda_witness_t4.json`. One T4, torch 2.10.0+cu128, triton 3.6.0.
 
 ## A. Components (Qwen2.5-0.5B MLP shape 896->4864, M=4096)
