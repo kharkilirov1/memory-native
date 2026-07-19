@@ -99,9 +99,11 @@ trajectory, fp-tail-only (v3f) vs live counters (v3f2):
 | 4800 | 47.98 | 35.29 | 0.0009 | 0.0303 |
 | 6000 | 47.39 | **34.41** | -- | -- |
 
-Final strict: EN **34.41** / RU 50.34 / code 7.44 / math 15.50 / science 20.02;
+Final strict: EN **34.41** / RU 30.34 / code 7.44 / math 15.50 / science 20.02;
 metric 2.8469 vs 3.2514. World 1 confirmed: the counter channel cuts strict EN by a
-further 27% (science -44%), teacher gap 4.1x -> 3.0x, at identical cost (~35 min G4).
+further 27% (RU -54%: 65.85 -> 30.34, science -44%), teacher gap 4.1x -> 3.0x, at
+identical cost (~35 min G4). The v3f "RU regressed" reading applied only to the
+fp-tail-only system; with live counters RU is the largest single-domain win.
 
 Mechanics vs the frozen forecast: every prediction held except one refinement -- the
 flip peak (0.0046) landed in the SOFT phase (steps 1600-2000, tracking the counter-lr
@@ -111,3 +113,37 @@ ran strict-WORSE than fp-tail-only (peak 85.5 vs 68.6 at 2400) before the anneal
 hand-off overtook at ~step 4000: stopping at 2400 would have "proven" counters hurt --
 the homotopy arc pays for itself only at the end. This dip-then-overtake shape is now
 the method's documented signature.
+
+### v3f2 benchmark retention (same protocol: lm-eval, 500 samples/task, acc_norm)
+
+| task | v3f student | v3f2 student | teacher | v3f ret | v3f2 ret |
+|---|---:|---:|---:|---:|---:|
+| arc_easy | 0.440 | 0.440 | 0.710 | 62.0% | 62.0% |
+| arc_challenge | 0.230 | **0.262** | 0.432 | 53.2% | **60.6%** |
+| hellaswag | 0.428 | 0.396 | 0.600 | 71.3% | 66.0% |
+| winogrande | 0.536 | 0.526 | 0.656 | 81.7% | 80.2% |
+| piqa | 0.612 | 0.612 | 0.776 | 78.9% | 78.9% |
+| **average** | | | | **70.8%** | **70.4%** |
+
+Teacher numbers reproduced bit-identically across both runs (sanity held). Honest
+reading: the large strict-PPL win (metric -12%, EN -27%, RU -54%) did NOT move average
+choice-accuracy retention (70.8 -> 70.4, within noise at n=500, se ~2.2%/task). The one
+predicted shift did appear: arc_challenge (deep reasoning, the worst-degraded task)
+rose 0.230 -> 0.262 (53.2% -> 60.6%), matching the frozen world-1 forecast line
+"arc_challenge retention pulls above v3f's 53%" -- but at ~1.5 sigma it is suggestive,
+not conclusive. Takeaway: at 1.5B/6000 steps the counter channel buys likelihood
+quality; converting that into benchmark accuracy is what the scale-up levers (longer
+run, 7B donor) are for.
+
+**Incident 3 (post-run, recovered).** After the v3f2 numbers were logged, the Colab
+kernel died in idle; the Drive FUSE daemon died with it and a re-mount silently
+produced a LOCAL stub directory while claiming "Mounted" (mount table empty, no drivefs
+process -- the tell). A relaunch against the stub found no checkpoint and started
+re-solving from scratch; caught and interrupted before any state was overwritten. After
+a real force_remount, the true Drive contents were intact: latest+best checkpoints
+(2.5 GB each) and the full jsonl had synced before the crash. Resume from the Drive
+checkpoint reproduced the final eval bit-exactly (EN 34.41 / RU 30.34 / code 7.44 /
+math 15.50) -- the witness that retention below was measured on the real v3f2 final
+model. Lessons: (a) "Mounted at /content/drive" is not evidence -- verify with the
+mount table or a known file; (b) a fresh execution counter ([1]) on a notebook that
+had run for hours means the kernel was replaced; check the ipykernel PID in tracebacks.
