@@ -28,9 +28,14 @@ KD(T=2) + 0.3 CE + 0.05 feature KD, fp tail AdamW 1e-4 -> 1e-5. 6000 steps at B8
 - vs previous best floor: EN 71.9 -> 47.4, code 12.8 -> 9.1, math 48.8 -> 17.5.
   RU regressed (35.3 -> 65.9): mix share cut to 20% + only 6000 steps — the known lever
   for the next run, not a mystery.
-- flip_alt stayed 0.0000 for all 6000 steps: the solver's ternary support never changed.
-  ALL recovery went through group scales + fp tail + the homotopy hand-off from the
-  residual channel. The counter-lr window (low start per the LR study) was exactly right.
+- flip_alt stayed 0.0000 for all 6000 steps. RESOLVED post-hoc (incident 2 below): the
+  counter self-update path never engaged — this run trained the FP TAIL ONLY. The frozen
+  edge=0.0210 (constant to 4 decimals) was correctly read as the signature of a
+  non-updating variable, not of a converged one. Consequences: (a) every number in this
+  file is a LOWER BOUND for the method — EN 74.6 -> 47.4 was achieved by norms/biases/
+  embeddings alone on top of the solver state; (b) the "solver sets the skeleton" and
+  "the LR window was right" readings from the first draft of this report are RETRACTED
+  as unsupported; the counters/scales channel has not been measured at all yet.
 
 ## Benchmark retention (lm-eval, 500 samples/task, acc_norm where defined)
 
@@ -52,7 +57,21 @@ cheap on this hardware), an RU/data rebalance, larger C, and a 7B-class donor.
 
 ## Session incident log (kept honest)
 
-The first launch of this run produced warm PPL ~1.3M: the salient channel stored
+**Incident 2 (caught by review of this very report): the counter path never trained.**
+The v3 runner lost the `student.train()` call during the consolidation rewrite;
+`from_pretrained` returns the model in eval mode and `evaluate_at_alpha` faithfully
+RESTORES eval, so all 6000 steps ran with training=False. In eval mode the packed
+counter layer takes the plain matmul branch (no autograd.Function), so `_update_from_io`
+was never called: counters AND group scales were frozen; only the fp tail learned via
+ordinary autograd. Every observation matched and none was investigated hard enough at
+the time: flip_alt = 0.0000 (rationalized as sub-quantum physics), edge frozen to 4
+decimals, sr_step = 0 in the live diagnostics, rel_a0 = 0.524 unchanged. The reviewer's
+argument — "a constant edge is the handwriting of a variable that is not being updated" —
+identified it before the code did. Fixes: `student.train()` before the loop, plus an
+engagement guard (RuntimeError if max(sr_step) == 0 after the first logging window).
+Lesson recorded: a green loss curve is not evidence that the intended path ran.
+
+**Incident 1.** The first launch of this run produced warm PPL ~1.3M: the salient channel stored
 s2*sign(w) of the feedback-ADJUSTED block, which act-order tail inflation amplified
 catastrophically on real 1.5B layers (tiny/0.5B gates never triggered it). Diagnosed
 live (teacher-on-corpus check -> layer stats -> solver ablation), fixed in bb0005a
