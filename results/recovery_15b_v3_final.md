@@ -81,3 +81,33 @@ misleading gate metric; the H-weighted output error is the one that tracks reali
 
 Checkpoints (latest + best) and the full eval log: Drive mn_recovery_v3f;
 corpus tarball: Drive mn_corpus_v2.tar.gz.
+
+
+## v3f2 — the counter channel measured (train-mode fix in, same config otherwise)
+
+Gate-0 passed bit-exact (warm identical to v3f to the last decimal). Full strict-EN
+trajectory, fp-tail-only (v3f) vs live counters (v3f2):
+
+| step | v3f | v3f2 | flip_alt | edge |
+|---:|---:|---:|---:|---:|
+| 0 | 74.55 | 74.55 | -- | -- |
+| 400 | 69.34 | 64.77 | 0.0021 | 0.0161 |
+| 1600 | 71.10 | 82.24 | 0.0046 | 0.0241 |
+| 2400 | 68.59 | 85.54 | 0.0040 | 0.0265 |
+| 3600 | 53.59 | 55.01 | 0.0023 | 0.0290 |
+| 4000 | 50.25 | 44.02 | 0.0018 | 0.0297 |
+| 4800 | 47.98 | 35.29 | 0.0009 | 0.0303 |
+| 6000 | 47.39 | **34.41** | -- | -- |
+
+Final strict: EN **34.41** / RU 50.34 / code 7.44 / math 15.50 / science 20.02;
+metric 2.8469 vs 3.2514. World 1 confirmed: the counter channel cuts strict EN by a
+further 27% (science -44%), teacher gap 4.1x -> 3.0x, at identical cost (~35 min G4).
+
+Mechanics vs the frozen forecast: every prediction held except one refinement -- the
+flip peak (0.0046) landed in the SOFT phase (steps 1600-2000, tracking the counter-lr
+maximum), not in the anneal tail; anneal-phase flips decay with the cosine LR. edge rose
+monotonically 0.016 -> 0.030 (directed pressure filling the counters). The soft phase
+ran strict-WORSE than fp-tail-only (peak 85.5 vs 68.6 at 2400) before the anneal
+hand-off overtook at ~step 4000: stopping at 2400 would have "proven" counters hurt --
+the homotopy arc pays for itself only at the end. This dip-then-overtake shape is now
+the method's documented signature.
