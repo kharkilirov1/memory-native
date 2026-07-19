@@ -317,6 +317,11 @@ if start_step >= STEPS:
     log.close()
     raise SystemExit(0)
 
+# from_pretrained returns the model in eval mode; counter layers only route through their
+# self-updating autograd path when training. Without this line the whole run trains ONLY
+# the fp tail (measured: the silent-eval run still reached EN 47.4 -- see results).
+student.train()
+
 t_last = time.perf_counter()
 for step in range(start_step, STEPS):
     progress = step / max(STEPS - 1, 1)
@@ -352,6 +357,16 @@ for step in range(start_step, STEPS):
         dt = (time.perf_counter() - t_last) / LOG_EVERY
         t_last = time.perf_counter()
         telemetry = observe_counter_telemetry(packed_group_layers)
+        # Engagement guard: a green loss curve does NOT prove the counter path ran.
+        # sr_step increments once per counter update; if it is still zero after a full
+        # logging window, the self-update path never engaged (e.g. model left in eval).
+        if packed_group_layers and step + 1 - start_step >= LOG_EVERY:
+            if max(int(m.sr_step) for m in packed_group_layers) == 0:
+                raise RuntimeError(
+                    "counter layers received ZERO updates after "
+                    f"{step + 1 - start_step} steps -- the self-update path is not "
+                    "engaged (is the model in train mode?)"
+                )
         print(
             f"step {step+1:5d}/{STEPS} loss={float(loss.detach()):.3f} "
             f"kd={float(logit_kd.detach()):.3f} feat={float(feat_kd.detach()):.3f} "
