@@ -525,6 +525,28 @@ def _target_paths(model: nn.Module, skip) -> list[str]:
     return out
 
 
+def _hessian_chunks(model: nn.Module, targets: list[str], budget_bytes: int) -> list[list[str]]:
+    """Greedy-split targets so each chunk's fp32 Hessians fit the GPU budget.
+
+    Large donors overflow VRAM if every H (in_features^2 fp32) is resident at once --
+    e.g. gemma-4-12B needs ~64 GiB of Hessians alone (48 down_proj at 15360^2). Chunked
+    collection re-runs the calibration forward once per chunk and offloads each chunk to
+    CPU; the solve loop moves one layer's H back to the weight device at a time."""
+    chunks: list[list[str]] = []
+    cur: list[str] = []
+    size = 0
+    for path in targets:
+        need = model.get_submodule(path).in_features ** 2 * 4
+        if cur and size + need > budget_bytes:
+            chunks.append(cur)
+            cur, size = [], 0
+        cur.append(path)
+        size += need
+    if cur:
+        chunks.append(cur)
+    return chunks
+
+
 def _parent_and_name(model: nn.Module, path: str):
     if "." not in path:
         return model, path
@@ -604,6 +626,7 @@ def ptq_warm_start(
     itf_iters: int = 3,
     salient_first: float = 0.0,
     in_sweep_refit: bool = False,
+    hessian_gpu_budget_gib: float = 24.0,
     progress: bool = True,
     **counter_kw,
 ) -> SwapReport:
@@ -632,15 +655,28 @@ def ptq_warm_start(
         # Group-only controls must not leak into the legacy counter path.
         for key in ("residual_alpha", "kernel_mode", "strict_update", "flip_sample_size"):
             counter_kw.pop(key, None)
-    hessians = (
-        collect_hessians(model, targets, calib_batches)
-        if mode.startswith("gptq") or is_group else {}
-    )
+    hessians: dict[str, torch.Tensor] = {}
+    if mode.startswith("gptq") or is_group:
+        chunks = _hessian_chunks(model, targets, int(hessian_gpu_budget_gib * 2**30))
+        if len(chunks) == 1:
+            hessians = collect_hessians(model, targets, calib_batches)
+        else:
+            # Each chunk re-runs the calibration forwards; Hessians park on CPU and the
+            # solve loop below moves them back one layer at a time.
+            if progress:
+                print(f"[ptq:{mode}] hessians in {len(chunks)} chunks "
+                      f"(budget {hessian_gpu_budget_gib:g} GiB)", flush=True)
+            for chunk in chunks:
+                part = collect_hessians(model, chunk, calib_batches)
+                hessians.update({k: v.cpu() for k, v in part.items()})
+                del part
+                if device is not None and device.type == "cuda":
+                    torch.cuda.empty_cache()
     states: dict[str, tuple] = {}
     for i, path in enumerate(targets):
         w = model.get_submodule(path).weight
         if is_group:
-            H_layer = hessians.pop(path)
+            H_layer = hessians.pop(path).to(w.device)
             _, S, t, perm, Wadj, (salient_idx, salient_val) = gptq_group_ternary(
                 w, H_layer, group=group, percdamp=percdamp,
                 act_order=act_order, refine_iters=refine_iters, scale_refit=scale_refit,
@@ -672,7 +708,7 @@ def ptq_warm_start(
                             salient_idx.cpu(), salient_val.cpu())
         elif mode == "gptq":
             s, t, c = gptq_ternary(
-                w, hessians.pop(path), C=C, blocksize=blocksize,
+                w, hessians.pop(path).to(w.device), C=C, blocksize=blocksize,
                 percdamp=percdamp, act_order=act_order,
             )
             states[path] = (s.cpu(), t.cpu(), c.cpu())
