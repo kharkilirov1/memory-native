@@ -184,12 +184,50 @@ print(
 tokenizer = AutoTokenizer.from_pretrained(MODEL)
 mix = DomainMix(DATA_DIR, seq=SEQ, batch=BATCH, seed=SEED)
 val = mix.val_batches(dev)
-teacher = AutoModelForCausalLM.from_pretrained(
-    MODEL, torch_dtype=dtype, attn_implementation="sdpa"
-).to(dev).eval()
-student = AutoModelForCausalLM.from_pretrained(
-    MODEL, torch_dtype=dtype, attn_implementation="sdpa"
-).to(dev)
+
+
+def _load_donor(name):
+    # Dense text donors load as CausalLM; multimodal donors with a plain dense text
+    # decoder only expose a multimodal/image-text class (Gemma4Unified ->
+    # AutoModelForMultimodalLM in transformers v5; Mistral3 -> AutoModelForImageTextToText).
+    # Text-only batches never touch the vision/audio path.
+    kw = dict(torch_dtype=dtype, attn_implementation="sdpa")
+    try:
+        return AutoModelForCausalLM.from_pretrained(name, **kw)
+    except ValueError:
+        pass
+    try:
+        from transformers import AutoModelForMultimodalLM
+        return AutoModelForMultimodalLM.from_pretrained(name, **kw)
+    except (ImportError, ValueError):
+        from transformers import AutoModelForImageTextToText
+        return AutoModelForImageTextToText.from_pretrained(name, **kw)
+
+
+# Vision/audio/projector modules stay fp AND frozen: they see no gradients from text-only
+# KD, and the counter swap + solver must not touch them. Substring blacklist (all three
+# swap/solve/restore scanners match by substring); none of these occur in the language
+# decoder paths of Qwen2/Mistral3/Gemma4 (model...layers.N.self_attn|mlp.*_proj).
+VISION_SKIP = [
+    "vision", "audio", "mm_", "multi_modal", "projector", "patch", "soft_emb", "per_layer",
+]
+EXTRA_SKIP = [s for s in os.environ.get("EXTRA_SKIP", "").split(",") if s] + VISION_SKIP
+
+
+def _freeze_vision(model):
+    frozen = 0
+    for path, module in model.named_modules():
+        if any(s in path for s in VISION_SKIP):
+            for p in module.parameters(recurse=False):
+                p.requires_grad_(False)
+                frozen += 1
+    if frozen:
+        print(f"vision modules frozen: {frozen} params left fp/untouched", flush=True)
+
+
+teacher = _load_donor(MODEL).to(dev).eval()
+student = _load_donor(MODEL).to(dev)
+_freeze_vision(student)
 
 counter_kwargs = build_ptq_counter_kwargs(
     PTQ_MODE,
@@ -210,7 +248,7 @@ if resume_payload is None:
         student, calib, mode=PTQ_MODE, kind=COUNTER_KIND, C=C, group=GROUP,
         refine_iters=REFINE_ITERS, scale_refit=SCALE_REFIT,
         grid=GRID, itf_iters=ITF_ITERS, salient_first=SALIENT_FIRST,
-        in_sweep_refit=IN_SWEEP_REFIT, **counter_kwargs,
+        in_sweep_refit=IN_SWEEP_REFIT, extra_skip=EXTRA_SKIP, **counter_kwargs,
     )
     print("swap:", report, flush=True)
 else:
@@ -221,7 +259,7 @@ else:
             raise ValueError(f"resume {key}={saved} does not match requested {current}")
     report = restore_counter_structure(
         student, resume_payload["student"], kind=COUNTER_KIND, group=GROUP, C=C,
-        **counter_kwargs,
+        extra_skip=EXTRA_SKIP, **counter_kwargs,
     )
     student.to(dev)
     incompatible = student.load_state_dict(resume_payload["student"], strict=False)
