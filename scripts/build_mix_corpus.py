@@ -22,17 +22,19 @@ import time
 
 import numpy as np
 
-MODEL = "Qwen/Qwen2.5-1.5B"
+MODEL = os.environ.get("MODEL", "Qwen/Qwen2.5-1.5B")  # tokenizer donor; corpus bins are donor-BPE-specific
 # (domain, train share, dataset, load kwargs, text field)
 # v2 mix: domain coverage IS ability coverage (measured). FineMath-4+ replaces OpenWebMath
 # (stronger per-token, HF SmolLM2 ablations); peS2o adds the science register; smoltalk
 # (field "messages" -> rendered through the donor's chat template) keeps instruct-tuned
 # donors in distribution -- KD on raw web text alone drifts an instruct model's register.
+# v3 rebalance: ru 0.20 -> 0.30 (the 1.5B campaign measured RU as the widest teacher gap;
+# the share feeds BOTH the KD sampling weights and the solver's Hessian calibration).
 SOURCES = [
-    ("en",       0.45, "HuggingFaceFW/fineweb-edu",   dict(name="sample-10BT", split="train"),      "text"),
-    ("ru",       0.20, "HuggingFaceFW/fineweb-2",     dict(name="rus_Cyrl", split="train"),         "text"),
-    ("code",     0.15, "codeparrot/codeparrot-clean", dict(split="train"),                          "content"),
-    ("math",     0.10, "HuggingFaceTB/finemath",      dict(name="finemath-4plus", split="train"),   "text"),
+    ("en",       0.40, "HuggingFaceFW/fineweb-edu",   dict(name="sample-10BT", split="train"),      "text"),
+    ("ru",       0.30, "HuggingFaceFW/fineweb-2",     dict(name="rus_Cyrl", split="train"),         "text"),
+    ("code",     0.12, "codeparrot/codeparrot-clean", dict(split="train"),                          "content"),
+    ("math",     0.08, "HuggingFaceTB/finemath",      dict(name="finemath-4plus", split="train"),   "text"),
     ("science",  0.05, "HuggingFaceTB/smollm-corpus", dict(name="cosmopedia-v2", split="train"),    "text"),
     ("instruct", 0.05, "HuggingFaceTB/smoltalk",      dict(name="all", split="train"),              "messages"),
 ]
@@ -51,7 +53,14 @@ def build_domain(tokenizer, eos: int, name: str, dataset: str, load_kw: dict, fi
             try:
                 return tokenizer.apply_chat_template(row["messages"], tokenize=False)
             except Exception:
-                return ""
+                # base checkpoints may ship no chat template (e.g. gemma-4 base):
+                # fall back to a plain role-prefixed rendering instead of dropping the domain
+                try:
+                    return "\n\n".join(
+                        f"{m['role']}: {m['content']}" for m in row["messages"]
+                    )
+                except Exception:
+                    return ""
         return row.get(field) or ""
 
     def token_batches():
