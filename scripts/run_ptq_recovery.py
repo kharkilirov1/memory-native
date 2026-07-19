@@ -54,11 +54,14 @@ GROUP_KERNEL_MODE = os.environ.get("GROUP_KERNEL_MODE", "auto")
 STRICT_UPDATE = env_bool("STRICT_UPDATE", True)
 FLIP_SAMPLE_SIZE = int(os.environ.get("FLIP_SAMPLE_SIZE", "4096"))
 REFINE_ITERS = int(os.environ.get("REFINE_ITERS", "2"))
-SCALE_REFIT = os.environ.get("SCALE_REFIT", "hdiag")
-# Consolidated solver ingredients (defaults unchanged: sym grid, no salient split).
-GRID = os.environ.get("GRID", "sym")
+# Defaults = the measured production config (v3-full: itf + align + salient 1% + in-sweep,
+# results/solver_v3_consolidated_layerwise.md, -24.5% layerwise H-err vs base; both 1.5B
+# runs v3f/v3f2 used exactly this via env). To reproduce the legacy base arm:
+# GRID=sym SCALE_REFIT=hdiag SALIENT_FIRST=0.
+SCALE_REFIT = os.environ.get("SCALE_REFIT", "align")
+GRID = os.environ.get("GRID", "itf")
 ITF_ITERS = int(os.environ.get("ITF_ITERS", "3"))
-SALIENT_FIRST = float(os.environ.get("SALIENT_FIRST", "0.0"))
+SALIENT_FIRST = float(os.environ.get("SALIENT_FIRST", "0.01"))
 IN_SWEEP_REFIT = env_bool("IN_SWEEP_REFIT", True)
 COUNTER_LR_START = float(os.environ.get("COUNTER_LR_START", "0.002"))
 COUNTER_LR_END = float(os.environ.get("COUNTER_LR_END", "0.0001"))
