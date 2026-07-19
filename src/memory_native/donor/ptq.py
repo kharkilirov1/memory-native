@@ -261,19 +261,17 @@ def _group_sweep(W0: torch.Tensor, Hinv: torch.Tensor, S: torch.Tensor, group: i
             S_used[:, g, 0], S_used[:, g, 1] = sp, sn
         else:
             sp, sn = S_used[:, g, 0], S_used[:, g, 1]
-        if Mb is not None:
-            mcnt = Mb.sum(dim=1)
-            s2 = torch.where(mcnt > 0,
-                             (Wb.abs() * Mb).sum(dim=1) / mcnt.clamp_min(1),
-                             torch.zeros_like(sp))
-        else:
-            s2 = None
         for j in range(i2 - i1):
             wcol = Wb[:, j]
             tcol, q = _nearest_ternary(wcol, sp, sn)
             if Mb is not None:
+                # Salient override = the EXACT ORIGINAL weight (the fp16 channel stores a
+                # value per position anyway). Deriving it from the feedback-ADJUSTED block
+                # (the old s2*sign(w_adj) form) amplified salient values catastrophically on
+                # real layers: |w|*sqrt(diagH) saliency puts large low-energy weights into
+                # the act-order TAIL, exactly where GPTQ error feedback inflates W.
                 mc = Mb[:, j]
-                qsal = s2 * torch.sign(wcol)
+                qsal = W0[:, i1 + j]
                 q = torch.where(mc, qsal, q)
                 tcol = torch.where(mc, torch.zeros_like(tcol), tcol)
                 Qsal[:, i1 + j] = torch.where(mc, qsal, torch.zeros_like(qsal))
