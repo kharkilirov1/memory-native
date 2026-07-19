@@ -367,12 +367,13 @@ for step in range(start_step, STEPS):
                     f"{step + 1 - start_step} steps -- the self-update path is not "
                     "engaged (is the model in train mode?)"
                 )
+        max_sr = max((int(m.sr_step) for m in packed_group_layers), default=0)
         print(
             f"step {step+1:5d}/{STEPS} loss={float(loss.detach()):.3f} "
             f"kd={float(logit_kd.detach()):.3f} feat={float(feat_kd.detach()):.3f} "
             f"counter_lr={counter_lr:.6g} alpha={alpha:.3f} "
             f"flip_alt={telemetry['flip_rate_alt']:.4f} "
-            f"edge={telemetry['counter_edge_sample']:.4f} {dt:.2f}s/step",
+            f"edge={telemetry['counter_edge_sample']:.4f} sr={max_sr} {dt:.2f}s/step",
             flush=True,
         )
 
