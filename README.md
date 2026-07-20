@@ -181,6 +181,8 @@ src/memory_native_mlx/
   packed.py         PackedRMSCounterLinear — same 0.75 B/weight packed layout, bit-identical
   reversible.py     whole-chain reversible sequence (O(1)-in-depth) + anchored mode
   metal_update.py   fused RMS+SR update as a custom Metal kernel (mirror of the Triton one)
+  group_scale.py    group-scale counter layer (Bonsai/PTQ granularity, act-order, homotopy)
+  bonsai.py         ternary checkpoint (Bonsai-style) <-> trainable counter <-> mx.quantized_matmul
   interop.py        lossless torch <-> MLX counter-state transfer (the CUDA->MacBook handoff)
 scripts/            run_scale_validation.sh (one-command GPU sweep -> results/)
                     mlx_demo.py (counter+reversible char-LM on MLX; Metal or CPU)
