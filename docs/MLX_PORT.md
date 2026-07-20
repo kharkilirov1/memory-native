@@ -72,9 +72,41 @@ inference path), no `mx.compile` over the update path (the SR seed advances in P
   decodes the dense weight around the GEMM (same as the torch base path). A
   decode-in-GEMM Metal kernel (MLX's own quantized-matmul style) is the natural next
   kernel after the fused update.
-- group-scale layers / solver-v3 recovery runner / GLM-MoE harnesses — those live on
-  their branches; the interop bridge is how their outputs reach MLX today.
+- solver-v3 recovery runner / GLM-MoE harnesses — those live on their branches; the
+  interop bridge is how their outputs reach MLX today.
 - `scale_rebase="lazy"`, proxy RMS mode, DDP.
+
+(The group-scale layer itself IS ported — see the next section.)
+
+## Bonsai import: a released ternary checkpoint becomes a trainable model
+
+PrismML's Bonsai releases (e.g. Ternary-Bonsai-27B, Apache 2.0 — ternary weights, one FP16
+scale per group of 128) are exactly the visible half of a group-scale counter state. Two
+pieces close the loop:
+
+- **`GroupScaleCounterLinear`** ([`group_scale.py`](../src/memory_native_mlx/group_scale.py))
+  — the MLX port of the solver-v3 branch's group-scale layer: per-(row, group) FP scales,
+  act-order `perm` support, optional residual homotopy `t + alpha*c/C`, hash-SR update in
+  the custom VJP. With one group per row it degenerates to `RMSCounterLinear` **bit-for-bit**
+  (tested) — a strict generalization.
+- **[`bonsai.py`](../src/memory_native_mlx/bonsai.py)** — format converters:
+  `group_counter_from_dense` (an "unpacked" fp checkpoint that is exactly group-ternary;
+  verifies ternarity, rejects anything else), `group_counter_from_quantized` (MLX affine
+  2-bit tensors, the `-mlx-2bit` builds), and `to_mlx_quantized` /
+  `ternary_to_mlx_quant` — the visible weight back into MLX's native grouped quantization
+  for `mx.quantized_matmul` inference on the stock optimized kernels.
+
+  Pitfall codified in the API: `mx.quantize` must NOT be used to produce ternary quant
+  tensors — it fits the affine grid to each group's min/max, and that 2-bit grid
+  {-s, -s/3, +s/3, +s} cannot represent 0, silently corrupting every zero weight. The
+  manual construction (q = t+1, scale = s, bias = -s) is exact; `mx.dequantize` and
+  `mx.quantized_matmul` reproduce s*t to fp precision (tested to 5e-8).
+
+So the MacBook loop is now code, layer-level: load a Bonsai shard -> counter layer
+(c = 0) -> fine-tune as ternary through `nn.value_and_grad` -> export back to the native
+2-bit format and serve it with mlx-lm. What remains for a model-level script is walking a
+real checkpoint's layer names and wiring the non-linear parts (embeddings, norms) — per
+release, deliberately out of the library.
 
 ## Interop: PTQ/train on CUDA, fine-tune on the MacBook
 
