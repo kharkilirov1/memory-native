@@ -27,6 +27,23 @@ in **pure PyTorch** — no custom engine, runs on stock CPU/CUDA. Pure-Python pa
 > memory. See [`docs/MLX_PORT.md`](docs/MLX_PORT.md), package
 > [`src/memory_native_mlx/`](src/memory_native_mlx/), demo [`scripts/mlx_demo.py`](scripts/mlx_demo.py).
 
+## Project map
+
+| Start here | Purpose |
+|---|---|
+| [`PROJECT_STATUS.md`](PROJECT_STATUS.md) | What is verified, experimental, or still open |
+| [`REPRODUCIBILITY.md`](REPRODUCIBILITY.md) | Reproduce CPU, CUDA, scale, and recovery witnesses |
+| [`results/README.md`](results/README.md) | Evidence index and raw run artifacts |
+| [`paper/MEMORY_NATIVE_PREPRINT.md`](paper/MEMORY_NATIVE_PREPRINT.md) | Method, assumptions, and open scientific questions |
+| [`CONTRIBUTING.md`](CONTRIBUTING.md) | Contribution and review workflow |
+| [`SECURITY.md`](SECURITY.md) | Private vulnerability reporting and support scope |
+
+This repository is the **reference research implementation** and primary public project.
+[MotifCL](https://github.com/kharkilirov1/motifcl) is a separate, supporting native runtime
+used to explore Vulkan deployment and compact-state execution on legacy GPUs. Results from one
+repository are not treated as proof for the other unless the corresponding witness is linked
+explicitly.
+
 The method attacks all four memory pools of training at once:
 
 | Pool | Lever | What it is |
@@ -129,17 +146,22 @@ optimizer cost) — matching the larger-scale numbers in [`results/SUMMARY.md`](
 - **Scale — demonstrated (T4):** the full method (counter + reversible) trains a **1.21B-param**
   model on a single 14.6 GiB T4 at **2.25 GiB peak**, where dense+Adam needs 18 GiB of state
   and OOMs before step 0. See [`results/SCALE_1B.md`](results/SCALE_1B.md).
-- **The one open milestone — strict update-from-IO:** the PyTorch update still consumes a
-  materialized `grad_w` tile. The strict analogue of the engine's OpenCL `counter_*_fused` — a
-  kernel taking `(state, scale, v, x or Q(x), grad_out)` that forms `grad_w` in registers so **no
-  dense gradient is ever materialized** — is what makes the *training peak* (not just persistent
-  state) sub-byte on CUDA. This is the remaining piece.
+- **Strict update-from-IO — implemented and T4-validated:** both the row-scale
+  `update_from_io.triton_counter_update_from_io` path and the group-scale solver-v3 path can form
+  the update directly from `(state, scale, v, x, grad_out)` without materializing a dense
+  `[out,in] grad_w`. The result is correct and establishes the strict-memory bound, but the
+  hand-written correlation is dramatically slower than cuBLAS at real token counts: the row-scale
+  witness was ~860× slower, while the group-scale Qwen-shape path took 30–46 seconds per layer at
+  `M=4096`. The practical default therefore remains cuBLAS correlation plus the fused update,
+  optionally row-tiled to bound transient memory. See
+  [`results/ACCELERATION.md`](results/ACCELERATION.md) and
+  [`results/group_kernel_opt_stage01.md`](results/group_kernel_opt_stage01.md).
 
 ### Roadmap
-1. **Strict update-from-IO kernel** — `counter_update_from_io(state, scale, v, x_or_Qx, grad_out)`
-   with no materialized `grad_w`. The forward/grad_x decode-in-GEMM kernels are T4-verified but
-   net-negative vs cuBLAS; the fused *update* (from `grad_w`) is done and pays off — the open ROI
-   is fusing the `grad_w` formation into the update so the peak is sub-byte too.
+1. **Practical low-memory correlation** — retain the verified strict from-IO kernel as the
+   zero-`grad_w` bound, while improving the useful frontier between full cuBLAS correlation and
+   row-tiled correlation. Promote a path only when end-to-end training throughput and peak memory
+   both beat the current default on a named model and GPU.
 2. **Multi-session scale** — 2×T4 data-parallel + checkpoint/resume
    ([`scripts/fineweb_1b_2xt4.py`](scripts/fineweb_1b_2xt4.py)); accumulate tokens across Kaggle
    sessions on real web text (FineWeb-Edu, BPE).

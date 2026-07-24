@@ -1,0 +1,40 @@
+name: Bug report
+description: Report a reproducible implementation defect
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: Security-sensitive reports must follow SECURITY.md instead of using a public issue.
+  - type: input
+    id: commit
+    attributes:
+      label: Commit
+      description: Output of `git rev-parse HEAD`.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Python, PyTorch, accelerator, driver/runtime, and relevant optional dependencies.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Minimal reproduction
+      description: Exact command or smallest code sample.
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: Expected and observed behavior
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Include the complete error and note whether the working tree is clean.

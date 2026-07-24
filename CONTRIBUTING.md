@@ -44,7 +44,7 @@ If you have compute (one T4 / A10g / L4 is enough), instrumenting the counter la
 git clone https://github.com/kharkilirov1/memory-native.git
 cd memory-native
 pip install -e ".[dev]"
-pytest                          # 139 passed, 12 skipped (CUDA-only)
+python -m pytest -q             # hardware-specific tests skip when unavailable
 ```
 
 - Python ≥ 3.9
