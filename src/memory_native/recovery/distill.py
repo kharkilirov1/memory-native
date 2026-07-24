@@ -98,6 +98,10 @@ def kd_divergence(
 ) -> torch.Tensor:
     """Temperature-scaled KL(teacher || student), averaged per token (the classic KD term x T^2)."""
     T = float(temperature)
+    # fp32 loss regardless of model dtype: fp16 logits overflow/NaN inside the
+    # 152k-vocab log_softmax/kl_div chain (observed on T4 fp16; bf16/G4 hid it).
+    student_logits = student_logits.float()
+    teacher_logits = teacher_logits.float()
     s = F.log_softmax(student_logits / T, dim=-1)
     t = F.softmax(teacher_logits / T, dim=-1)
     # sum KL over vocab, mean over the B*T tokens -> stable across batch/seq shapes.
