@@ -1,0 +1,50 @@
+name: Reproduction report
+description: Confirm or challenge a committed empirical result
+title: "[Reproduction]: "
+labels: ["reproduction"]
+body:
+  - type: input
+    id: claim
+    attributes:
+      label: Result being reproduced
+      description: Link the report, table, or exact claim.
+    validations:
+      required: true
+  - type: input
+    id: commit
+    attributes:
+      label: Commit
+      description: Output of `git rev-parse HEAD`.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Hardware and software
+      description: GPU/CPU, memory, OS, driver, CUDA/MLX, Python, PyTorch, and Triton versions.
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Exact command and data
+      description: Include environment variables, seed, dataset identity, and revision.
+    validations:
+      required: true
+  - type: dropdown
+    id: outcome
+    attributes:
+      label: Outcome
+      options:
+        - Confirmed
+        - Partially confirmed
+        - Contradicted
+        - Inconclusive
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Observed values and raw evidence
+    validations:
+      required: true
