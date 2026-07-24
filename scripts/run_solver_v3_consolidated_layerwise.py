@@ -14,7 +14,10 @@ context, not rerun here):
   v3_salient  A4.1 salient-first split on the v3 cycle
   v3_full     itf + align + salient_first (the Stage-A chain on the v3 cycle)
 
-Env: CALIB (path to the probe .pt), SALIENT (0.01), ARMS, OUT (json).
+Env: CALIB (path to the probe .pt), SALIENT (0.01), ARMS, OUT (json),
+EVAL_CALIB (optional held-out probe .pt from a disjoint OFFSET slice -- adds
+rel_err_eval per arm; the train-only gate overfits small calibrations, so arm
+decisions should look at both numbers).
 """
 import json
 import os
@@ -25,6 +28,7 @@ import torch
 from memory_native.donor.ptq import gptq_group_ternary
 
 CALIB = os.environ.get("CALIB", "/tmp/solver_v3_calib.pt")
+EVAL_CALIB = os.environ.get("EVAL_CALIB", "")
 SALIENT = float(os.environ.get("SALIENT", "0.01"))
 OUT = os.environ.get("OUT", "results/solver_v3_consolidated_layerwise.json")
 ARMS = os.environ.get(
@@ -35,9 +39,18 @@ torch.set_num_threads(os.cpu_count())
 blob = torch.load(CALIB, weights_only=False)
 W, H = blob["W"], blob["H"]
 targets = list(W.keys())
+Heval = None
+if EVAL_CALIB:
+    eval_blob = torch.load(EVAL_CALIB, weights_only=False)
+    Heval = eval_blob["H"]
+    missing = [p for p in targets if p not in Heval]
+    if missing:
+        raise SystemExit(f"EVAL_CALIB missing layers: {missing}")
 print(f"consolidated layerwise witness: {blob['model']} layers={blob['layers']} "
       f"calib={blob['calib_batches']}x{blob['batch']}x{blob['seq']} "
-      f"({len(targets)} linears)", flush=True)
+      f"({len(targets)} linears)"
+      + (f" + held-out eval H (offset {eval_blob.get('offset', '?')})" if Heval else ""),
+      flush=True)
 
 ARM_KW = {
     "v3_base": dict(),
@@ -54,6 +67,8 @@ ARM_KW = {
 }
 
 den = sum(float((W[p] @ H[p] * W[p]).sum()) for p in targets)
+den_eval = (sum(float((W[p] @ Heval[p] * W[p]).sum()) for p in targets)
+            if Heval is not None else None)
 results = {}
 if os.path.exists(OUT):
     results.update(json.load(open(OUT)))
@@ -61,18 +76,28 @@ results["_denominator"] = den
 results["_config"] = {k: blob[k] for k in ("model", "layers", "seq", "batch", "calib_batches")}
 
 for arm in ARMS:
-    if arm in results:
-        print(f"[{arm:10s}] cached: rel_err={results[arm]['rel_err']:.5f}", flush=True)
+    cached = results.get(arm)
+    if cached and (Heval is None or "rel_err_eval" in cached):
+        print(f"[{arm:10s}] cached: rel_err={cached['rel_err']:.5f}"
+              + (f" eval={cached['rel_err_eval']:.5f}" if "rel_err_eval" in cached else ""),
+              flush=True)
         continue
     t0 = time.perf_counter()
     num = 0.0
+    num_eval = 0.0
     for p in targets:
         q, _, _ = gptq_group_ternary(W[p], H[p], group=128, **ARM_KW.get(arm, {}))
         d = W[p] - q
         num += float((d @ H[p] * d).sum())
+        if Heval is not None:
+            num_eval += float((d @ Heval[p] * d).sum())
     rel = num / den
     results[arm] = {"rel_err": rel, "seconds": round(time.perf_counter() - t0, 1)}
-    print(f"[{arm:10s}] rel_err={rel:.5f}  ({time.perf_counter()-t0:.0f}s)", flush=True)
+    line = f"[{arm:10s}] rel_err={rel:.5f}"
+    if Heval is not None:
+        results[arm]["rel_err_eval"] = num_eval / den_eval
+        line += f"  eval={num_eval / den_eval:.5f}"
+    print(line + f"  ({time.perf_counter()-t0:.0f}s)", flush=True)
     os.makedirs(os.path.dirname(OUT) or ".", exist_ok=True)
     json.dump(results, open(OUT, "w"), indent=1)
 
@@ -80,4 +105,6 @@ print("\n=== solver v3 CONSOLIDATED layerwise gate (calibration H, sampled layer
       flush=True)
 for arm in ARMS:
     r = results[arm]
-    print(f"{arm:10s} rel_err={r['rel_err']:.5f}  ({r['seconds']:.0f}s)", flush=True)
+    print(f"{arm:10s} rel_err={r['rel_err']:.5f}"
+          + (f"  eval={r['rel_err_eval']:.5f}" if "rel_err_eval" in r else "")
+          + f"  ({r['seconds']:.0f}s)", flush=True)

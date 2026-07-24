@@ -62,7 +62,32 @@ SCALE_REFIT = os.environ.get("SCALE_REFIT", "align")
 GRID = os.environ.get("GRID", "itf")
 ITF_ITERS = int(os.environ.get("ITF_ITERS", "3"))
 SALIENT_FIRST = float(os.environ.get("SALIENT_FIRST", "0.01"))
+# "row" = equal per-row budget (legacy); "layer" = one global top-K over the layer
+# (same total bpw, hard rows take more slots). Gate new runs before flipping the default.
+SALIENT_SCOPE = os.environ.get("SALIENT_SCOPE", "row")
 IN_SWEEP_REFIT = env_bool("IN_SWEEP_REFIT", True)
+# CALIBRATION=asym switches to the GPTAQ-style cascade objective ||X_q Q - X_fp W||^2
+# (donor/asym.py): sequential per-chunk solve against quantized inputs. Costs a resident
+# fp copy of the model + 2*ceil(n_layers/ASYM_CHUNK_LAYERS) calibration passes.
+CALIBRATION = os.environ.get("CALIBRATION", "fp")
+ASYM_CHUNK_LAYERS = int(os.environ.get("ASYM_CHUNK_LAYERS", "7"))
+ASYM_STRENGTH = float(os.environ.get("ASYM_STRENGTH", "1.0"))
+# >1 re-collects the two-tower stats on the fully quantized net and re-solves from the
+# ORIGINAL weights (trust-region style small steps; the s=0.5 collapse showed one big
+# step overshoots what the ternary grid can absorb).
+ASYM_PASSES = int(os.environ.get("ASYM_PASSES", "1"))
+# ASYM_FP_DEVICE=cuda:1 parks the asym fp tower on the second GPU (2xT4 solve split).
+ASYM_FP_DEVICE = os.environ.get("ASYM_FP_DEVICE", "") or None
+# HESSIAN_WEIGHTING=end_loss collects GuidedQuant-style loss-weighted Hessians
+# (one backward per calibration batch, weights untouched). fp calibration only.
+HESSIAN_WEIGHTING = os.environ.get("HESSIAN_WEIGHTING", "none")
+# TEACHER_DEVICE=cuda:1 splits the KD pair across two GPUs (Kaggle 2xT4): the fp
+# teacher lives on its own card, only its logits (and optional hidden states) hop to
+# the student device each step. Empty = same device as the student.
+TEACHER_DEVICE = os.environ.get("TEACHER_DEVICE", "")
+# DTYPE overrides the CUDA compute dtype (bf16 default; T4 has no bf16 tensor cores --
+# fp16 is faster there but the fp-tail AdamW runs unscaled, so watch for NaNs).
+DTYPE = os.environ.get("DTYPE", "")
 COUNTER_LR_START = float(os.environ.get("COUNTER_LR_START", "0.002"))
 COUNTER_LR_END = float(os.environ.get("COUNTER_LR_END", "0.0001"))
 FP_LR_START = float(os.environ.get("FP_LR_START", "0.0001"))
@@ -156,7 +181,9 @@ def checkpoint_payload(
             "group": GROUP, "C": C, "kernel_mode": GROUP_KERNEL_MODE,
             "strict_update": STRICT_UPDATE, "flip_sample_size": FLIP_SAMPLE_SIZE,
             "grid": GRID, "salient_first": SALIENT_FIRST,
+            "salient_scope": SALIENT_SCOPE,
             "in_sweep_refit": IN_SWEEP_REFIT,
+            "calibration": CALIBRATION,
         },
     }
     payload.update(capture_rng_state())
@@ -173,6 +200,9 @@ def load_checkpoint(path: str) -> dict:
 torch.manual_seed(SEED)
 dev = "cuda" if torch.cuda.is_available() else "cpu"
 dtype = torch.bfloat16 if dev == "cuda" else torch.float32
+if DTYPE:
+    dtype = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[DTYPE]
+teacher_dev = TEACHER_DEVICE or dev
 resume_payload = load_checkpoint(RESUME_PATH) if RESUME and os.path.exists(RESUME_PATH) else None
 print(
     f"solver-v3 recovery: device={dev} mode={PTQ_MODE} kind={COUNTER_KIND} "
@@ -225,9 +255,11 @@ def _freeze_vision(model):
         print(f"vision modules frozen: {frozen} params left fp/untouched", flush=True)
 
 
-teacher = _load_donor(MODEL).to(dev).eval()
+teacher = _load_donor(MODEL).to(teacher_dev).eval()
 student = _load_donor(MODEL).to(dev)
 _freeze_vision(student)
+if teacher_dev != dev:
+    print(f"KD split: teacher on {teacher_dev}, student on {dev}", flush=True)
 
 counter_kwargs = build_ptq_counter_kwargs(
     PTQ_MODE,
@@ -248,7 +280,13 @@ if resume_payload is None:
         student, calib, mode=PTQ_MODE, kind=COUNTER_KIND, C=C, group=GROUP,
         refine_iters=REFINE_ITERS, scale_refit=SCALE_REFIT,
         grid=GRID, itf_iters=ITF_ITERS, salient_first=SALIENT_FIRST,
-        in_sweep_refit=IN_SWEEP_REFIT, extra_skip=EXTRA_SKIP, **counter_kwargs,
+        salient_scope=SALIENT_SCOPE,
+        in_sweep_refit=IN_SWEEP_REFIT,
+        calibration=CALIBRATION, asym_chunk_layers=ASYM_CHUNK_LAYERS,
+        asym_strength=ASYM_STRENGTH, asym_passes=ASYM_PASSES,
+        asym_fp_device=ASYM_FP_DEVICE,
+        hessian_weighting=HESSIAN_WEIGHTING,
+        extra_skip=EXTRA_SKIP, **counter_kwargs,
     )
     print("swap:", report, flush=True)
 else:
@@ -377,11 +415,16 @@ for step in range(start_step, STEPS):
     ids = mix.batch_at(step, dev)
     use_features = FEATURE_KD_ALPHA > 0
     with torch.no_grad():
-        teacher_out = teacher(ids, output_hidden_states=use_features)
+        teacher_out = teacher(ids.to(teacher_dev), output_hidden_states=use_features)
+        teacher_logits = teacher_out.logits.to(dev, non_blocking=True)
+        teacher_hidden = (
+            tuple(h.to(dev, non_blocking=True) for h in teacher_out.hidden_states)
+            if use_features else None
+        )
     student_out = student(ids, labels=ids, output_hidden_states=use_features)
-    logit_kd = kd_divergence(student_out.logits, teacher_out.logits, KD_T)
+    logit_kd = kd_divergence(student_out.logits, teacher_logits, KD_T)
     feat_kd = (
-        feature_distill(student_out.hidden_states, teacher_out.hidden_states, FEATURE_KD_STRIDE)
+        feature_distill(student_out.hidden_states, teacher_hidden, FEATURE_KD_STRIDE)
         if use_features else torch.zeros((), device=dev)
     )
     loss = logit_kd + CE_ALPHA * student_out.loss + FEATURE_KD_ALPHA * feat_kd

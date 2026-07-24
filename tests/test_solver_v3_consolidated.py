@@ -126,6 +126,32 @@ def test_salient_first_reduces_error_on_heavy_tail():
     assert _herr(w, q1, H) < _herr(w, q0, H), (_herr(w, q1, H), _herr(w, q0, H))
 
 
+def test_salient_scope_layer_reallocates_budget_same_total():
+    """salient_scope='layer': one global top-K over the layer. Same nominal budget,
+    hard rows take more fp16 slots than the uniform per-row split, and the layer
+    H-error does not regress on row-heterogeneous weights."""
+    torch.manual_seed(13)
+    in_f, out_f, group = 128, 16, 64
+    H = _corr_H(14, in_f)
+    w = torch.randn(out_f, in_f) * 0.05
+    w[0] += torch.randn(in_f) * 0.6              # one dominant heavy row
+    frac = 0.02
+    q_row, _, _, _, _, (idx_r, _) = gptq_group_ternary(
+        w, H, group=group, salient_first=frac, scale_refit="align",
+        return_perm=True, return_salient=True)
+    q_lay, _, _, _, _, (idx_l, _) = gptq_group_ternary(
+        w, H, group=group, salient_first=frac, salient_scope="layer",
+        scale_refit="align", return_perm=True, return_salient=True)
+    # layer budget is nominal on the whole tensor (no ties in continuous data)
+    assert idx_l.numel() == max(1, round(frac * w.numel()))
+    # the heavy row got MORE slots than the uniform per-row k
+    per_row = torch.bincount(idx_l.long() // in_f, minlength=out_f)
+    assert per_row[0] > max(1, round(frac * in_f))
+    # and the layer error does not regress vs the row split
+    assert _herr(w, q_lay, H) <= _herr(w, q_row, H) * 1.001, (
+        _herr(w, q_lay, H), _herr(w, q_row, H))
+
+
 def test_salient_return_is_exact_decomposition():
     torch.manual_seed(6)
     in_f, out_f, group = 64, 16, 16

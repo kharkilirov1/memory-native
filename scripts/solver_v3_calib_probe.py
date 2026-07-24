@@ -17,6 +17,11 @@ MODEL = os.environ.get("MODEL", "Qwen/Qwen2.5-0.5B")
 SEQ = int(os.environ.get("SEQ", "256"))
 BATCH = int(os.environ.get("BATCH", "4"))
 CALIB_BATCHES = int(os.environ.get("CALIB_BATCHES", "4"))
+# OFFSET (in sequences of SEQ tokens) selects a disjoint corpus slice. Collect a second
+# blob with OFFSET >= CALIB_BATCHES*BATCH to get a held-out H: the layerwise witness
+# overfits noticeably on small calibrations (train/eval rel-err gap of several x at
+# 2048 tokens), so gate decisions need both numbers.
+OFFSET = int(os.environ.get("OFFSET", "0"))
 LAYERS = [int(x) for x in os.environ.get("LAYERS", "0,23").split(",")]
 OUT = os.environ.get("OUT", "/tmp/solver_v3_calib.pt")
 
@@ -43,7 +48,7 @@ else:
     ds = None
 ids = tokenizer(text, return_tensors="pt").input_ids[0]
 n_seq = ids.numel() // SEQ
-ids = ids[: n_seq * SEQ].view(n_seq, SEQ)
+ids = ids[: n_seq * SEQ].view(n_seq, SEQ)[OFFSET:]
 calib = [ids[i: i + BATCH] for i in range(0, CALIB_BATCHES * BATCH, BATCH)]
 del ds, text, tokenizer
 gc.collect()
@@ -62,5 +67,6 @@ print(f"{len(targets)} target linears; collecting hessians...", flush=True)
 hessians = collect_hessians(model, targets, calib)
 weights = {p: w.to(torch.float32) for p, w in weights.items()}
 torch.save({"W": weights, "H": hessians, "layers": LAYERS,
-            "model": MODEL, "seq": SEQ, "batch": BATCH, "calib_batches": CALIB_BATCHES}, OUT)
+            "model": MODEL, "seq": SEQ, "batch": BATCH, "calib_batches": CALIB_BATCHES,
+            "offset": OFFSET}, OUT)
 print(f"saved -> {OUT}", flush=True)

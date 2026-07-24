@@ -11,8 +11,9 @@ from ..group_scale_packed import PackedGroupScaleCounterLinear
 
 __all__ = [
     "optimal_ternary", "gptq_ternary", "gptq_group_ternary", "residual_counter",
-    "group_residual_counter", "collect_hessians", "quantize_dense_group_ternary",
-    "ptq_warm_start", "itf_grid", "align_scales_output",
+    "group_residual_counter", "collect_hessians", "collect_hessians_guided",
+    "quantize_dense_group_ternary",
+    "ptq_warm_start", "itf_grid", "align_scales_output", "solve_group_state",
 ]
 
 
@@ -405,6 +406,7 @@ def gptq_group_ternary(
     grid: str = "sym",
     itf_iters: int = 3,
     salient_first: float = 0.0,
+    salient_scope: str = "row",
     in_sweep_refit: bool = False,
     return_perm: bool = False,
     return_salient: bool = False,
@@ -427,6 +429,12 @@ def gptq_group_ternary(
                               |w|*sqrt(diag H) leaves the ternary grid for its own
                               s2*sign(w) component that participates in the error
                               feedback (-5.8% alone at 0.01; -10.1% in the full chain).
+      * salient_scope         "row" (default): an equal per-row budget, the original
+                              behaviour. "layer": one global top-K over the whole
+                              layer -- rows compete for the same fp16 slots, so hard
+                              rows take more and easy rows give theirs up. Total
+                              budget (and bpw) is unchanged; the packed salient
+                              channel stores flat indices, so any per-row split loads.
       A6 (SSR reordering) is deliberately NOT ported: measured +94% error — diag(H)
       order is the compensation order, not a grouping artifact.
 
@@ -455,8 +463,14 @@ def gptq_group_ternary(
     if salient_first > 0.0:
         # BiLLM-style activation-aware saliency, static across refine iterations.
         sal = W.abs() * torch.diagonal(Hwork).sqrt().clamp_min(1e-12).unsqueeze(0)
-        k = max(1, int(round(salient_first * cols)))
-        thr = sal.kthvalue(cols - k + 1, dim=1, keepdim=True).values
+        if salient_scope == "layer":
+            k = max(1, int(round(salient_first * sal.numel())))
+            thr = sal.reshape(-1).kthvalue(sal.numel() - k + 1).values
+        elif salient_scope == "row":
+            k = max(1, int(round(salient_first * cols)))
+            thr = sal.kthvalue(cols - k + 1, dim=1, keepdim=True).values
+        else:
+            raise ValueError(f"salient_scope must be 'row' or 'layer', got {salient_scope!r}")
         smask = sal >= thr
 
     S = _initial_group_scales(W, group, grid, itf_iters, smask)
@@ -500,6 +514,70 @@ def gptq_group_ternary(
                     (salient_idx, salient_val))
         return Q_orig, S_out, T_orig.to(torch.int16), perm, W_adjusted_orig
     return Q_orig, S_out, T_orig.to(torch.int16)
+
+
+@torch.no_grad()
+def solve_group_state(
+    w: torch.Tensor,
+    H: torch.Tensor,
+    *,
+    group: int = 128,
+    C: int = 11,   # group layers default to C=11 (deployed config); C_DEFAULT=8 is legacy
+    percdamp: float = 0.01,
+    act_order: bool = True,
+    refine_iters: int = 2,
+    scale_refit: str = "hdiag",
+    grid: str = "sym",
+    itf_iters: int = 3,
+    salient_first: float = 0.0,
+    salient_scope: str = "row",
+    in_sweep_refit: bool = False,
+):
+    """One layer's full DEPLOY solve: the v3 solver, then (for itf grids) the exact sym
+    re-solve on the achieved support (the packed format is sym-scale), the residual
+    counter from the feedback-adjusted weights, and the salient channel.
+
+    Returns ``(state, Q)``: ``state = (S, t, c, perm, salient_idx, salient_val)`` on the
+    input device (sym scales [out, n_groups]) and ``Q`` the deployable dense
+    reconstruction in ORIGINAL column order (exact fp32 salient values; the packed layer
+    stores them as fp16). Shared by the fp and asymmetric calibration paths of
+    ``ptq_warm_start``."""
+    _, S, t, perm, Wadj, (salient_idx, salient_val) = gptq_group_ternary(
+        w, H, group=group, percdamp=percdamp,
+        act_order=act_order, refine_iters=refine_iters, scale_refit=scale_refit,
+        grid=grid, itf_iters=itf_iters, salient_first=salient_first,
+        salient_scope=salient_scope, in_sweep_refit=in_sweep_refit,
+        return_perm=True, return_salient=True,
+    )
+    cols = w.shape[1]
+    invperm = torch.argsort(perm)
+    if grid == "itf":
+        # The packed format is sym-scale: exact joint sym re-solve (A7) on the
+        # achieved itf support, against the non-salient remainder.
+        Hp = H.detach().to(torch.float32)[perm][:, perm]
+        w_perm = w.detach().to(torch.float32)[:, perm]
+        t_perm = t[:, perm].to(torch.float32)
+        w_target = w_perm
+        if salient_idx.numel():
+            o = salient_idx.long() // cols
+            j = salient_idx.long() % cols
+            qsal = torch.zeros_like(w_perm).reshape(-1)
+            qsal[o * cols + invperm[j]] = salient_val.float()
+            w_target = w_perm - qsal.view_as(w_perm)
+        S, _ = align_scales_output(w_target, t_perm, Hp, group=group, grid="sym")
+    c = group_residual_counter(Wadj, S, t, perm, group, C)
+    if salient_idx.numel():
+        c = c.clone()
+        c.reshape(-1)[salient_idx.long()] = 0
+    group_perm = torch.div(torch.arange(cols, device=perm.device), group,
+                           rounding_mode="floor")
+    gidx = torch.empty_like(group_perm)
+    gidx[perm] = group_perm
+    Q = S[:, gidx] * t.to(torch.float32)
+    if salient_idx.numel():
+        Q = Q.clone()
+        Q.reshape(-1)[salient_idx.long()] = salient_val.float()
+    return (S, t, c, perm, salient_idx, salient_val), Q
 
 
 @torch.no_grad()
@@ -582,12 +660,94 @@ def collect_hessians(model: nn.Module, targets: list[str], calib_batches) -> dic
     return hessians
 
 
+def _default_lm_loss(model: nn.Module, ids: torch.Tensor) -> torch.Tensor:
+    """HF causal-LM next-token CE (labels = inputs). Override via loss_fn for
+    non-HF models."""
+    return model(ids, labels=ids).loss
+
+
+def collect_hessians_guided(model: nn.Module, targets: list[str], calib_batches,
+                            *, loss_fn=None) -> dict:
+    """End-loss-weighted Hessians (GuidedQuant with one output group, arXiv:2505.07004):
+
+        H = sum_n g_n x_n x_n^T,    g_n = mean_o (dL/dy_{n,o})^2,
+
+    token importance from ONE backward per batch. This is statistics collection, NOT
+    training: every parameter's requires_grad is forced off except the input embedding
+    (kept on so autograd builds the graph and grad_output reaches each layer), nothing
+    is stepped, and the embedding grad is dropped after each batch. The absolute scale
+    of H is irrelevant to the solver (percdamp, the grids and align are all
+    scale-invariant), only the RELATIVE token weighting matters.
+
+    Memory note: the backward graph of a full LM is the dominant cost -- on CPU boxes
+    feed SMALL batches (e.g. [1, seq]); a 1.5B model with [2, 128] batches peaked over
+    15 GiB and got OOM-killed, while the same token budget in [1, 128] batches halves
+    the graph."""
+    if loss_fn is None:
+        loss_fn = _default_lm_loss
+    hessians: dict[str, torch.Tensor] = {}
+    hooks = []
+    was_training = model.training
+    model.eval()
+    req = [(p, p.requires_grad) for p in model.parameters()]
+    for p, _ in req:
+        p.requires_grad_(False)
+    get_emb = getattr(model, "get_input_embeddings", None)
+    if callable(get_emb) and get_emb() is not None:
+        grad_anchor = get_emb().weight
+    else:
+        grad_anchor = next(model.parameters())
+    grad_anchor.requires_grad_(True)
+
+    def make_fwd(path, in_features):
+        def hook(_mod, inputs, output):
+            x = inputs[0].detach().reshape(-1, in_features).to(torch.float32)
+
+            def grab(grad):
+                g = grad.detach().reshape(x.shape[0], -1).to(torch.float32)
+                g = g.pow(2).mean(dim=1)
+                h = hessians.get(path)
+                if h is None:
+                    h = torch.zeros(x.shape[1], x.shape[1], dtype=torch.float32,
+                                    device=x.device)
+                    hessians[path] = h
+                h.addmm_((x * g.unsqueeze(1)).t(), x)
+
+            # tensor hook on the layer OUTPUT: raises immediately if the graph does
+            # not reach this layer (output.requires_grad False), instead of silently
+            # skipping it the way a module backward hook would.
+            output.register_hook(grab)
+        return hook
+
+    for path in targets:
+        lin = model.get_submodule(path)
+        hooks.append(lin.register_forward_hook(make_fwd(path, lin.in_features)))
+    try:
+        for ids in calib_batches:
+            with torch.enable_grad():
+                loss = loss_fn(model, ids)
+                loss.backward()
+            grad_anchor.grad = None
+    finally:
+        for hook in hooks:
+            hook.remove()
+        for p, r in req:
+            p.requires_grad_(r)
+        model.train(was_training)
+    missing = [p for p in targets if p not in hessians]
+    if missing:
+        raise RuntimeError(f"no gradient reached: {missing} -- did the loss depend "
+                           "on these layers?")
+    return hessians
+
+
 @torch.no_grad()
 def quantize_dense_group_ternary(model: nn.Module, calib_batches, *, group: int = 128,
                                   percdamp: float = 0.01, extra_skip=None,
                                   refine_iters: int = 2, scale_refit: str = "hdiag",
                                   grid: str = "sym", itf_iters: int = 3,
                                   salient_first: float = 0.0,
+                                  salient_scope: str = "row",
                                   in_sweep_refit: bool = False,
                                   progress: bool = True) -> None:
     skip = ["lm_head"] + (list(extra_skip) if extra_skip is not None else [])
@@ -599,6 +759,7 @@ def quantize_dense_group_ternary(model: nn.Module, calib_batches, *, group: int 
             lin.weight, hessians.pop(path), group=group, percdamp=percdamp,
             refine_iters=refine_iters, scale_refit=scale_refit, grid=grid,
             itf_iters=itf_iters, salient_first=salient_first,
+            salient_scope=salient_scope,
             in_sweep_refit=in_sweep_refit,
         )
         lin.weight.copy_(w_hat.to(lin.weight.dtype))
@@ -625,7 +786,15 @@ def ptq_warm_start(
     grid: str = "sym",
     itf_iters: int = 3,
     salient_first: float = 0.0,
+    salient_scope: str = "row",
     in_sweep_refit: bool = False,
+    calibration: str = "fp",
+    asym_chunk_layers: int = 7,
+    asym_strength: float = 1.0,
+    asym_passes: int = 1,
+    asym_fp_device: str | None = None,
+    hessian_weighting: str = "none",
+    loss_fn=None,
     hessian_gpu_budget_gib: float = 24.0,
     progress: bool = True,
     **counter_kw,
@@ -642,6 +811,16 @@ def ptq_warm_start(
     (align) before packing. ``salient_first > 0`` splits the top-|w|*sqrt(diag H) fraction
     out before the sweep (A4.1) and ships it as the packed salient channel
     (salient_idx/salient_val, exact fp16 overrides) instead of forcing it onto the grid.
+
+    ``calibration='asym'`` (group modes only) switches to the GPTAQ-style cascade-aware
+    objective ||X_q Q - X_fp W||^2: layers are solved sequentially against the inputs of
+    the PARTIALLY QUANTIZED model with the damped target w~ = H_q^{-1} (X_q^T X_fp) w
+    (see donor/asym.py). Costs 2*ceil(len(targets)/asym_chunk_layers) calibration passes
+    and one resident fp copy of the model; ``asym_strength`` interpolates w -> w~.
+
+    ``hessian_weighting='end_loss'`` collects GuidedQuant-style loss-weighted Hessians
+    (one backward per calibration batch, no weight updates; see
+    ``collect_hessians_guided``). Not combinable with ``calibration='asym'`` yet.
     """
     skip = ["lm_head"] + (list(extra_skip) if extra_skip is not None else [])
     targets = _target_paths(model, skip)
@@ -655,71 +834,89 @@ def ptq_warm_start(
         # Group-only controls must not leak into the legacy counter path.
         for key in ("residual_alpha", "kernel_mode", "strict_update", "flip_sample_size"):
             counter_kw.pop(key, None)
-    hessians: dict[str, torch.Tensor] = {}
-    if mode.startswith("gptq") or is_group:
-        chunks = _hessian_chunks(model, targets, int(hessian_gpu_budget_gib * 2**30))
-        if len(chunks) == 1:
-            hessians = collect_hessians(model, targets, calib_batches)
-        else:
-            # Each chunk re-runs the calibration forwards; Hessians park on CPU and the
-            # solve loop below moves them back one layer at a time.
-            if progress:
-                print(f"[ptq:{mode}] hessians in {len(chunks)} chunks "
-                      f"(budget {hessian_gpu_budget_gib:g} GiB)", flush=True)
-            for chunk in chunks:
-                part = collect_hessians(model, chunk, calib_batches)
-                hessians.update({k: v.cpu() for k, v in part.items()})
-                del part
-                if device is not None and device.type == "cuda":
-                    torch.cuda.empty_cache()
-    states: dict[str, tuple] = {}
-    for i, path in enumerate(targets):
-        w = model.get_submodule(path).weight
-        if is_group:
-            H_layer = hessians.pop(path).to(w.device)
-            _, S, t, perm, Wadj, (salient_idx, salient_val) = gptq_group_ternary(
-                w, H_layer, group=group, percdamp=percdamp,
+    if calibration not in {"fp", "asym"}:
+        raise ValueError("calibration must be 'fp' or 'asym'")
+    if hessian_weighting not in {"none", "end_loss"}:
+        raise ValueError("hessian_weighting must be 'none' or 'end_loss'")
+    if calibration == "asym":
+        if not is_group:
+            raise ValueError("calibration='asym' requires a group mode")
+        if hessian_weighting != "none":
+            raise ValueError("hessian_weighting is not supported with calibration='asym'")
+        import copy as _copy
+
+        from .asym import asym_solve_states
+        passes = max(1, int(asym_passes))
+        # Multi-pass: the fp tower and the ORIGINAL weights must be captured once —
+        # after pass 1 the model's dense weights are already the quantized recon.
+        model_fp = _copy.deepcopy(model) if passes > 1 else None
+        if model_fp is not None and asym_fp_device is not None:
+            model_fp = model_fp.to(asym_fp_device)
+        w0 = ({p: model.get_submodule(p).weight.detach().clone() for p in targets}
+              if passes > 1 else None)
+        states: dict[str, tuple] = {}
+        for pass_i in range(passes):
+            if progress and passes > 1:
+                print(f"[ptq:asym] pass {pass_i + 1}/{passes}", flush=True)
+            states = asym_solve_states(
+                model, calib_batches, targets, group=group, C=C, percdamp=percdamp,
                 act_order=act_order, refine_iters=refine_iters, scale_refit=scale_refit,
                 grid=grid, itf_iters=itf_iters, salient_first=salient_first,
-                in_sweep_refit=in_sweep_refit,
-                return_perm=True, return_salient=True,
+                salient_scope=salient_scope, in_sweep_refit=in_sweep_refit,
+                chunk_layers=asym_chunk_layers, strength=asym_strength,
+                model_fp=model_fp, w0=w0, fp_device=asym_fp_device, progress=progress,
             )
-            if grid == "itf":
-                # The packed format is sym-scale: exact joint sym re-solve (A7) on the
-                # achieved itf support, against the non-salient remainder.
-                Hp = H_layer.detach().to(torch.float32)[perm][:, perm]
-                w_perm = w.detach().to(torch.float32)[:, perm]
-                t_perm = t[:, perm].to(torch.float32)
-                w_target = w_perm
-                if salient_idx.numel():
-                    cols = w.shape[1]
-                    invperm = torch.argsort(perm)
-                    o = salient_idx.long() // cols
-                    j = salient_idx.long() % cols
-                    qsal = torch.zeros_like(w_perm).reshape(-1)
-                    qsal[o * cols + invperm[j]] = salient_val.float()
-                    w_target = w_perm - qsal.view_as(w_perm)
-                S, _ = align_scales_output(w_target, t_perm, Hp, group=group, grid="sym")
-            c = group_residual_counter(Wadj, S, t, perm, group, C)
-            if salient_idx.numel():
-                c = c.clone()
-                c.reshape(-1)[salient_idx.long()] = 0
-            states[path] = (S.cpu(), t.cpu(), c.cpu(), perm.cpu(),
-                            salient_idx.cpu(), salient_val.cpu())
-        elif mode == "gptq":
-            s, t, c = gptq_ternary(
-                w, hessians.pop(path).to(w.device), C=C, blocksize=blocksize,
-                percdamp=percdamp, act_order=act_order,
-            )
-            states[path] = (s.cpu(), t.cpu(), c.cpu())
-        elif mode == "optimal":
-            s, t = optimal_ternary(w)
-            c = residual_counter(w, s, t, C)
-            states[path] = (s.cpu(), t.to(torch.int16).cpu(), c.cpu())
+    else:
+        if hessian_weighting == "end_loss":
+            def _collect(m, t, c):
+                return collect_hessians_guided(m, t, c, loss_fn=loss_fn)
         else:
-            raise ValueError("mode must be 'optimal', 'gptq' or 'gptq_group'")
-        if progress and (i + 1) % 25 == 0:
-            print(f"[ptq:{mode}] {i+1}/{len(targets)} layers solved", flush=True)
+            _collect = collect_hessians
+        hessians: dict[str, torch.Tensor] = {}
+        if mode.startswith("gptq") or is_group:
+            chunks = _hessian_chunks(model, targets, int(hessian_gpu_budget_gib * 2**30))
+            if len(chunks) == 1:
+                hessians = _collect(model, targets, calib_batches)
+            else:
+                # Each chunk re-runs the calibration forwards; Hessians park on CPU and
+                # the solve loop below moves them back one layer at a time.
+                if progress:
+                    print(f"[ptq:{mode}] hessians in {len(chunks)} chunks "
+                          f"(budget {hessian_gpu_budget_gib:g} GiB)", flush=True)
+                for chunk in chunks:
+                    part = _collect(model, chunk, calib_batches)
+                    hessians.update({k: v.cpu() for k, v in part.items()})
+                    del part
+                    if device is not None and device.type == "cuda":
+                        torch.cuda.empty_cache()
+        states = {}
+        for i, path in enumerate(targets):
+            w = model.get_submodule(path).weight
+            if is_group:
+                H_layer = hessians.pop(path).to(w.device)
+                (S, t, c, perm, salient_idx, salient_val), _ = solve_group_state(
+                    w, H_layer, group=group, C=C, percdamp=percdamp,
+                    act_order=act_order, refine_iters=refine_iters,
+                    scale_refit=scale_refit, grid=grid, itf_iters=itf_iters,
+                    salient_first=salient_first, salient_scope=salient_scope,
+                    in_sweep_refit=in_sweep_refit,
+                )
+                states[path] = (S.cpu(), t.cpu(), c.cpu(), perm.cpu(),
+                                salient_idx.cpu(), salient_val.cpu())
+            elif mode == "gptq":
+                s, t, c = gptq_ternary(
+                    w, hessians.pop(path).to(w.device), C=C, blocksize=blocksize,
+                    percdamp=percdamp, act_order=act_order,
+                )
+                states[path] = (s.cpu(), t.cpu(), c.cpu())
+            elif mode == "optimal":
+                s, t = optimal_ternary(w)
+                c = residual_counter(w, s, t, C)
+                states[path] = (s.cpu(), t.to(torch.int16).cpu(), c.cpu())
+            else:
+                raise ValueError("mode must be 'optimal', 'gptq' or 'gptq_group'")
+            if progress and (i + 1) % 25 == 0:
+                print(f"[ptq:{mode}] {i+1}/{len(targets)} layers solved", flush=True)
 
     if is_group:
         report = SwapReport()
