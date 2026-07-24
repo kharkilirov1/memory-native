@@ -37,7 +37,12 @@ optim + activation pools the method zeroes.
 - `donor/qwen.py` — HF donor loader/swap; `donor/ptq.py` — the calibrated PTQ solver
   (GPTQ-style group ternary v3: act-order, post-sweep s↔t alternation with a monotone
   Hessian gate, `scale_refit="align"` exact joint solve, `grid="itf"` asymmetric grid,
-  `salient_first` BiLLM-style split).
+  `salient_first` BiLLM-style split, `salient_scope="layer"` global top-K budget,
+  `solve_group_state` = the shared one-layer deploy solve,
+  `collect_hessians_guided` = GuidedQuant loss-weighted H via `hessian_weighting`).
+- `donor/asym.py` — GPTAQ-style cascade calibration (`calibration="asym"`): sequential
+  two-tower collection of H_q = X_qᵀX_q and G = X_qᵀX_fp, residual-form target
+  w̃ = w + (H_q+λI)⁻¹(G−H_q)w solved by the unchanged v3 solver under H_q.
 - `recovery/distill.py` + `recovery/runtime.py` — KD recovery finetune, resumable runner
   helpers (strict α=0 evaluation, RNG capture, counter-structure restore).
 - `glm.py`, `moe_ffn.py`, `reversible.py`, `budget.py` — receiver architecture, MoE,
@@ -64,6 +69,56 @@ optim + activation pools the method zeroes.
    (strict is 30–46 s/layer there — unrunnable); step outlook A100 ~2.5–4 s at B8×T512.
 6. **Next planned step:** a short A100 baseline (~5 min) to pick STEPS/batch, then the
    full recovery run from the v3-solver start (~3000 steps fits the remaining budget).
+7. **Solver upgrades (2026-07-22, implemented + unit-gated, awaiting A100 warm-PPL
+   gates):** `calibration=asym` (GPTAQ-class cascade objective; residual-form target —
+   the naive Tikhonov-to-zero form measurably LOST 4.3× network-KL, pinned by a test),
+   `salient_scope=layer` (global fp16 budget, same bpw), `hessian_weighting=end_loss`
+   (GuidedQuant g=1; collect with [1, seq] batches on CPU — the LM backward graph is
+   the memory hog). Gate protocol fix: the 2048-token layerwise gate overfits (base
+   train/eval rel-err gap 4–18×; an ICD flip post-pass "won" −20…−49% on train-H and
+   LOST +2…+12% on held-out H) — collect a second probe blob with OFFSET and pass
+   EVAL_CALIB to the layerwise witness; judge arms on BOTH numbers.
+8. **CPU network witnesses (1.5B, blocks 0-1 quantized, KL vs fp on held-out):**
+   `salient_scope=layer` carries to held-out (q_proj −20%, k_proj −26% rel H-err;
+   attention rows are heterogeneous, MLP neutral) — safe to enable. `asym` at FULL
+   strength loses on a SHALLOW cascade (KL 0.392–0.441 vs classic 0.360 @2048tok;
+   the true cascade signal there is tiny), `asym_strength=0.5` already beats classic
+   on top-1 (77.39 vs 76.90) and CE (3.0985 vs 3.1094) at 8192 tok. Deploy gate on
+   A100 = FULL quantization + 524k calibration, arms classic vs asym(c7, s=0.5/1.0);
+   chunk=1 is the cleanest objective but costs 2×n_layers calibration passes.
+9. **Deploy-scale warm gate DONE (Colab G4, STEPS=0, 524k calib, rebuilt 12M mix —
+   results/solver_v3_salient_scope_asym_gate_colab.md):** `salient_scope=layer` WINS
+   (aggregate 3.792→3.687; en 77.9→68.0, ru 108→88.7, code 15.0→12.7, math +3%) —
+   ENABLE for the next recovery run. asym(s=0.5, c7): ru 108→51.1 (−53%!) but the
+   other domains revert/worsen (aggregate 3.746) — cascade correction is real and
+   largest where distortion is worst; tune s∈0.25–0.4 / deep-blocks-only next.
+   classic arm reproduced the ladder (en 77.9 ≈ historical 74.6 on a fresh val slice)
+   — the solve_group_state refactor is non-regressive at deploy scale.
+10. **ASYM_STRENGTH sweep DONE — s=0.15 is a STEP CHANGE (same gate):** curve
+   0/0.08/0.15/0.20/0.25/0.35/0.5 → metric 3.687/3.202/**3.156**/3.184/3.216/3.320/
+   3.746, smooth, unimodal, minimum at 0.15. At s=0.15 EVERY domain beats every other
+   config: en 46.75 (classic 77.9, −40%), ru 42.1 (−61%), code 8.28, math 16.85,
+   science 35.12, instruct 17.38. Warm EN 46.75 is BELOW the best TRAINED strict
+   checkpoint of the previous campaign (47.4 after 6000 KD steps) — solver-only now
+   clears the post-recovery bar. Mechanism: tempered target keeps the cascade
+   correction inside what the ternary+salient grid can absorb before snapping.
+11. **Capacity+iteration sweep DONE (packs 1-2): the s-curve bottleneck IS capacity.**
+   `ASYM_PASSES` implemented (multi-pass asym: re-collect on the quantized net,
+   re-solve from ORIGINAL weights w0; fp tower + w0 captured once — pinned by test;
+   NOTE pass 2 is a bit-exact no-op at chunk=1 on a pure chain, signal comes from
+   intra-chunk staleness). Results (layer+asym s=0.15): salient 1/2/3% → metric
+   3.156/2.950/2.795 (no saturation; +0.48 bpw per 1%); 2 passes at 2% → **2.899**;
+   guided-H standalone 3.687→3.631 (RU-heavy gain, second-order vs asym).
+   **NEW DEPLOY DEFAULT (same-format budget): SALIENT_SCOPE=layer CALIBRATION=asym
+   ASYM_STRENGTH=0.15 ASYM_PASSES=2 SALIENT_FIRST=0.02** (en 35.6, metric 2.899);
+   quality option SALIENT_FIRST=0.03 (en 31.7, metric 2.795, ~3.1-3.6 bpw total).
+   Session total vs production solver: 3.792 → 2.795 (~2.7× lower mean PPL), zero
+   training. Full sweep tables: results/solver_v3_salient_scope_asym_gate_colab.md.
+12. **Recovery run from the s2i2 start DONE (6000 steps, G4):** strict alpha=0 final
+   (= best, monotone) **en 30.06, ru 22.39, metric 2.6779** (warm 2.899 → trained
+   2.678); vs previous campaign best en 47.4 / ru 65.9. Step ≈ 0.9 s (2× salient
+   strict channel; was 0.33 s at 1%) — budget ≈19 units for solve+6k steps.
+   Checkpoint NOT persisted (no Drive grant) — rerun is seeded/reproducible.
 
 ## Gotchas (hard-won, keep)
 
