@@ -1,8 +1,12 @@
 """Calibrated ternary PTQ and trainable group-counter warm starts."""
 from __future__ import annotations
 
+from dataclasses import dataclass
+import warnings
+
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from ..convert import CounterLinearWithBias, SwapReport
 from ..counter import C_DEFAULT
@@ -592,15 +596,149 @@ def group_residual_counter(w_adjusted: torch.Tensor, scales: torch.Tensor, t: to
     return c.round().clamp_(-(C - 1), C - 1).to(torch.int16)
 
 
+@dataclass(frozen=True)
+class _StackedMoETarget:
+    path: str
+    module: nn.Module
+    num_experts: int
+    hidden_dim: int
+    intermediate_dim: int
+
+    def gate_up_path(self, expert: int) -> str:
+        return f"{self.path}.gate_up_proj[{expert}]"
+
+    def down_path(self, expert: int) -> str:
+        return f"{self.path}.down_proj[{expert}]"
+
+    def expert_path(self, expert: int) -> str:
+        return f"{self.path}[{expert}]"
+
+
+_LEGACY_EXPERT_LINEAR_NAMES = {
+    "w1", "w2", "w3", "gate_proj", "up_proj", "down_proj",
+}
+
+
+def _moe_router_paths(model: nn.Module) -> set[str]:
+    paths = set()
+    for parent_path, parent in model.named_modules():
+        if "experts" not in parent._modules:
+            continue
+        for name in ("gate", "router"):
+            if isinstance(parent._modules.get(name), nn.Module):
+                paths.add(f"{parent_path}.{name}" if parent_path else name)
+    return paths
+
+
 def _target_paths(model: nn.Module, skip) -> list[str]:
     out = []
+    routers = _moe_router_paths(model)
     for parent_path, parent in model.named_modules():
         for child_name, child in parent.named_children():
             if isinstance(child, nn.Linear):
                 path = f"{parent_path}.{child_name}" if parent_path else child_name
-                if not any(sub in path for sub in skip):
+                if path not in routers and not any(sub in path for sub in skip):
                     out.append(path)
     return out
+
+
+def _stacked_moe_targets(model: nn.Module) -> list[_StackedMoETarget]:
+    targets = []
+    for path, module in model.named_modules():
+        gate_up = getattr(module, "gate_up_proj", None)
+        down = getattr(module, "down_proj", None)
+        if not isinstance(gate_up, nn.Parameter) or not isinstance(down, nn.Parameter):
+            continue
+        if gate_up.ndim != 3 or down.ndim != 3:
+            continue
+        experts, twice_hidden, hidden_dim = gate_up.shape
+        down_experts, down_hidden, intermediate = down.shape
+        act_name = type(getattr(module, "act_fn", None)).__name__.lower()
+        if (
+            experts != down_experts
+            or hidden_dim != down_hidden
+            or twice_hidden != 2 * intermediate
+            or "silu" not in act_name
+        ):
+            continue
+        targets.append(
+            _StackedMoETarget(
+                path, module, int(experts), int(hidden_dim), int(intermediate)
+            )
+        )
+    return targets
+
+
+def _legacy_expert_targets(model: nn.Module) -> dict[str, str]:
+    """Map legacy expert-linear path -> per-expert path."""
+    mapping = {}
+    for block_path, block in model.named_modules():
+        experts = block._modules.get("experts")
+        if not isinstance(experts, nn.ModuleList):
+            continue
+        experts_path = f"{block_path}.experts" if block_path else "experts"
+        for expert_idx, expert in enumerate(experts):
+            expert_path = f"{experts_path}.{expert_idx}"
+            for relative, module in expert.named_modules():
+                if not isinstance(module, nn.Linear) or not relative:
+                    continue
+                if relative.rsplit(".", 1)[-1] not in _LEGACY_EXPERT_LINEAR_NAMES:
+                    continue
+                mapping[f"{expert_path}.{relative}"] = expert_path
+    return mapping
+
+
+def _unhandled_moe_paths(
+    model: nn.Module,
+    stacked_targets: list[_StackedMoETarget],
+    legacy_targets: dict[str, str],
+) -> list[str]:
+    """Find expert containers that no supported target representation covers."""
+    stacked_parameters = {
+        id(target.module): {
+            id(target.module.gate_up_proj), id(target.module.down_proj),
+        }
+        for target in stacked_targets
+    }
+    legacy_parameters = set()
+    for path in legacy_targets:
+        legacy_parameters.update(
+            id(parameter)
+            for parameter in model.get_submodule(path).parameters(recurse=False)
+        )
+    out = []
+    for block_path, block in model.named_modules():
+        experts = block._modules.get("experts")
+        if experts is None:
+            continue
+        experts_path = f"{block_path}.experts" if block_path else "experts"
+        parameters = list(experts.parameters(recurse=True))
+        if id(experts) in stacked_parameters:
+            if all(id(parameter) in stacked_parameters[id(experts)] for parameter in parameters):
+                continue
+        if isinstance(experts, nn.ModuleList):
+            if not parameters:
+                continue
+            if all(id(parameter) in legacy_parameters for parameter in parameters):
+                continue
+        elif not parameters:
+            continue
+        out.append(experts_path)
+    return out
+
+
+def _assert_no_unhandled_moe(
+    model: nn.Module,
+    stacked_targets: list[_StackedMoETarget],
+    legacy_targets: dict[str, str],
+) -> None:
+    paths = _unhandled_moe_paths(model, stacked_targets, legacy_targets)
+    if paths:
+        raise RuntimeError(
+            "unsupported MoE expert layout at "
+            f"{paths}; refusing partial PTQ conversion because attention-only conversion "
+            "would leave expert weights unconverted"
+        )
 
 
 def _hessian_chunks(model: nn.Module, targets: list[str], budget_bytes: int) -> list[list[str]]:
@@ -633,30 +771,68 @@ def _parent_and_name(model: nn.Module, path: str):
 
 
 @torch.no_grad()
-def collect_hessians(model: nn.Module, targets: list[str], calib_batches) -> dict:
+def collect_hessians(
+    model: nn.Module,
+    targets: list[str],
+    calib_batches,
+    *,
+    moe_targets: list[_StackedMoETarget] | None = None,
+    return_counts: bool = False,
+) -> dict | tuple[dict, dict[str, int]]:
     hessians: dict[str, torch.Tensor] = {}
+    sample_counts: dict[str, int] = {}
     hooks = []
     was_training = model.training
     model.eval()
 
+    def accumulate(path, x):
+        x = x.detach().reshape(-1, x.shape[-1]).to(torch.float32)
+        h = hessians.get(path)
+        if h is None:
+            h = torch.zeros(
+                x.shape[1], x.shape[1], dtype=torch.float32, device=x.device
+            )
+            hessians[path] = h
+        h.addmm_(x.t(), x)
+        sample_counts[path] = sample_counts.get(path, 0) + x.shape[0]
+
     def make_hook(path, in_features):
         def hook(_mod, inputs):
             x = inputs[0].detach().reshape(-1, in_features).to(torch.float32)
-            h = hessians.get(path)
-            if h is None:
-                h = torch.zeros(in_features, in_features, dtype=torch.float32, device=x.device)
-                hessians[path] = h
-            h.addmm_(x.t(), x)
+            accumulate(path, x)
+        return hook
+
+    def make_moe_hook(target):
+        def hook(module, inputs):
+            hidden_states, top_k_index = inputs[:2]
+            for expert in range(target.num_experts):
+                token_idx = torch.where(top_k_index == expert)[0]
+                if token_idx.numel() == 0:
+                    continue
+                current = hidden_states[token_idx]
+                gate_up_path = target.gate_up_path(expert)
+                down_path = target.down_path(expert)
+                accumulate(gate_up_path, current)
+                gate, up = F.linear(
+                    current, module.gate_up_proj[expert]
+                ).chunk(2, dim=-1)
+                accumulate(down_path, module.act_fn(gate) * up)
         return hook
 
     for path in targets:
         lin = model.get_submodule(path)
         hooks.append(lin.register_forward_pre_hook(make_hook(path, lin.in_features)))
-    for ids in calib_batches:
-        model(ids)
-    for hook in hooks:
-        hook.remove()
-    model.train(was_training)
+    for target in moe_targets or []:
+        hooks.append(target.module.register_forward_pre_hook(make_moe_hook(target)))
+    try:
+        for ids in calib_batches:
+            model(ids)
+    finally:
+        for hook in hooks:
+            hook.remove()
+        model.train(was_training)
+    if return_counts:
+        return hessians, sample_counts
     return hessians
 
 
@@ -767,6 +943,178 @@ def quantize_dense_group_ternary(model: nn.Module, calib_batches, *, group: int 
             print(f"[group{group}-v3] {i+1}/{len(targets)} layers quantized", flush=True)
 
 
+def _optimal_group_state(w: torch.Tensor, *, group: int, C: int):
+    """Represent the exact data-free rowwise ternary optimum in a group counter."""
+    s, t = optimal_ternary(w)
+    groups = (w.shape[1] + group - 1) // group
+    scales = s.repeat(1, groups)
+    perm = torch.arange(w.shape[1], device=w.device)
+    c = group_residual_counter(w, scales, t, perm, group, C)
+    return (
+        scales, t.to(torch.int16), c, perm,
+        torch.zeros(0, dtype=torch.int32, device=w.device),
+        torch.zeros(0, dtype=torch.float32, device=w.device),
+    )
+
+
+def _slice_group_state(state, start: int, end: int):
+    S, t, c, perm, salient_idx, salient_val = state
+    cols = t.shape[1]
+    if salient_idx.numel():
+        rows = salient_idx.long() // cols
+        keep = (rows >= start) & (rows < end)
+        sliced_idx = salient_idx[keep].long() - start * cols
+        sliced_idx = sliced_idx.to(torch.int32)
+        sliced_val = salient_val[keep]
+    else:
+        sliced_idx = salient_idx
+        sliced_val = salient_val
+    return S[start:end], t[start:end], c[start:end], perm, sliced_idx, sliced_val
+
+
+def _group_counter_from_state(
+    state, *, in_features: int, out_features: int, group: int, C: int,
+    kind: str, counter_kw: dict,
+) -> nn.Module:
+    packed_kinds = {
+        "counter_packed", "counter_triton", "group_packed", "group_scale_packed",
+    }
+    reference_supported = {
+        "lr", "lr_scale", "rms_beta", "rms_eps", "local_grad_clip", "residual_alpha",
+    }
+    packed_supported = reference_supported | {
+        "kernel_mode", "strict_update", "flip_sample_size",
+    }
+    S, t, c, perm, salient_idx, salient_val = state
+    packed = (
+        kind in packed_kinds and in_features % 4 == 0 and group % 4 == 0
+    )
+    if packed:
+        kw = {key: value for key, value in counter_kw.items() if key in packed_supported}
+        counter: nn.Module = PackedGroupScaleCounterLinear(
+            in_features, out_features, group=group, C=C, perm=perm, **kw
+        )
+    else:
+        kw = {
+            key: value for key, value in counter_kw.items()
+            if key in reference_supported
+        }
+        counter = GroupScaleCounterLinear(
+            in_features, out_features, group=group, C=C, perm=perm, **kw
+        )
+    counter.load_group_state(
+        S, t, c, perm, salient_idx=salient_idx, salient_val=salient_val
+    )
+    return counter
+
+
+def _swap_stacked_moe(
+    model: nn.Module,
+    targets: list[_StackedMoETarget],
+    states: dict[str, list[tuple]],
+    report: SwapReport,
+    *,
+    is_group: bool,
+    kind: str,
+    group: int,
+    C: int,
+    counter_kw: dict,
+) -> None:
+    from ..moe_ffn import (
+        HFModuleListSwiGLUExperts,
+        HFStackedSwiGLUExperts,
+        SwiGLUCounterExpert,
+    )
+
+    for target in targets:
+        if is_group:
+            experts = []
+            for expert, (gate_up_state, down_state) in enumerate(states[target.path]):
+                split = target.intermediate_dim
+                gate_state = _slice_group_state(gate_up_state, 0, split)
+                up_state = _slice_group_state(gate_up_state, split, 2 * split)
+                gate = _group_counter_from_state(
+                    gate_state, in_features=target.hidden_dim,
+                    out_features=split, group=group, C=C, kind=kind,
+                    counter_kw=counter_kw,
+                )
+                up = _group_counter_from_state(
+                    up_state, in_features=target.hidden_dim,
+                    out_features=split, group=group, C=C, kind=kind,
+                    counter_kw=counter_kw,
+                )
+                down = _group_counter_from_state(
+                    down_state, in_features=split,
+                    out_features=target.hidden_dim, group=group, C=C, kind=kind,
+                    counter_kw=counter_kw,
+                )
+                experts.append(SwiGLUCounterExpert(gate, up, down))
+            replacement: nn.Module = HFModuleListSwiGLUExperts(
+                experts, hidden_dim=target.hidden_dim,
+                intermediate_dim=target.intermediate_dim,
+            )
+        else:
+            allowed = {"lr", "lr_scale", "rms_beta", "rms_eps", "compute_dtype"}
+            kw = {key: value for key, value in counter_kw.items() if key in allowed}
+            replacement = HFStackedSwiGLUExperts(
+                target.num_experts, target.hidden_dim, target.intermediate_dim,
+                C=C, **kw,
+            )
+            for expert, (gate_up_state, down_state) in enumerate(states[target.path]):
+                replacement.load_counter_state(expert, gate_up_state, down_state)
+
+        parent, name = _parent_and_name(model, target.path)
+        setattr(parent, name, replacement)
+        for expert in range(target.num_experts):
+            report.swapped.extend(
+                [target.gate_up_path(expert), target.down_path(expert)]
+            )
+        report.coeffs += target.num_experts * (
+            3 * target.hidden_dim * target.intermediate_dim
+        )
+
+
+def _moe_calibration_diagnostics(
+    model: nn.Module,
+    stacked_targets: list[_StackedMoETarget],
+    legacy_targets: dict[str, str],
+    sample_counts: dict[str, int],
+):
+    counts: dict[str, int] = {}
+    required: dict[str, int] = {}
+    for target in stacked_targets:
+        for expert in range(target.num_experts):
+            expert_path = target.expert_path(expert)
+            counts[expert_path] = sample_counts.get(target.gate_up_path(expert), 0)
+            required[expert_path] = max(target.hidden_dim, target.intermediate_dim)
+    for path, expert_path in legacy_targets.items():
+        counts[expert_path] = max(
+            counts.get(expert_path, 0), sample_counts.get(path, 0)
+        )
+        required[expert_path] = max(
+            required.get(expert_path, 0), model.get_submodule(path).in_features
+        )
+
+    dead, rank_deficient = [], []
+    for expert_path, count in counts.items():
+        if count == 0:
+            dead.append(expert_path)
+            warnings.warn(
+                f"dead MoE expert {expert_path}: zero routed calibration tokens; "
+                "using the data-free optimal ternary solve",
+                RuntimeWarning,
+            )
+        elif count < required[expert_path]:
+            rank_deficient.append(expert_path)
+            warnings.warn(
+                f"rank-deficient MoE Hessian for {expert_path}: {count} routed "
+                f"tokens < {required[expert_path]} input features; damping will "
+                "regularize the solve, increase the calibration budget if quality suffers",
+                RuntimeWarning,
+            )
+    return counts, dead, rank_deficient
+
+
 @torch.no_grad()
 def ptq_warm_start(
     model: nn.Module,
@@ -822,14 +1170,40 @@ def ptq_warm_start(
     (one backward per calibration batch, no weight updates; see
     ``collect_hessians_guided``). Not combinable with ``calibration='asym'`` yet.
     """
-    skip = ["lm_head"] + (list(extra_skip) if extra_skip is not None else [])
+    stacked_targets = _stacked_moe_targets(model)
+    all_legacy_targets = _legacy_expert_targets(model)
+    _assert_no_unhandled_moe(model, stacked_targets, all_legacy_targets)
+    router_paths = sorted(_moe_router_paths(model))
+    skip = ["lm_head"]
+    skip += list(extra_skip) if extra_skip is not None else []
     targets = _target_paths(model, skip)
+    legacy_targets = {
+        path: expert for path, expert in all_legacy_targets.items() if path in targets
+    }
+    skipped_legacy = sorted(set(all_legacy_targets) - set(legacy_targets))
+    if skipped_legacy:
+        raise RuntimeError(
+            "refusing partial PTQ conversion: expert weights were excluded by skip rules: "
+            f"{skipped_legacy}"
+        )
+    skipped_stacked = [
+        target.path for target in stacked_targets
+        if any(token in target.path for token in skip)
+    ]
+    if skipped_stacked:
+        raise RuntimeError(
+            "refusing partial PTQ conversion: stacked expert weights were excluded by "
+            f"skip rules: {skipped_stacked}"
+        )
+    has_moe = bool(stacked_targets or legacy_targets)
     try:
         device = next(model.parameters()).device
     except StopIteration:
         device = None
 
     is_group = mode in {"gptq_group", "group128v3", "group"}
+    if mode not in {"optimal", "gptq", "gptq_group", "group128v3", "group"}:
+        raise ValueError("mode must be 'optimal', 'gptq' or 'gptq_group'")
     if not is_group:
         # Group-only controls must not leak into the legacy counter path.
         for key in ("residual_alpha", "kernel_mode", "strict_update", "flip_sample_size"):
@@ -838,6 +1212,18 @@ def ptq_warm_start(
         raise ValueError("calibration must be 'fp' or 'asym'")
     if hessian_weighting not in {"none", "end_loss"}:
         raise ValueError("hessian_weighting must be 'none' or 'end_loss'")
+    if has_moe and calibration == "asym":
+        raise RuntimeError(
+            "calibration='asym' does not support MoE routing yet; refusing partial "
+            "expert conversion"
+        )
+    if has_moe and hessian_weighting == "end_loss":
+        raise RuntimeError(
+            "hessian_weighting='end_loss' does not support MoE routing yet; refusing "
+            "partial expert conversion"
+        )
+    sample_counts: dict[str, int] = {}
+    moe_states: dict[str, list[tuple]] = {}
     if calibration == "asym":
         if not is_group:
             raise ValueError("calibration='asym' requires a group mode")
@@ -875,49 +1261,161 @@ def ptq_warm_start(
         hessians: dict[str, torch.Tensor] = {}
         if mode.startswith("gptq") or is_group:
             chunks = _hessian_chunks(model, targets, int(hessian_gpu_budget_gib * 2**30))
-            if len(chunks) == 1:
-                hessians = _collect(model, targets, calib_batches)
+            if hessian_weighting == "end_loss":
+                if len(chunks) == 1:
+                    hessians = _collect(model, targets, calib_batches)
+                else:
+                    if progress:
+                        print(f"[ptq:{mode}] hessians in {len(chunks)} chunks "
+                              f"(budget {hessian_gpu_budget_gib:g} GiB)", flush=True)
+                    for chunk in chunks:
+                        part = _collect(model, chunk, calib_batches)
+                        hessians.update({k: v.cpu() for k, v in part.items()})
+                        del part
+                        if device is not None and device.type == "cuda":
+                            torch.cuda.empty_cache()
             else:
-                # Each chunk re-runs the calibration forwards; Hessians park on CPU and
-                # the solve loop below moves them back one layer at a time.
-                if progress:
+                collection_chunks = chunks or ([[]] if stacked_targets else [])
+                if progress and len(collection_chunks) > 1:
                     print(f"[ptq:{mode}] hessians in {len(chunks)} chunks "
                           f"(budget {hessian_gpu_budget_gib:g} GiB)", flush=True)
-                for chunk in chunks:
-                    part = _collect(model, chunk, calib_batches)
-                    hessians.update({k: v.cpu() for k, v in part.items()})
+                for chunk_idx, chunk in enumerate(collection_chunks):
+                    part, counts = collect_hessians(
+                        model, chunk, calib_batches,
+                        moe_targets=stacked_targets if chunk_idx == 0 else None,
+                        return_counts=True,
+                    )
+                    park_cpu = len(collection_chunks) > 1
+                    hessians.update({
+                        key: value.cpu() if park_cpu else value
+                        for key, value in part.items()
+                    })
+                    sample_counts.update(counts)
                     del part
                     if device is not None and device.type == "cuda":
                         torch.cuda.empty_cache()
+        elif has_moe:
+            # Optimal mode is data-free, but one routing pass is still needed for
+            # operator-visible dead/rank-deficient expert diagnostics.
+            _, sample_counts = collect_hessians(
+                model, list(legacy_targets), calib_batches,
+                moe_targets=stacked_targets, return_counts=True,
+            )
         states = {}
         for i, path in enumerate(targets):
             w = model.get_submodule(path).weight
+            dead_legacy = (
+                path in legacy_targets and sample_counts.get(path, 0) == 0
+            )
             if is_group:
-                H_layer = hessians.pop(path).to(w.device)
-                (S, t, c, perm, salient_idx, salient_val), _ = solve_group_state(
-                    w, H_layer, group=group, C=C, percdamp=percdamp,
-                    act_order=act_order, refine_iters=refine_iters,
-                    scale_refit=scale_refit, grid=grid, itf_iters=itf_iters,
-                    salient_first=salient_first, salient_scope=salient_scope,
-                    in_sweep_refit=in_sweep_refit,
-                )
+                if dead_legacy:
+                    S, t, c, perm, salient_idx, salient_val = _optimal_group_state(
+                        w, group=group, C=C
+                    )
+                else:
+                    H_layer = hessians.pop(path).to(w.device)
+                    (S, t, c, perm, salient_idx, salient_val), _ = solve_group_state(
+                        w, H_layer, group=group, C=C, percdamp=percdamp,
+                        act_order=act_order, refine_iters=refine_iters,
+                        scale_refit=scale_refit, grid=grid, itf_iters=itf_iters,
+                        salient_first=salient_first, salient_scope=salient_scope,
+                        in_sweep_refit=in_sweep_refit,
+                    )
                 states[path] = (S.cpu(), t.cpu(), c.cpu(), perm.cpu(),
                                 salient_idx.cpu(), salient_val.cpu())
             elif mode == "gptq":
-                s, t, c = gptq_ternary(
-                    w, hessians.pop(path).to(w.device), C=C, blocksize=blocksize,
-                    percdamp=percdamp, act_order=act_order,
-                )
+                if dead_legacy:
+                    s, t = optimal_ternary(w)
+                    c = residual_counter(w, s, t, C)
+                else:
+                    s, t, c = gptq_ternary(
+                        w, hessians.pop(path).to(w.device), C=C, blocksize=blocksize,
+                        percdamp=percdamp, act_order=act_order,
+                    )
                 states[path] = (s.cpu(), t.cpu(), c.cpu())
             elif mode == "optimal":
                 s, t = optimal_ternary(w)
                 c = residual_counter(w, s, t, C)
                 states[path] = (s.cpu(), t.to(torch.int16).cpu(), c.cpu())
-            else:
-                raise ValueError("mode must be 'optimal', 'gptq' or 'gptq_group'")
             if progress and (i + 1) % 25 == 0:
                 print(f"[ptq:{mode}] {i+1}/{len(targets)} layers solved", flush=True)
 
+        for target in stacked_targets:
+            target_states = []
+            for expert in range(target.num_experts):
+                gate_up = target.module.gate_up_proj[expert]
+                down = target.module.down_proj[expert]
+                count = sample_counts.get(target.gate_up_path(expert), 0)
+                if is_group:
+                    if count == 0:
+                        gate_up_state = _optimal_group_state(
+                            gate_up, group=group, C=C
+                        )
+                        down_state = _optimal_group_state(down, group=group, C=C)
+                    else:
+                        gate_up_state, _ = solve_group_state(
+                            gate_up,
+                            hessians.pop(target.gate_up_path(expert)).to(gate_up.device),
+                            group=group, C=C, percdamp=percdamp,
+                            act_order=act_order, refine_iters=refine_iters,
+                            scale_refit=scale_refit, grid=grid, itf_iters=itf_iters,
+                            salient_first=salient_first, salient_scope=salient_scope,
+                            in_sweep_refit=in_sweep_refit,
+                        )
+                        down_state, _ = solve_group_state(
+                            down,
+                            hessians.pop(target.down_path(expert)).to(down.device),
+                            group=group, C=C, percdamp=percdamp,
+                            act_order=act_order, refine_iters=refine_iters,
+                            scale_refit=scale_refit, grid=grid, itf_iters=itf_iters,
+                            salient_first=salient_first, salient_scope=salient_scope,
+                            in_sweep_refit=in_sweep_refit,
+                        )
+                    target_states.append(
+                        (
+                            tuple(value.cpu() for value in gate_up_state),
+                            tuple(value.cpu() for value in down_state),
+                        )
+                    )
+                elif mode == "gptq" and count > 0:
+                    gate_up_state = gptq_ternary(
+                        gate_up,
+                        hessians.pop(target.gate_up_path(expert)).to(gate_up.device),
+                        C=C, blocksize=blocksize, percdamp=percdamp,
+                        act_order=act_order,
+                    )
+                    down_state = gptq_ternary(
+                        down,
+                        hessians.pop(target.down_path(expert)).to(down.device),
+                        C=C, blocksize=blocksize, percdamp=percdamp,
+                        act_order=act_order,
+                    )
+                    target_states.append(
+                        (
+                            tuple(value.cpu() for value in gate_up_state),
+                            tuple(value.cpu() for value in down_state),
+                        )
+                    )
+                else:
+                    s_gu, t_gu = optimal_ternary(gate_up)
+                    s_d, t_d = optimal_ternary(down)
+                    target_states.append(
+                        (
+                            (
+                                s_gu.cpu(), t_gu.to(torch.int16).cpu(),
+                                residual_counter(gate_up, s_gu, t_gu, C).cpu(),
+                            ),
+                            (
+                                s_d.cpu(), t_d.to(torch.int16).cpu(),
+                                residual_counter(down, s_d, t_d, C).cpu(),
+                            ),
+                        )
+                    )
+            moe_states[target.path] = target_states
+
+    expert_counts, dead_experts, rank_deficient = _moe_calibration_diagnostics(
+        model, stacked_targets, legacy_targets, sample_counts
+    )
     if is_group:
         report = SwapReport()
         packed_kinds = {
@@ -963,8 +1461,11 @@ def ptq_warm_start(
             report.coeffs += lin.in_features * lin.out_features
     else:
         from ..convert import swap_linears_to_counter
+        def swap_skip(path):
+            return path in router_paths or any(token in path for token in skip)
+
         report = swap_linears_to_counter(
-            model, kind=kind, skip=skip, C=C, keep_bias=keep_bias, **counter_kw
+            model, kind=kind, skip=swap_skip, C=C, keep_bias=keep_bias, **counter_kw
         )
         for path, (s, t, c) in states.items():
             mod = model.get_submodule(path)
@@ -972,6 +1473,13 @@ def ptq_warm_start(
                 mod = mod.counter
             mod.load_counter_state(s, t, c)
 
+    _swap_stacked_moe(
+        model, stacked_targets, moe_states, report, is_group=is_group, kind=kind,
+        group=group, C=C, counter_kw=counter_kw,
+    )
+    report.expert_token_counts.update(expert_counts)
+    report.dead_experts.extend(dead_experts)
+    report.rank_deficient_experts.extend(rank_deficient)
     if device is not None:
         model.to(device)
     return report

@@ -103,12 +103,15 @@ def observe_counter_telemetry(model_or_layers: nn.Module | Iterable[nn.Module]) 
 
 
 def _target_linears(model: nn.Module, skip: Iterable[str]):
+    from ..donor.ptq import _moe_router_paths
+
     targets = []
+    routers = _moe_router_paths(model)
     for parent_path, parent in model.named_modules():
         for child_name, child in parent.named_children():
             if isinstance(child, nn.Linear):
                 path = f"{parent_path}.{child_name}" if parent_path else child_name
-                if not any(token in path for token in skip):
+                if path not in routers and not any(token in path for token in skip):
                     targets.append((parent, child_name, child, path))
     return targets
 
@@ -128,9 +131,32 @@ def restore_counter_structure(
     group: int, C: int, keep_bias: bool = True, extra_skip=None, **counter_kw,
 ) -> SwapReport:
     """Recreate saved counter modules without collecting Hessians or rerunning PTQ."""
+    from ..donor.ptq import (
+        _assert_no_unhandled_moe,
+        _legacy_expert_targets,
+        _parent_and_name,
+        _stacked_moe_targets,
+    )
+    from ..moe_ffn import (
+        HFModuleListSwiGLUExperts,
+        HFStackedSwiGLUExperts,
+        SwiGLUCounterExpert,
+    )
+
     skip = ["lm_head"] + (list(extra_skip) if extra_skip is not None else [])
     report = SwapReport()
-    for parent, child_name, linear, path in _target_linears(model, skip):
+    stacked_targets = _stacked_moe_targets(model)
+    legacy_targets = _legacy_expert_targets(model)
+    _assert_no_unhandled_moe(model, stacked_targets, legacy_targets)
+    dense_targets = _target_linears(model, skip)
+    dense_paths = {path for _, _, _, path in dense_targets}
+    skipped_legacy = sorted(set(legacy_targets) - dense_paths)
+    if skipped_legacy:
+        raise RuntimeError(
+            "refusing partial counter restore: expert weights were excluded by skip "
+            f"rules: {skipped_legacy}"
+        )
+    for parent, child_name, linear, path in dense_targets:
         prefix, was_wrapped = _state_prefix(state_dict, path)
         saved_state = state_dict[prefix + "state"]
         saved_perm = state_dict.get(prefix + "perm")
@@ -166,6 +192,71 @@ def restore_counter_structure(
         setattr(parent, child_name, replacement)
         report.swapped.append(path)
         report.coeffs += linear.in_features * linear.out_features
+
+    def restore_group_counter(path: str, in_features: int, out_features: int):
+        prefix, _ = _state_prefix(state_dict, path)
+        saved_state = state_dict[prefix + "state"]
+        saved_perm = state_dict.get(prefix + "perm")
+        if saved_perm is None:
+            raise KeyError(f"checkpoint has no group permutation for MoE matrix {path}")
+        packed = saved_state.shape != (out_features, in_features)
+        allowed = {
+            "lr", "lr_scale", "rms_beta", "rms_eps", "local_grad_clip",
+            "residual_alpha", "kernel_mode", "strict_update", "flip_sample_size",
+        }
+        kw = {key: value for key, value in counter_kw.items() if key in allowed}
+        if packed:
+            return PackedGroupScaleCounterLinear(
+                in_features, out_features, group=group, C=C, perm=saved_perm, **kw
+            )
+        for key in ("kernel_mode", "strict_update", "flip_sample_size"):
+            kw.pop(key, None)
+        return GroupScaleCounterLinear(
+            in_features, out_features, group=group, C=C, perm=saved_perm, **kw
+        )
+
+    for target in stacked_targets:
+        stacked_key = f"{target.path}.stacked.sg"
+        group_key = f"{target.path}.experts.0.gate.state"
+        group_wrapped_key = f"{target.path}.experts.0.gate.counter.state"
+        if stacked_key in state_dict:
+            allowed = {"lr", "lr_scale", "rms_beta", "rms_eps", "compute_dtype"}
+            kw = {key: value for key, value in counter_kw.items() if key in allowed}
+            replacement: nn.Module = HFStackedSwiGLUExperts(
+                target.num_experts, target.hidden_dim, target.intermediate_dim,
+                C=C, **kw,
+            )
+        elif group_key in state_dict or group_wrapped_key in state_dict:
+            experts = []
+            for expert in range(target.num_experts):
+                base = f"{target.path}.experts.{expert}"
+                gate = restore_group_counter(
+                    f"{base}.gate", target.hidden_dim, target.intermediate_dim
+                )
+                up = restore_group_counter(
+                    f"{base}.up", target.hidden_dim, target.intermediate_dim
+                )
+                down = restore_group_counter(
+                    f"{base}.down", target.intermediate_dim, target.hidden_dim
+                )
+                experts.append(SwiGLUCounterExpert(gate, up, down))
+            replacement = HFModuleListSwiGLUExperts(
+                experts, hidden_dim=target.hidden_dim,
+                intermediate_dim=target.intermediate_dim,
+            )
+        else:
+            raise KeyError(
+                f"checkpoint has no supported counter MoE state for {target.path}"
+            )
+        parent, name = _parent_and_name(model, target.path)
+        setattr(parent, name, replacement)
+        for expert in range(target.num_experts):
+            report.swapped.extend([
+                target.gate_up_path(expert), target.down_path(expert),
+            ])
+        report.coeffs += target.num_experts * (
+            3 * target.hidden_dim * target.intermediate_dim
+        )
     return report
 
 

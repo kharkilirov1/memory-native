@@ -38,7 +38,10 @@ import torch.nn.functional as F
 from .counter import RMSCounterLinear, decode_state, encode_state, stochastic_round
 from .packed import PackedRMSCounterLinear
 
-__all__ = ["CounterMoEFFN"]
+__all__ = [
+    "CounterMoEFFN", "HFModuleListSwiGLUExperts", "HFStackedSwiGLUExperts",
+    "StackedCounterExperts", "StackedSwiGLUExperts", "SwiGLUCounterExpert",
+]
 
 
 def _gelu_grad(x: torch.Tensor) -> torch.Tensor:
@@ -227,6 +230,28 @@ class StackedSwiGLUExperts(nn.Module):
             b += t.numel() * 4
         return b
 
+    @torch.no_grad()
+    def load_counter_state(self, expert: int, gate_up_state, down_state) -> None:
+        """Load one HF expert's combined gate/up and down PTQ states."""
+        s_gu, t_gu, c_gu = gate_up_state
+        s_d, t_d, c_d = down_state
+        if t_gu.shape != (2 * self.h, self.d) or t_d.shape != (self.d, self.h):
+            raise ValueError(
+                f"expert state shape mismatch: gate_up={tuple(t_gu.shape)}, "
+                f"down={tuple(t_d.shape)}, expected {(2 * self.h, self.d)} "
+                f"and {(self.d, self.h)}"
+            )
+        for state, scale, velocity, s, t, c in (
+            (self.sg[expert], self.scg[expert], self.vg[expert],
+             s_gu[:self.h], t_gu[:self.h], c_gu[:self.h]),
+            (self.su[expert], self.scu[expert], self.vu[expert],
+             s_gu[self.h:], t_gu[self.h:], c_gu[self.h:]),
+            (self.sd[expert], self.scd[expert], self.vd[expert], s_d, t_d, c_d),
+        ):
+            state.copy_(encode_state(t.to(torch.int16), c.to(torch.int16), self.C))
+            scale.copy_(s.to(torch.float32))
+            velocity.zero_()
+
 
 class _StackedSwiGLUFn(torch.autograd.Function):
     """Grouped SwiGLU experts: gate/up/down via torch._grouped_mm + one batched counter update."""
@@ -332,6 +357,111 @@ class _SwiGLUExpert(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.down(F.silu(self.gate(x)) * self.up(x))
+
+
+class SwiGLUCounterExpert(nn.Module):
+    """Thin SwiGLU composition over three already-constructed counter linears."""
+
+    def __init__(self, gate: nn.Module, up: nn.Module, down: nn.Module) -> None:
+        super().__init__()
+        self.gate, self.up, self.down = gate, up, down
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.down(F.silu(self.gate(x)) * self.up(x))
+
+
+class HFModuleListSwiGLUExperts(nn.Module):
+    """HF experts forward contract backed by a ModuleList of counter SwiGLU experts."""
+
+    def __init__(self, experts, *, hidden_dim: int, intermediate_dim: int) -> None:
+        super().__init__()
+        self.experts = nn.ModuleList(experts)
+        self.num_experts = len(self.experts)
+        self.hidden_dim = int(hidden_dim)
+        self.intermediate_dim = int(intermediate_dim)
+        self.act_fn = F.silu
+
+    def forward(self, hidden_states, top_k_index, top_k_weights):
+        final_hidden_states = torch.zeros_like(hidden_states)
+        for expert_idx, expert in enumerate(self.experts):
+            token_idx, top_k_pos = torch.where(top_k_index == expert_idx)
+            if token_idx.numel() == 0:
+                continue
+            current = expert(hidden_states[token_idx])
+            current = current * top_k_weights[token_idx, top_k_pos, None]
+            final_hidden_states.index_add_(
+                0, token_idx, current.to(final_hidden_states.dtype)
+            )
+        return final_hidden_states
+
+
+class HFStackedSwiGLUExperts(nn.Module):
+    """HF stacked-experts forward contract backed by ``StackedSwiGLUExperts``."""
+
+    def __init__(
+        self, num_experts: int, hidden_dim: int, intermediate_dim: int, *,
+        C: int, lr: float = 0.04, lr_scale: float = 2e-4,
+        rms_beta: float = 0.9, rms_eps: float = 1e-3,
+        compute_dtype: str = "fp32",
+    ) -> None:
+        super().__init__()
+        self.num_experts = int(num_experts)
+        self.hidden_dim = int(hidden_dim)
+        self.intermediate_dim = int(intermediate_dim)
+        self.act_fn = F.silu
+        self.stacked = StackedSwiGLUExperts(
+            self.num_experts, self.hidden_dim, self.intermediate_dim,
+            C=C, lr=lr, lr_scale=lr_scale, rms_beta=rms_beta, rms_eps=rms_eps,
+            compute_dtype=compute_dtype,
+        )
+
+    @torch.no_grad()
+    def load_counter_state(self, expert: int, gate_up_state, down_state) -> None:
+        self.stacked.load_counter_state(expert, gate_up_state, down_state)
+
+    def forward(self, hidden_states, top_k_index, top_k_weights):
+        n_tokens, top_k = top_k_index.shape
+        flat_tok = torch.arange(
+            n_tokens, device=hidden_states.device
+        ).repeat_interleave(top_k)
+        flat_exp = top_k_index.reshape(-1)
+        flat_weight = top_k_weights.reshape(-1)
+
+        if not hasattr(torch, "_grouped_mm"):
+            final_hidden_states = torch.zeros_like(hidden_states)
+            Wg, Wu, Wd = self.stacked.weights()
+            for expert_idx in range(self.num_experts):
+                token_idx, top_k_pos = torch.where(top_k_index == expert_idx)
+                if token_idx.numel() == 0:
+                    continue
+                x = hidden_states[token_idx].to(Wg.dtype)
+                gate = F.linear(x, Wg[expert_idx])
+                up = F.linear(x, Wu[expert_idx])
+                current = F.linear(F.silu(gate) * up, Wd[expert_idx])
+                current = current * top_k_weights[token_idx, top_k_pos, None]
+                final_hidden_states.index_add_(
+                    0, token_idx, current.to(final_hidden_states.dtype)
+                )
+            return final_hidden_states
+
+        order = torch.argsort(flat_exp)
+        sorted_tok = flat_tok[order]
+        sorted_weight = flat_weight[order]
+        offs = torch.bincount(
+            flat_exp, minlength=self.num_experts
+        ).cumsum(0).to(torch.int32)
+        x_sorted = hidden_states[sorted_tok]
+        tap = (
+            torch.zeros(
+                (), device=hidden_states.device, dtype=hidden_states.dtype,
+                requires_grad=True,
+            )
+            if torch.is_grad_enabled()
+            else hidden_states.new_zeros(())
+        )
+        outputs = _StackedSwiGLUFn.apply(x_sorted, offs, tap, self.stacked)
+        weighted = outputs * sorted_weight.unsqueeze(-1)
+        return torch.zeros_like(hidden_states).index_add_(0, sorted_tok, weighted)
 
 
 class CounterMoEFFN(nn.Module):
