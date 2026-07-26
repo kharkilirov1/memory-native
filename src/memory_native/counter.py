@@ -43,7 +43,13 @@ def _allreduce_grad_w_(grad_w: torch.Tensor) -> None:
     counter update and their packed states stay synchronized (the counter has no Parameter
     gradient for DDP to handle -- the optimizer is the in-place state update itself)."""
     if dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1:
-        dist.all_reduce(grad_w, op=dist.ReduceOp.AVG)
+        if dist.get_backend() == "gloo":
+            # Gloo rejects ReduceOp.AVG (notably on CPU/Windows). SUM followed by
+            # the same world-size normalization is the identical average operation.
+            dist.all_reduce(grad_w, op=dist.ReduceOp.SUM)
+            grad_w.div_(dist.get_world_size())
+        else:
+            dist.all_reduce(grad_w, op=dist.ReduceOp.AVG)
 
 # C=8 -> counter c in {-7..+7} (15 levels), 3*15 = 45 reachable states (fits 6 bits / uint8).
 # Larger C is allowed while 3*(2C-1) <= 256 (uint8); C=11 gives 63 states (best per ablation).

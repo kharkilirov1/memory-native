@@ -40,10 +40,14 @@ class SwapReport:
     swapped: list[str] = field(default_factory=list)      # module paths that became counter layers
     skipped: list[str] = field(default_factory=list)      # nn.Linear paths left as-is (by predicate)
     coeffs: int = 0                                        # total counter weights created
+    expert_token_counts: dict[str, int] = field(default_factory=dict)
+    dead_experts: list[str] = field(default_factory=list)
+    rank_deficient_experts: list[str] = field(default_factory=list)
 
     def __str__(self) -> str:
         return (f"SwapReport(swapped={len(self.swapped)} linears, "
-                f"{self.coeffs:,} counter coeffs; skipped={len(self.skipped)})")
+                f"{self.coeffs:,} counter coeffs; skipped={len(self.skipped)}; "
+                f"dead_experts={len(self.dead_experts)})")
 
 
 def _should_skip(path: str, skip) -> bool:
