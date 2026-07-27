@@ -156,20 +156,69 @@ def test_restore_from_streamed_state(tmp_path):
     assert torch.isfinite(logits).all()
 
 
-def test_moe_donor_is_rejected_with_a_reason(tmp_path):
-    """Streaming cannot resolve expert weights by name yet: transformers stores
-    them in the legacy per-expert layout and converts at load time. That must be
-    an explicit refusal, not a partial conversion."""
+def _moe_donor(tmp_path, layers=2, experts=4):
     from transformers import MixtralConfig, MixtralForCausalLM
 
     torch.manual_seed(0)
     cfg = MixtralConfig(vocab_size=256, hidden_size=64, intermediate_size=128,
-                        num_hidden_layers=2, num_attention_heads=4,
+                        num_hidden_layers=layers, num_attention_heads=4,
                         num_key_value_heads=2, max_position_embeddings=128,
-                        num_local_experts=4, num_experts_per_tok=2)
-    path = os.path.join(str(tmp_path), "moe")
+                        num_local_experts=experts, num_experts_per_tok=2)
+    path = os.path.join(tmp_path, "moe")
     MixtralForCausalLM(cfg).eval().save_pretrained(path, safe_serialization=True)
+    return path, cfg
 
-    with pytest.raises(NotImplementedError, match="legacy per-expert layout"):
-        convert_streaming(path, _calib(cfg), os.path.join(str(tmp_path), "out"),
+
+def test_moe_streaming_matches_in_memory(tmp_path):
+    """MoE donors stream too. transformers writes experts one module per expert
+    and stacks them at load time, so the reader reassembles
+    gate_up_proj[e] = cat([w1, w3]) / down_proj[e] = w2; with cascade off the
+    result must match the in-memory path exactly."""
+    from transformers import AutoModelForCausalLM
+
+    path, cfg = _moe_donor(str(tmp_path))
+    calib = _calib(cfg)
+
+    out = os.path.join(str(tmp_path), "streamed")
+    report = convert_streaming(path, calib, out, kind="counter_packed", cascade=False,
+                               micro_batch=2, progress=False, **SOLVE)
+    streamed = load_streamed_state(out)
+
+    experts = [t for t in report.targets if "experts" in t]
+    assert len(experts) == cfg.num_hidden_layers * cfg.num_local_experts, \
+        f"expected every expert converted, got {len(experts)}"
+
+    reference = AutoModelForCausalLM.from_pretrained(path, dtype=torch.float32).eval()
+    ref_report = ptq_warm_start(reference, calib, mode="gptq_group",
+                                kind="counter_packed", progress=False, **SOLVE)
+    assert report.coeffs == ref_report.coeffs
+    ref_state = {k: v for k, v in reference.state_dict().items()
+                 if "counter" in k or "experts" in k}
+    shared = [k for k in ref_state if k in streamed]
+    assert len(shared) > cfg.num_hidden_layers * cfg.num_local_experts, \
+        "too few overlapping keys to be a meaningful comparison"
+    for key in shared:
+        assert torch.equal(ref_state[key].cpu(), streamed[key]), f"mismatch at {key}"
+
+
+def test_unknown_expert_layout_still_refuses(tmp_path):
+    """A checkpoint whose expert tensors the reader cannot place must raise, not
+    convert attention only."""
+    import shutil
+
+    import safetensors.torch as sft
+
+    path, cfg = _moe_donor(str(tmp_path), layers=1)
+    broken = os.path.join(str(tmp_path), "broken")
+    os.makedirs(broken, exist_ok=True)
+    shutil.copy(os.path.join(path, "config.json"), broken)
+    tensors = sft.load_file(os.path.join(path, "model.safetensors"))
+    renamed = {(k.replace("block_sparse_moe.experts", "block_sparse_moe.weird")
+                if "block_sparse_moe.experts" in k else k): v
+               for k, v in tensors.items()}
+    sft.save_file(renamed, os.path.join(broken, "model.safetensors"),
+                  metadata={"format": "pt"})
+
+    with pytest.raises((RuntimeError, NotImplementedError, KeyError)):
+        convert_streaming(broken, _calib(cfg), os.path.join(str(tmp_path), "out"),
                           micro_batch=2, progress=False, **SOLVE)
