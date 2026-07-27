@@ -33,6 +33,7 @@ from __future__ import annotations
 import copy
 
 import torch
+import torch.nn.functional as F
 import torch.nn as nn
 
 from .ptq import solve_group_state
@@ -76,13 +77,23 @@ def asym_target_weights(w: torch.Tensor, H_q: torch.Tensor, G: torch.Tensor, *,
 
 @torch.no_grad()
 def collect_asym_stats(model_q: nn.Module, model_fp: nn.Module, targets: list[str],
-                       calib_batches) -> dict[str, tuple[torch.Tensor, torch.Tensor]]:
+                       calib_batches, *, moe_targets_q=None, moe_targets_fp=None,
+                       routers=None) -> dict[str, tuple[torch.Tensor, torch.Tensor]]:
     """One pass over the calibration, both towers batch-synchronized: returns
     {path: (H_q, G)} for the given targets. The fp tower runs FIRST each batch and its
     per-layer inputs are held until the q tower consumes them (memory: one batch of
-    activations for every target in the chunk -- size the chunk accordingly)."""
+    activations for every target in the chunk -- size the chunk accordingly).
+
+    MoE: pairing X_q with X_fp only means anything if both towers send a token to the
+    SAME expert, and quantization diverts routing badly (measured on a synthetic
+    Mixtral: 10.9% of tokens at layer 0, 25.0% at layer 1). So when ``routers`` is
+    given, the q tower's routers are TEACHER-FORCED to the fp tower's decisions: the
+    router returns (logits, scores, indices) and an expert's input depends on indices
+    only -- scores apply to the weighted sum afterwards -- so substituting indices is
+    both sufficient and minimal."""
     stats: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
     cap_fp: dict[str, torch.Tensor] = {}
+    cap_routes: dict[str, torch.Tensor] = {}
     hooks = []
     fp_dev = next(model_fp.parameters()).device
     q_dev = next(model_q.parameters()).device
@@ -109,11 +120,84 @@ def collect_asym_stats(model_q: nn.Module, model_fp: nn.Module, targets: list[st
             pair[1].addmm_(xq.t(), xf)
         return hook
 
+    def accumulate(path, xq, xf):
+        pair = stats.get(path)
+        if pair is None:
+            n = xq.shape[1]
+            pair = (torch.zeros(n, n, dtype=torch.float32, device=xq.device),
+                    torch.zeros(n, n, dtype=torch.float32, device=xq.device))
+            stats[path] = pair
+        pair[0].addmm_(xq.t(), xq)
+        pair[1].addmm_(xq.t(), xf)
+
+    def router_capture(path):
+        def hook(_m, _in, out):
+            cap_routes[path] = out[2].detach()
+        return hook
+
+    def router_force(path):
+        def hook(_m, _in, out):
+            logits, scores, indices = out
+            forced = cap_routes.get(path)
+            if forced is None:
+                return out
+            return logits, scores, forced.to(indices.device)
+        return hook
+
+    def moe_capture(target, store):
+        def hook(module, inputs):
+            hidden, top_k = inputs[:2]
+            per_expert = {}
+            for expert in range(target.num_experts):
+                idx = torch.where(top_k == expert)[0]
+                if idx.numel() == 0:
+                    continue
+                current = hidden[idx].detach().reshape(-1, hidden.shape[-1]).to(torch.float32)
+                gate, up = F.linear(current.to(module.gate_up_proj.dtype),
+                                    module.gate_up_proj[expert]).chunk(2, dim=-1)
+                inner = (module.act_fn(gate) * up).detach().to(torch.float32)
+                per_expert[target.gate_up_path(expert)] = current
+                per_expert[target.down_path(expert)] = inner
+            store[target.path] = per_expert
+        return hook
+
+    def moe_consume(target, fp_store):
+        def hook(module, inputs):
+            captured = fp_store.pop(target.path, {})
+            hidden, top_k = inputs[:2]
+            for expert in range(target.num_experts):
+                idx = torch.where(top_k == expert)[0]
+                if idx.numel() == 0:
+                    continue
+                current = hidden[idx].detach().reshape(-1, hidden.shape[-1]).to(torch.float32)
+                gate, up = F.linear(current.to(module.gate_up_proj.dtype),
+                                    module.gate_up_proj[expert]).chunk(2, dim=-1)
+                inner = (module.act_fn(gate) * up).detach().to(torch.float32)
+                for path, xq in ((target.gate_up_path(expert), current),
+                                 (target.down_path(expert), inner)):
+                    xf = captured.get(path)
+                    if xf is None or xf.shape != xq.shape:
+                        continue          # routing still diverged: skip, do not pair noise
+                    accumulate(path, xq, xf.to(xq.device))
+        return hook
+
     for path in targets:
         lin_fp = model_fp.get_submodule(path)
         lin_q = model_q.get_submodule(path)
         hooks.append(lin_fp.register_forward_pre_hook(fp_hook(path, lin_fp.in_features)))
         hooks.append(lin_q.register_forward_pre_hook(q_hook(path, lin_q.in_features)))
+    fp_moe_store: dict[str, dict] = {}
+    for router_path in routers or []:
+        hooks.append(model_fp.get_submodule(router_path)
+                     .register_forward_hook(router_capture(router_path)))
+        hooks.append(model_q.get_submodule(router_path)
+                     .register_forward_hook(router_force(router_path)))
+    for target in moe_targets_fp or []:
+        hooks.append(target.module.register_forward_pre_hook(
+            moe_capture(target, fp_moe_store)))
+    for target in moe_targets_q or []:
+        hooks.append(target.module.register_forward_pre_hook(
+            moe_consume(target, fp_moe_store)))
     was_fp, was_q = model_fp.training, model_q.training
     model_fp.eval()
     model_q.eval()
@@ -143,6 +227,8 @@ def asym_solve_states(model: nn.Module, calib_batches, targets: list[str], *,
                       model_fp: nn.Module | None = None,
                       w0: dict[str, torch.Tensor] | None = None,
                       fp_device: str | None = None,
+                      moe_targets=None, moe_targets_fp=None, routers=None,
+                      moe_states: dict | None = None,
                       progress: bool = True) -> dict[str, tuple]:
     """Sequential asymmetric solve over ``targets`` (named_modules order == execution
     order). Returns {path: (S, t, c, perm, salient_idx, salient_val)} on CPU, mutating
@@ -165,9 +251,52 @@ def asym_solve_states(model: nn.Module, calib_batches, targets: list[str], *,
     chunks = [targets[i: i + max(1, int(chunk_layers))]
               for i in range(0, len(targets), max(1, int(chunk_layers)))]
     done = 0
+    moe_targets = list(moe_targets or [])
     try:
         for ci, chunk in enumerate(chunks):
-            stats = collect_asym_stats(model, model_fp, chunk, calib_batches)
+            # MoE targets are collected on the LAST chunk: the stacked experts of
+            # every layer run in one pass anyway, and the routers must be forced for
+            # the whole tower, not per chunk.
+            last = ci == len(chunks) - 1
+            stats = collect_asym_stats(
+                model, model_fp, chunk, calib_batches,
+                moe_targets_q=moe_targets if last else None,
+                moe_targets_fp=moe_targets_fp if last else None,
+                routers=routers if last else None,
+            )
+            if moe_targets and ci == len(chunks) - 1 and moe_states is not None:
+                for target in moe_targets:
+                    per_expert = []
+                    for expert in range(target.num_experts):
+                        slices = []
+                        for path, weight in (
+                            (target.gate_up_path(expert),
+                             target.module.gate_up_proj[expert]),
+                            (target.down_path(expert),
+                             target.module.down_proj[expert]),
+                        ):
+                            pair = stats.pop(path, None)
+                            w = weight.data.float()
+                            if pair is None:      # expert unseen: data-free solve
+                                H_e = torch.eye(w.shape[1], dtype=torch.float32,
+                                                device=w.device)
+                                wt_e = w
+                            else:
+                                H_e, G_e = pair
+                                wt_e = asym_target_weights(w, H_e, G_e,
+                                                           percdamp=percdamp,
+                                                           strength=strength)
+                            state_e, _ = solve_group_state(
+                                wt_e, H_e, group=group, C=C, percdamp=percdamp,
+                                act_order=act_order, refine_iters=refine_iters,
+                                scale_refit=scale_refit, grid=grid, itf_iters=itf_iters,
+                                salient_first=salient_first,
+                                salient_scope=salient_scope,
+                                in_sweep_refit=in_sweep_refit,
+                            )
+                            slices.append(state_e)
+                        per_expert.append(tuple(slices))
+                    moe_states[target.path] = per_expert
             for path in chunk:
                 H_q, G = stats.pop(path)
                 lin = model.get_submodule(path)
