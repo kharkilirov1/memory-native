@@ -55,9 +55,24 @@ def calibration_batches():
     """Mix-corpus batches when DATA_DIR is given, random ids otherwise (the
     latter is only meaningful for a plumbing smoke, not for quality)."""
     if DATA_DIR:
-        from memory_native.recovery.runtime import MixCorpus  # type: ignore
+        import json
 
-        mix = MixCorpus(DATA_DIR, seq=SEQ, batch=1)
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from recovery_session import DomainMix  # type: ignore
+
+        # Corpus bins are donor-BPE-specific: calibrating a 262k-vocab donor on a
+        # Qwen-tokenized corpus produces finite, meaningless Hessians. Cheap to
+        # check, invisible if it goes wrong.
+        with open(os.path.join(DATA_DIR, "manifest.json"), encoding="utf-8") as handle:
+            built_with = json.load(handle).get("tokenizer")
+        if built_with and os.path.basename(str(built_with).rstrip("/")) \
+                != os.path.basename(MODEL.rstrip("/")):
+            raise SystemExit(
+                f"corpus in {DATA_DIR} was tokenized with {built_with!r} but the donor "
+                f"is {MODEL!r}; rebuild it with MODEL={MODEL} "
+                "scripts/build_mix_corpus.py"
+            )
+        mix = DomainMix(DATA_DIR, seq=SEQ, batch=1)
         return [mix.batch_at(100_000 + i, "cpu") for i in range(CALIB_BATCHES)]
     from transformers import AutoConfig
 
@@ -82,8 +97,11 @@ def main() -> int:
         salient_scope=SALIENT_SCOPE, in_sweep_refit=IN_SWEEP_REFIT,
     )
     state = load_streamed_state(OUT_DIR)
+    # Match ".state", never "counter.state": only bias-carrying linears nest under
+    # CounterLinearWithBias and pick up that infix, so the narrower filter silently
+    # skips every bias-free layer (it undercounted a 1.5B run by 15x).
     ternary = sum(v.numel() * v.element_size()
-                  for k, v in state.items() if k.endswith("counter.state"))
+                  for k, v in state.items() if k.endswith(".state"))
     print(f"\nblocks {report.blocks_converted} converted "
           f"({report.blocks_resumed} already done), targets {len(report.targets)}, "
           f"coeffs {report.coeffs:,}")

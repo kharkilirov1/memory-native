@@ -144,6 +144,46 @@ def itf_grid(Wg: torch.Tensor, *, iters: int = 3,
     return s_pos, s_neg, t
 
 
+def _solve_spd_batch(A: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """Solve A s = b for a batch of SYMMETRIC POSITIVE-DEFINITE A, via Cholesky.
+
+    A is a Gram matrix in the ternary-code basis (A[o,k,l] = <T_k H, T_l>_row-o
+    with H symmetric PSD), so it is symmetric PSD by construction and PD once the
+    ridge is on the diagonal. Cholesky is therefore the right factorization on the
+    merits -- and it also routes around a real failure in the batched LU path:
+    torch.linalg.solve on a large batch of small matrices floods
+
+        Intel oneMKL ERROR: Parameter 6 was incorrect on entry to SLASWP
+
+    (parameter 6 of SLASWP is the pivot array), which surfaces either as
+    "Pivots given to lu_solve must all be greater or equal to 1" or, when MKL
+    keeps writing through the bad pivots, as a process-killing access violation.
+    Seen on the widest layer of gemma-4-12B, down_proj [3840, 15360] -> a batch of
+    3840 matrices of 240x240, and it is intermittent, which is why it went
+    unreproduced for so long.
+
+    Any row Cholesky rejects (info != 0, i.e. not PD after the ridge) falls back
+    to a single-matrix solve, and then to the diagonal, so a bad row degrades
+    instead of taking the run down.
+    """
+    L, info = torch.linalg.cholesky_ex(A)
+    s = torch.cholesky_solve(b.unsqueeze(2), L).squeeze(2)
+    bad = info != 0
+    if bool(bad.any()):
+        rows = bad.nonzero(as_tuple=True)[0]
+        warnings.warn(
+            f"align_scales_output: {rows.numel()} of {A.shape[0]} rows are not "
+            "positive-definite after damping; falling back per row",
+            RuntimeWarning,
+        )
+        for i in rows.tolist():
+            try:
+                s[i] = torch.linalg.solve(A[i], b[i])
+            except RuntimeError:
+                s[i] = b[i] / A[i].diagonal().clamp_min(1e-12)
+    return s
+
+
 @torch.no_grad()
 def align_scales_output(w: torch.Tensor, T: torch.Tensor, H: torch.Tensor, *,
                         group: int = 128, grid: str = "sym",
@@ -186,7 +226,7 @@ def align_scales_output(w: torch.Tensor, T: torch.Tensor, H: torch.Tensor, *,
             A[:, k, l] = (U[:, blocks[l]] * codes[l]).sum(dim=1)
     diag = A.diagonal(dim1=1, dim2=2)
     diag.add_(ridge * diag.mean(dim=1, keepdim=True).clamp_min(1e-12))
-    s = torch.linalg.solve(A, b.unsqueeze(2)).squeeze(2).clamp_min(1e-8)
+    s = _solve_spd_batch(A, b).clamp_min(1e-8)
     Q = torch.zeros_like(w)
     for k in range(K):
         Q[:, blocks[k]] += s[:, k].unsqueeze(1) * codes[k]

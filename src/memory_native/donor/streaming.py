@@ -225,13 +225,20 @@ def _materialize(module: nn.Module, prefix: str, src: _WeightSource, device, dty
             if not src.has(key):
                 missing.append(key)
                 continue
-            param.copy_(src.get(key, dtype).to(device))
+            # Read in the checkpoint's own dtype and let copy_ do the conversion.
+            # Asking the source to cast first materializes a SECOND full-size fp32
+            # tensor on top of the destination to_empty already allocated -- for
+            # gemma-4's 262144x3840 embeddings that is 3.75 GiB of avoidable peak
+            # on top of an open 22 GiB mmap, and it crashed the run with a Windows
+            # access violation (the OS fails a mapped page rather than raising
+            # MemoryError). copy_ converts elementwise, no temporary.
+            param.copy_(src.get(key).to(device))
         for name, buf in list(module.named_buffers(recurse=True)):
             if name in non_persistent:
                 continue                       # already filled from the probe above
             key = f"{prefix}.{name}"
             if src.has(key):
-                buf.copy_(src.get(key, dtype).to(device))
+                buf.copy_(src.get(key).to(device))
             else:
                 missing.append(key)
     if missing:
