@@ -135,7 +135,13 @@ optim + activation pools the method zeroes.
    module builds its gate/up/down intermediates INSIDE the HF forward where a hook
    cannot reach them (recomputing does not help: a recomputed tensor is outside the
    autograd graph). It needs the expert forward re-expressed under our own graph.
-   Batched expert solving (DeepSeek-V3 is ~44 700 matrices) is still just performance.
+   Batched expert solving: MEASURED AND DROPPED. The premise was that ~44 700 python
+   solve calls would be dominated by per-call overhead — they are not. On this CPU a V3
+   expert costs 107.7 s (gate_up 4096x7168 = 84.1 s, down 7168x2048 = 23.6 s) while the
+   per-call floor is 157 ms, i.e. **0.3%**; batching would remove 1.3 h out of 446
+   CPU-hours for the full 14 906 experts. The cost is the sweep's linear algebra, so the
+   real lever is moving the sweep to GPU (or cutting refine iters), not grouping calls.
+   Corollary: DeepSeek-class MoE is not CPU-convertible at all — it needs a GPU.
    **Teacher-forced routing is MEASURED, not speculative** (scratch probe, synthetic
    Mixtral 8 experts / top-2, q tower = fp weights + 15% noise): quantization diverts
    **10.9% of tokens at layer 0 and 25.0% at layer 1** to different experts, so without
