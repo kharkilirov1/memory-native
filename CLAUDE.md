@@ -40,6 +40,8 @@ optim + activation pools the method zeroes.
   `salient_first` BiLLM-style split, `salient_scope="layer"` global top-K budget,
   `solve_group_state` = the shared one-layer deploy solve,
   `collect_hessians_guided` = GuidedQuant loss-weighted H via `hessian_weighting`).
+- `donor/streaming.py` — block-sequential streaming conversion (peak memory set by block
+  width, not model size; MoE-capable; resumable via manifest).
 - `donor/asym.py` — GPTAQ-style cascade calibration (`calibration="asym"`): sequential
   two-tower collection of H_q = X_qᵀX_q and G = X_qᵀX_fp, residual-form target
   w̃ = w + (H_q+λI)⁻¹(G−H_q)w solved by the unchanged v3 solver under H_q.
@@ -119,11 +121,47 @@ optim + activation pools the method zeroes.
    2.678); vs previous campaign best en 47.4 / ru 65.9. Step ≈ 0.9 s (2× salient
    strict channel; was 0.33 s at 1%) — budget ≈19 units for solve+6k steps.
    Checkpoint NOT persisted (no Drive grant) — rerun is seeded/reproducible.
+13. **MoE donor conversion DONE (`efb9879`).** transformers 5.x keeps Mixtral/Qwen3-MoE
+   experts as STACKED PARAMETERS (`mlp.experts.gate_up_proj` [E, 2*inter, hidden]), not
+   `nn.Linear` — the old target walk found ZERO of them and `ptq_warm_start` reported
+   SUCCESS having converted attention only, silently leaving ~87-95% of the weights
+   (measured 87% on a synthetic Mixtral). That silent partial conversion now raises.
+   Adds stacked + legacy discovery, per-expert Hessians over exactly the routed tokens,
+   dead-expert fallback to the data-free solve, rank-deficiency warnings, MoE round-trip
+   in `restore_counter_structure`. Router stays fp32. NOT yet supported: `asym` and
+   `hessian_weighting=end_loss` on MoE (need teacher-forced routing so both towers route
+   identically), batched expert solving (DeepSeek-V3 is ~44 700 matrices).
+14. **Streaming conversion DONE (`315d5de`, `857411a`) — `donor/streaming.py`.**
+   Block-sequential: embeddings → activation buffer, then per block materialize weights
+   lazily from the safetensors shards → accumulate H → solve → swap → re-run → write the
+   block's state to disk → free. Peak memory is set by the block width, not the model
+   size. Measured on the real Qwen2.5-1.5B (peak RSS): in-memory **16.23 GiB** (6.2 GB
+   model + 9.85 GiB of H) vs streaming **3.66 GiB** — 4.4×, and flat in depth.
+   `cascade=True` (default) calibrates each block on the ALREADY-CONVERTED previous one
+   (the asym error-cascade signal, for free); `cascade=False` reproduces in-memory
+   semantics bit-exactly and is one pass cheaper. Incremental output + manifest resume;
+   finished blocks are REPLAYED on resume (skipping them would feed the next block
+   unconverted activations). MoE streams too: transformers stores experts one module per
+   expert and stacks them at load time without exposing the mapping, so the reader
+   reassembles it — `gate_up_proj[e] = cat([w1, w3])`, `down_proj[e] = w2`, verified
+   bit-exact against `from_pretrained`. Unknown layouts raise.
+   CPU cost (measured primitives, ~285 GFLOPS on this box): 1.5B classic ≈ 5 h, full
+   deploy config ≈ 20 h; 70B needs a GPU (4090 ≈ 3.5 h, A100 ≈ 2 h for the deploy config).
 
 ## Gotchas (hard-won, keep)
 
 - Counter layers are **eager-only**: exactly one forward per backward; wrap measurement
   forwards in `torch.no_grad()` or the reuse guard fires.
+- `to_empty()` allocates UNINITIALIZED memory. Rotary `inv_freq` is a COMPUTED buffer
+  that no checkpoint stores, so materializing a skeleton block-by-block left RoPE running
+  on garbage — finite numbers, silently corrupted calibration. Streaming rebuilds rotary
+  from config and `_materialize` raises on any tensor the checkpoint lacks. Caught only
+  because the streaming tests demand bit-exact agreement with the in-memory path.
+- The installed `memory_native` may resolve to a DIFFERENT checkout
+  (`Desktop\memory-native`). Run with `PYTHONPATH=<this repo>/src` and check
+  `memory_native.__file__` before trusting any result.
+- `TEMP` is a Windows system variable — never use it as an env knob name (`GEN_TEMP` in
+  `scripts/infer_counter_cpu.py` exists for exactly that reason).
 - Packed kinds need `in_features % 4 == 0`; strict Triton group update needs a
   power-of-two group size (guard rejects others before launch).
 - Counter layers are bias-free; the swap preserves donor bias via `CounterLinearWithBias`.
