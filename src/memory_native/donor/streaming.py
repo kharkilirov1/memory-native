@@ -225,11 +225,50 @@ def _build_rotary(config, device):
 
     with torch.device(device):
         probe = AutoModelForCausalLM.from_config(config)
-    inner = probe.model if hasattr(probe, "model") else probe
+    inner, _ = _resolve_decoder(probe)
     rotary = inner.rotary_emb
     del probe
     gc.collect()
     return rotary
+
+
+def _resolve_decoder(model: nn.Module) -> tuple[nn.Module, str]:
+    """Return the module owning the decoder block list, and its dotted path.
+
+    A text-only donor puts it at ``model`` (``model.layers``, ``model.embed_tokens``).
+    A multimodal donor nests it: gemma-4 keeps the text tower at
+    ``model.language_model``, so the old hardcoded ``model.layers`` raised
+    AttributeError before a single block was read.
+
+    The path is also the CHECKPOINT prefix -- HF writes tensors under the same
+    dotted name as the module -- so returning it here is what lets ``_materialize``
+    ask for ``model.language_model.layers.0.*`` instead of a wrong ``model.layers.0.*``.
+    Verified against the real gemma-4-12B header: module keys and checkpoint keys
+    match exactly, both sides empty on the difference.
+    """
+    found = [
+        (path, module)
+        for path, module in model.named_modules()
+        if isinstance(getattr(module, "layers", None), nn.ModuleList)
+        and len(module.layers) > 0
+        and hasattr(module, "embed_tokens")
+    ]
+    if not found:
+        raise NotImplementedError(
+            f"{type(model).__name__}: found no decoder module carrying both a "
+            "non-empty .layers ModuleList and .embed_tokens; streaming conversion "
+            "cannot locate the transformer stack"
+        )
+    # The shallowest match is the text decoder itself; anything deeper would be a
+    # nested sub-stack. Ties cannot happen -- two decoders at the same depth would
+    # be an architecture this driver has no defined behaviour for.
+    found.sort(key=lambda item: (item[0].count("."), item[0]))
+    if len(found) > 1 and found[0][0].count(".") == found[1][0].count("."):
+        raise NotImplementedError(
+            f"{type(model).__name__}: ambiguous decoder stacks at "
+            f"{[p for p, _ in found[:2]]}; refusing to guess which one to convert"
+        )
+    return found[0][1], found[0][0]
 
 
 def _block_targets(block: nn.Module, skip) -> list[str]:
@@ -281,12 +320,12 @@ def convert_streaming(
     config = AutoConfig.from_pretrained(model_path)
     with torch.device("meta"):
         skeleton = AutoModelForCausalLM.from_config(config)
-    inner = skeleton.model if hasattr(skeleton, "model") else skeleton
+    inner, stack = _resolve_decoder(skeleton)
     blocks = inner.layers
     report.blocks_total = len(blocks)
 
     # --- embeddings once: the activation buffer lives on CPU, blocks pull micro-batches ---
-    _materialize(inner.embed_tokens, "model.embed_tokens", src, device, dtype)
+    _materialize(inner.embed_tokens, f"{stack}.embed_tokens", src, device, dtype)
     buffer: list[torch.Tensor] = []
     id_batches = [b for b in calib_batches]
     for ids in id_batches:
@@ -306,9 +345,9 @@ def convert_streaming(
             # A finished block still has to RUN: block i+1 calibrates on its output,
             # so skipping it outright would feed the next block unconverted
             # activations and silently change the result of a resumed run.
-            _materialize(block, f"model.layers.{index}", src, device, dtype)
+            _materialize(block, f"{stack}.layers.{index}", src, device, dtype)
             _reload_block_counters(block, index, out_dir, kind=kind, group=group, C=C,
-                                   counter_kw=counter_kw)
+                                   counter_kw=counter_kw, stack=stack)
             buffer = _run_block(block, buffer, rotary, device, micro_batch, collect=True)
             block.to("meta")
             gc.collect()
@@ -317,7 +356,7 @@ def convert_streaming(
                       flush=True)
             continue
 
-        _materialize(block, f"model.layers.{index}", src, device, dtype)
+        _materialize(block, f"{stack}.layers.{index}", src, device, dtype)
         stacked = _stacked_moe_targets(block)
         legacy = _legacy_expert_targets(block)
         # keep the fail-loudly property of the in-memory path: a MoE layout this
@@ -373,9 +412,9 @@ def convert_streaming(
                 counter = CounterLinearWithBias(counter, bias.detach().clone())
             setattr(parent, child, counter.to(device))
             report.coeffs += lin.in_features * lin.out_features
-            report.targets.append(f"model.layers.{index}.{path}")
+            report.targets.append(f"{stack}.layers.{index}.{path}")
             for key, value in counter.state_dict().items():
-                state_out[f"model.layers.{index}.{path}.{key}"] = value.cpu()
+                state_out[f"{stack}.layers.{index}.{path}.{key}"] = value.cpu()
             hessians.pop(path, None)
 
         # --- stacked MoE experts: solve each slice, then swap through ptq's builder ---
@@ -402,13 +441,13 @@ def convert_streaming(
                     report.coeffs += (target.module.gate_up_proj[expert].numel()
                                       + target.module.down_proj[expert].numel())
                     report.targets.append(
-                        f"model.layers.{index}.{target.expert_path(expert)}")
+                        f"{stack}.layers.{index}.{target.expert_path(expert)}")
                 moe_states[target.path] = per_expert
             _swap_stacked_moe(block, stacked, moe_states, moe_report, is_group=True,
                               kind=kind, group=group, C=C, counter_kw=counter_kw)
             for key, value in block.state_dict().items():
                 if "experts" in key:
-                    state_out[f"model.layers.{index}.{key}"] = value.cpu()
+                    state_out[f"{stack}.layers.{index}.{key}"] = value.cpu()
 
         # --- next block's activations ---
         # cascade: re-run the CONVERTED block so block i+1 calibrates on quantized
@@ -422,7 +461,8 @@ def convert_streaming(
         done.add(index)
         with open(manifest_path, "w", encoding="utf-8") as handle:
             json.dump({"blocks_done": sorted(done), "blocks_total": report.blocks_total,
-                       "model_path": model_path, "group": group, "C": C, "kind": kind},
+                       "model_path": model_path, "group": group, "C": C, "kind": kind,
+                       "stack": stack},
                       handle, indent=2)
         report.blocks_converted += 1
 
@@ -465,11 +505,11 @@ def _make_stacked_moe_hook(target, hessians: dict):
 
 
 def _reload_block_counters(block, index: int, out_dir: str, *, kind, group, C,
-                           counter_kw) -> None:
+                           counter_kw, stack: str = "model") -> None:
     """Rebuild an already-converted block's counter layers from its saved file."""
     from ..recovery.runtime import restore_counter_structure
 
-    prefix = f"model.layers.{index}."
+    prefix = f"{stack}.layers.{index}."
     saved = torch.load(os.path.join(out_dir, f"block_{index:04d}.pt"),
                        map_location="cpu", weights_only=True)
     stripped = {k[len(prefix):]: v for k, v in saved.items() if k.startswith(prefix)}

@@ -222,3 +222,85 @@ def test_unknown_expert_layout_still_refuses(tmp_path):
     with pytest.raises((RuntimeError, NotImplementedError, KeyError)):
         convert_streaming(broken, _calib(cfg), os.path.join(str(tmp_path), "out"),
                           micro_batch=2, progress=False, **SOLVE)
+
+
+def test_resolve_decoder_finds_a_nested_text_tower():
+    """A multimodal donor nests the decoder: gemma-4 keeps it at
+    `model.language_model`, not `model`. The driver used to hardcode
+    `skeleton.model.layers` and died with AttributeError before reading a single
+    block; worse, that same hardcoded string is the CHECKPOINT prefix, so a wrong
+    resolution asks the safetensors file for names that do not exist."""
+    from torch import nn
+
+    from memory_native.donor.streaming import _resolve_decoder
+
+    class Decoder(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.embed_tokens = nn.Embedding(8, 4)
+            self.layers = nn.ModuleList([nn.Linear(4, 4), nn.Linear(4, 4)])
+
+    class Wrapper(nn.Module):          # multimodal: model.language_model.layers
+        def __init__(self):
+            super().__init__()
+            self.model = nn.Module()
+            self.model.language_model = Decoder()
+            self.model.vision_tower = nn.Linear(4, 4)
+
+    inner, stack = _resolve_decoder(Wrapper())
+    assert stack == "model.language_model"
+    assert len(inner.layers) == 2
+
+    class Plain(nn.Module):            # text-only: model.layers
+        def __init__(self):
+            super().__init__()
+            self.model = Decoder()
+
+    inner, stack = _resolve_decoder(Plain())
+    assert stack == "model"
+
+
+def test_resolve_decoder_refuses_instead_of_guessing():
+    """No decoder, or two equally plausible ones, must raise: silently picking one
+    would convert the wrong stack and still report success."""
+    from torch import nn
+
+    from memory_native.donor.streaming import _resolve_decoder
+
+    class NoDecoder(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.encoder = nn.Linear(4, 4)
+
+    with pytest.raises(NotImplementedError, match="no decoder module"):
+        _resolve_decoder(NoDecoder())
+
+    class Decoder(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.embed_tokens = nn.Embedding(8, 4)
+            self.layers = nn.ModuleList([nn.Linear(4, 4)])
+
+    class TwoTowers(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.text = Decoder()
+            self.audio = Decoder()
+
+    with pytest.raises(NotImplementedError, match="ambiguous decoder"):
+        _resolve_decoder(TwoTowers())
+
+
+def test_real_donor_still_resolves_to_the_model_prefix():
+    """Non-regression on the shape every other test uses: a plain CausalLM must
+    still resolve to the `model` prefix the committed state keys were written with."""
+    from transformers import Qwen2Config, Qwen2ForCausalLM
+
+    from memory_native.donor.streaming import _resolve_decoder
+
+    cfg = Qwen2Config(vocab_size=64, hidden_size=32, intermediate_size=64,
+                      num_hidden_layers=2, num_attention_heads=4,
+                      num_key_value_heads=2)
+    inner, stack = _resolve_decoder(Qwen2ForCausalLM(cfg))
+    assert stack == "model"
+    assert len(inner.layers) == 2
