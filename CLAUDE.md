@@ -129,8 +129,16 @@ optim + activation pools the method zeroes.
    Adds stacked + legacy discovery, per-expert Hessians over exactly the routed tokens,
    dead-expert fallback to the data-free solve, rank-deficiency warnings, MoE round-trip
    in `restore_counter_structure`. Router stays fp32. NOT yet supported: `asym` and
-   `hessian_weighting=end_loss` on MoE (need teacher-forced routing so both towers route
-   identically), batched expert solving (DeepSeek-V3 is ~44 700 matrices).
+   `hessian_weighting=end_loss` on MoE, batched expert solving (DeepSeek-V3 is ~44 700
+   matrices).
+   **Teacher-forced routing is MEASURED, not speculative** (scratch probe, synthetic
+   Mixtral 8 experts / top-2, q tower = fp weights + 15% noise): quantization diverts
+   **10.9% of tokens at layer 0 and 25.0% at layer 1** to different experts, so without
+   forcing, `G = X_q^T X_fp` for those tokens pairs unrelated activations. The fix works:
+   a forward hook that returns the fp tower's `router_indices` (the router returns
+   `(logits, scores, indices)`; the expert INPUT depends on indices only — scores apply
+   after, so forcing indices alone is sufficient and minimal) makes the expert token
+   assignments identical in both towers. That is the entry point for asym-on-MoE.
 14. **Streaming conversion DONE (`315d5de`, `857411a`) — `donor/streaming.py`.**
    Block-sequential: embeddings → activation buffer, then per block materialize weights
    lazily from the safetensors shards → accumulate H → solve → swap → re-run → write the
