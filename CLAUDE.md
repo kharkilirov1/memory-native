@@ -169,6 +169,12 @@ optim + activation pools the method zeroes.
    bit-exact against `from_pretrained`. Unknown layouts raise.
    CPU cost (measured primitives, ~285 GFLOPS on this box): 1.5B classic ≈ 5 h, full
    deploy config ≈ 20 h; 70B needs a GPU (4090 ≈ 3.5 h, A100 ≈ 2 h for the deploy config).
+   **End-to-end witness on the REAL Qwen2.5-1.5B** (not synthetic): all 28 blocks
+   streamed on CPU, state written per block, then reloaded through the normal
+   `restore_counter_structure` — 196 counter linears restored, 0 missing / 0 unexpected
+   keys, forward finite, top-5 after "The capital of France is" = the/not/a/,/also
+   (solver-only, no recovery finetune). Ternary body on disk: **63.0 MiB** against
+   6.2 GB of fp32 donor weights.
 
 ## Gotchas (hard-won, keep)
 
