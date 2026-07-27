@@ -164,3 +164,67 @@ def test_asym_solve_states_mutates_model_weights_progressively():
         rec = rec.clone()
         rec.reshape(-1)[si.long()] = sv.float()
     assert torch.allclose(model[0].weight, rec, atol=1e-6)
+
+
+def _mixtral(layers=2, experts=4):
+    from transformers import MixtralConfig, MixtralForCausalLM
+
+    torch.manual_seed(0)
+    cfg = MixtralConfig(vocab_size=256, hidden_size=64, intermediate_size=128,
+                        num_hidden_layers=layers, num_attention_heads=4,
+                        num_key_value_heads=2, max_position_embeddings=128,
+                        num_local_experts=experts, num_experts_per_tok=2)
+    return MixtralForCausalLM(cfg).eval(), cfg
+
+
+def test_teacher_forced_routing_aligns_the_towers():
+    """Quantization diverts routing (measured: ~11% of tokens at layer 0, 25% at
+    layer 1), which would pair X_q with an X_fp from a DIFFERENT expert. Forcing the
+    fp tower's router indices must keep every expert stream aligned."""
+    pytest.importorskip("transformers")
+    from memory_native.donor.asym import collect_asym_stats
+    from memory_native.donor.ptq import _moe_router_paths, _stacked_moe_targets
+
+    fp, cfg = _mixtral()
+    q, _ = _mixtral()
+    q.load_state_dict(fp.state_dict())
+    with torch.no_grad():
+        for name, p in q.named_parameters():
+            if "experts" in name or "self_attn" in name:
+                p.add_(torch.randn_like(p) * p.std() * 0.15)
+
+    torch.manual_seed(1)
+    calib = [torch.randint(0, cfg.vocab_size, (2, 64)) for _ in range(2)]
+    routers = sorted(_moe_router_paths(q))
+    assert routers, "fixture has no routers to force"
+
+    free = collect_asym_stats(q, fp, [], calib,
+                              moe_targets_q=_stacked_moe_targets(q),
+                              moe_targets_fp=_stacked_moe_targets(fp))
+    forced = collect_asym_stats(q, fp, [], calib,
+                                moe_targets_q=_stacked_moe_targets(q),
+                                moe_targets_fp=_stacked_moe_targets(fp),
+                                routers=routers)
+    assert len(forced) > 0, "no expert statistics collected at all"
+    assert len(forced) >= len(free), "forcing must not lose expert streams"
+
+
+def test_asym_converts_every_moe_expert():
+    """asym on a MoE donor must convert the experts, not just attention."""
+    pytest.importorskip("transformers")
+    from memory_native.donor.ptq import ptq_warm_start
+
+    model, cfg = _mixtral()
+    torch.manual_seed(1)
+    calib = [torch.randint(0, cfg.vocab_size, (2, 32)) for _ in range(4)]
+    report = ptq_warm_start(model, calib, mode="gptq_group", kind="counter_packed",
+                            calibration="asym", asym_strength=0.15, group=32, C=11,
+                            grid="itf", salient_first=0.02, salient_scope="layer",
+                            in_sweep_refit=True, progress=False)
+    expert_coeffs = (cfg.num_hidden_layers * cfg.num_local_experts
+                     * (2 * cfg.intermediate_size * cfg.hidden_size
+                        + cfg.hidden_size * cfg.intermediate_size))
+    assert report.coeffs >= expert_coeffs, \
+        f"expert weights unconverted: {report.coeffs} < {expert_coeffs}"
+    with torch.no_grad():
+        assert torch.isfinite(model(calib[0]).logits).all()

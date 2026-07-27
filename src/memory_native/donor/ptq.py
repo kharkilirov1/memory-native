@@ -1212,11 +1212,6 @@ def ptq_warm_start(
         raise ValueError("calibration must be 'fp' or 'asym'")
     if hessian_weighting not in {"none", "end_loss"}:
         raise ValueError("hessian_weighting must be 'none' or 'end_loss'")
-    if has_moe and calibration == "asym":
-        raise RuntimeError(
-            "calibration='asym' does not support MoE routing yet; refusing partial "
-            "expert conversion"
-        )
     if has_moe and hessian_weighting == "end_loss":
         raise RuntimeError(
             "hessian_weighting='end_loss' does not support MoE routing yet; refusing "
@@ -1246,6 +1241,11 @@ def ptq_warm_start(
                 print(f"[ptq:asym] pass {pass_i + 1}/{passes}", flush=True)
             states = asym_solve_states(
                 model, calib_batches, targets, group=group, C=C, percdamp=percdamp,
+                moe_targets=stacked_targets,
+                moe_targets_fp=(_stacked_moe_targets(model_fp)
+                                if model_fp is not None else None),
+                routers=sorted(router_paths) if stacked_targets else None,
+                moe_states=moe_states,
                 act_order=act_order, refine_iters=refine_iters, scale_refit=scale_refit,
                 grid=grid, itf_iters=itf_iters, salient_first=salient_first,
                 salient_scope=salient_scope, in_sweep_refit=in_sweep_refit,
