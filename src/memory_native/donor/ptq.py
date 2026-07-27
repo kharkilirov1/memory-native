@@ -1213,9 +1213,17 @@ def ptq_warm_start(
     if hessian_weighting not in {"none", "end_loss"}:
         raise ValueError("hessian_weighting must be 'none' or 'end_loss'")
     if has_moe and hessian_weighting == "end_loss":
+        # Not a wiring gap (asym's was, and got fixed by teacher-forced routing).
+        # end_loss weights each row of H by g_n = mean_o (dL/dy_{n,o})^2, so it needs
+        # dL/dy for EVERY target linear. In a stacked-expert module the per-expert
+        # gate/up/down tensors are created INSIDE the HF forward and are not reachable
+        # from a module hook; recomputing them in a hook does not help either, since a
+        # recomputed tensor is not in the autograd graph and no gradient reaches it.
+        # Supporting this needs the expert forward re-expressed under our own graph.
         raise RuntimeError(
-            "hessian_weighting='end_loss' does not support MoE routing yet; refusing "
-            "partial expert conversion"
+            "hessian_weighting='end_loss' cannot reach per-expert gradients in a "
+            "stacked MoE module (the intermediates live inside the HF forward); "
+            "refusing partial expert conversion"
         )
     sample_counts: dict[str, int] = {}
     moe_states: dict[str, list[tuple]] = {}

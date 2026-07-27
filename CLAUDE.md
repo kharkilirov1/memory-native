@@ -129,8 +129,13 @@ optim + activation pools the method zeroes.
    Adds stacked + legacy discovery, per-expert Hessians over exactly the routed tokens,
    dead-expert fallback to the data-free solve, rank-deficiency warnings, MoE round-trip
    in `restore_counter_structure`. Router stays fp32. `asym` on MoE WORKS via
-   teacher-forced routing (below). NOT yet supported: `hessian_weighting=end_loss` on
-   MoE, batched expert solving (DeepSeek-V3 is ~44 700 matrices).
+   teacher-forced routing (below). NOT supported, with the real reason:
+   `hessian_weighting=end_loss` on MoE is NOT a wiring gap — it weights H rows by
+   `g_n = mean_o (dL/dy)^2` and so needs dL/dy per target linear, but a stacked-expert
+   module builds its gate/up/down intermediates INSIDE the HF forward where a hook
+   cannot reach them (recomputing does not help: a recomputed tensor is outside the
+   autograd graph). It needs the expert forward re-expressed under our own graph.
+   Batched expert solving (DeepSeek-V3 is ~44 700 matrices) is still just performance.
    **Teacher-forced routing is MEASURED, not speculative** (scratch probe, synthetic
    Mixtral 8 experts / top-2, q tower = fp weights + 15% noise): quantization diverts
    **10.9% of tokens at layer 0 and 25.0% at layer 1** to different experts, so without
