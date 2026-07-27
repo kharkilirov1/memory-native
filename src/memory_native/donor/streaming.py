@@ -173,19 +173,53 @@ class _WeightSource:
         self._handles.clear()
 
 
-def _materialize(module: nn.Module, prefix: str, src: _WeightSource, device, dtype) -> None:
+def _set_by_path(module: nn.Module, dotted: str) -> torch.Tensor:
+    """Fetch the buffer at ``dotted`` so it can be written in place."""
+    owner, _, leaf = dotted.rpartition(".")
+    return getattr(module.get_submodule(owner) if owner else module, leaf)
+
+
+def _non_persistent_names(module: nn.Module) -> set[str]:
+    """Dotted names of ``module``'s non-persistent buffers.
+
+    PyTorch's own definition of "computed": a buffer registered with
+    ``persistent=False`` is deliberately kept out of the state dict, so no
+    checkpoint can ever carry it. That makes the flag an exact criterion rather
+    than a name blacklist -- gemma-4 alone has five (``embed_scale`` plus four
+    rotary ``inv_freq`` variants for its full/sliding attention split).
+    """
+    out: set[str] = set()
+    for path, sub in module.named_modules():
+        for name in getattr(sub, "_non_persistent_buffers_set", ()):
+            out.add(f"{path}.{name}" if path else name)
+    return out
+
+
+def _materialize(module: nn.Module, prefix: str, src: _WeightSource, device, dtype,
+                 computed: dict[str, torch.Tensor] | None = None) -> None:
     """Give a meta-device module real weights, one tensor at a time.
 
     ``to_empty`` allocates UNINITIALIZED memory, so every tensor it creates has to
     be written before use. Anything the checkpoint does not carry is an error
     here, not a silent pass: a computed buffer left as garbage (rotary
     ``inv_freq`` is the classic one) still produces finite numbers and corrupts
-    the calibration invisibly. Modules that own computed buffers are rebuilt from
-    config instead -- see ``_build_rotary``.
+    the calibration invisibly.
+
+    Non-persistent buffers are the computed ones, and they are supplied through
+    ``computed`` (harvested from a real one-layer probe) rather than looked up in
+    the checkpoint, where they do not and cannot exist. Missing from BOTH sources
+    is still a hard error.
     """
+    non_persistent = _non_persistent_names(module)
     module.to_empty(device=device)
     missing: list[str] = []
     with torch.no_grad():
+        for name in sorted(non_persistent):
+            value = (computed or {}).get(name)
+            if value is None:
+                missing.append(f"{prefix}.{name} (computed buffer, not in any checkpoint)")
+                continue
+            _set_by_path(module, name).copy_(value.to(device))
         for name, param in list(module.named_parameters(recurse=True)):
             key = f"{prefix}.{name}"
             if not src.has(key):
@@ -193,6 +227,8 @@ def _materialize(module: nn.Module, prefix: str, src: _WeightSource, device, dty
                 continue
             param.copy_(src.get(key, dtype).to(device))
         for name, buf in list(module.named_buffers(recurse=True)):
+            if name in non_persistent:
+                continue                       # already filled from the probe above
             key = f"{prefix}.{name}"
             if src.has(key):
                 buf.copy_(src.get(key, dtype).to(device))
@@ -217,19 +253,49 @@ def _materialize(module: nn.Module, prefix: str, src: _WeightSource, device, dty
         )
 
 
+def _shallow_config(config):
+    """A copy of ``config`` with a single decoder layer.
+
+    The probe below has to be built on a REAL device to get real computed
+    buffers, and building the donor's full depth there would allocate the whole
+    model -- ~24 GiB for gemma-4-12B, which is the very thing streaming exists to
+    avoid (it also does not fit this 32 GiB box). No computed buffer depends on
+    depth: rotary comes from head_dim/rope_theta/max_position, gemma's
+    embed_scale from hidden_size. Depth is the one dimension that is safe to cut.
+    """
+    import copy
+
+    probe = copy.deepcopy(config)
+    for holder in (getattr(probe, "text_config", None), probe):
+        if holder is not None and getattr(holder, "num_hidden_layers", None):
+            holder.num_hidden_layers = 1
+    return probe
+
+
+def _build_probe(config, device):
+    """One-layer real instance, the single source of every computed value."""
+    from transformers import AutoModelForCausalLM
+
+    with torch.device(device):
+        return AutoModelForCausalLM.from_config(_shallow_config(config))
+
+
 def _build_rotary(config, device):
     """Rotary embeddings own COMPUTED buffers (inv_freq) that no checkpoint
     stores, so they are constructed from config on a real device rather than
     materialized from the shards."""
-    from transformers import AutoModelForCausalLM
-
-    with torch.device(device):
-        probe = AutoModelForCausalLM.from_config(config)
+    probe = _build_probe(config, device)
     inner, _ = _resolve_decoder(probe)
     rotary = inner.rotary_emb
     del probe
     gc.collect()
     return rotary
+
+
+def _computed_buffers(module: nn.Module) -> dict[str, torch.Tensor]:
+    """Every non-persistent buffer of ``module``, keyed by its dotted name."""
+    return {name: _set_by_path(module, name).detach().clone()
+            for name in _non_persistent_names(module)}
 
 
 def _resolve_decoder(model: nn.Module) -> tuple[nn.Module, str]:
@@ -324,15 +390,25 @@ def convert_streaming(
     blocks = inner.layers
     report.blocks_total = len(blocks)
 
+    # --- computed buffers come from one real one-layer probe, never from the
+    # checkpoint (they are non-persistent by construction and are not in it) ---
+    probe = _build_probe(config, device)
+    probe_inner, _ = _resolve_decoder(probe)
+    computed_embed = _computed_buffers(probe_inner.embed_tokens)
+    computed_block = _computed_buffers(probe_inner.layers[0])
+    rotary = probe_inner.rotary_emb
+    del probe
+    gc.collect()
+
     # --- embeddings once: the activation buffer lives on CPU, blocks pull micro-batches ---
-    _materialize(inner.embed_tokens, f"{stack}.embed_tokens", src, device, dtype)
+    _materialize(inner.embed_tokens, f"{stack}.embed_tokens", src, device, dtype,
+                 computed=computed_embed)
     buffer: list[torch.Tensor] = []
     id_batches = [b for b in calib_batches]
+    _assert_window_covers(config, id_batches)
     for ids in id_batches:
         buffer.append(inner.embed_tokens(ids.to(device)).to("cpu"))
     inner.embed_tokens.to("meta")
-
-    rotary = _build_rotary(config, device)
 
     peak = _tensor_bytes(*buffer)
     counter_kw = {k: solve_kw.pop(k) for k in list(solve_kw) if k in {
@@ -345,7 +421,8 @@ def convert_streaming(
             # A finished block still has to RUN: block i+1 calibrates on its output,
             # so skipping it outright would feed the next block unconverted
             # activations and silently change the result of a resumed run.
-            _materialize(block, f"{stack}.layers.{index}", src, device, dtype)
+            _materialize(block, f"{stack}.layers.{index}", src, device, dtype,
+                         computed=computed_block)
             _reload_block_counters(block, index, out_dir, kind=kind, group=group, C=C,
                                    counter_kw=counter_kw, stack=stack)
             buffer = _run_block(block, buffer, rotary, device, micro_batch, collect=True)
@@ -356,7 +433,8 @@ def convert_streaming(
                       flush=True)
             continue
 
-        _materialize(block, f"{stack}.layers.{index}", src, device, dtype)
+        _materialize(block, f"{stack}.layers.{index}", src, device, dtype,
+                     computed=computed_block)
         stacked = _stacked_moe_targets(block)
         legacy = _legacy_expert_targets(block)
         # keep the fail-loudly property of the in-memory path: a MoE layout this
@@ -519,6 +597,65 @@ def _reload_block_counters(block, index: int, out_dir: str, *, kind, group, C,
         raise RuntimeError(f"block {index}: unexpected keys on reload: {unexpected[:4]}")
 
 
+def _assert_window_covers(config, id_batches) -> None:
+    """Refuse sequences longer than a sliding-attention donor's window.
+
+    Blocks are run bare, and a bare HF attention call with no mask is plain
+    causal -- correct for a full-attention layer, WRONG for a sliding one as
+    soon as the sequence outgrows the window: those layers would attend to the
+    whole prefix and the Hessians would be silently collected off the model the
+    donor actually is. Under the window the two masks coincide exactly, so short
+    calibration sequences are safe; longer ones need real sliding masks, which
+    this driver does not build yet.
+    """
+    text = getattr(config, "text_config", config)
+    window = getattr(text, "sliding_window", None)
+    types = set(getattr(text, "layer_types", None) or ())
+    if not window or "sliding_attention" not in types:
+        return
+    longest = max((int(b.shape[-1]) for b in id_batches), default=0)
+    if longest > window:
+        raise NotImplementedError(
+            f"calibration sequence length {longest} exceeds the donor's sliding "
+            f"window {window}; the driver runs blocks without a sliding mask, so "
+            "sliding-attention layers would see the full prefix and their Hessians "
+            "would not match the real model. Use sequences <= the window."
+        )
+
+
+def _rotary_kwargs(rotary, block) -> dict:
+    """Extra kwargs this donor's rotary needs, derived from its own signature.
+
+    A single-rope donor takes (x, position_ids). Gemma-4 interleaves sliding and
+    full attention and keeps one inv_freq per kind, so its rotary picks the set
+    by ``layer_type`` -- calling it without one raises AttributeError on
+    ``None_inv_freq``. The block carries its own ``layer_type``, so the value is
+    read from the block rather than guessed.
+    """
+    import inspect
+
+    try:
+        params = inspect.signature(rotary.forward).parameters
+    except (TypeError, ValueError):
+        return {}
+    if "layer_type" not in params:
+        return {}
+    # gemma-4 hangs it off the attention submodule, not the decoder layer.
+    layer_type = next(
+        (value for value in (getattr(sub, "layer_type", None)
+                             for _, sub in block.named_modules())
+         if value is not None),
+        None,
+    )
+    if layer_type is None:
+        raise NotImplementedError(
+            f"{type(rotary).__name__} selects its frequencies by layer_type, but "
+            f"nothing under {type(block).__name__} exposes one; streaming cannot "
+            "pick the right rope without guessing"
+        )
+    return {"layer_type": layer_type}
+
+
 def _run_block(block, buffer, rotary, device, micro_batch, collect):
     """Push the activation buffer through one block; optionally keep the output.
 
@@ -526,7 +663,13 @@ def _run_block(block, buffer, rotary, device, micro_batch, collect):
     which together with the per-block Hessians is what bounds peak memory. Note
     it also sets the Hessian accumulation order, so changing it perturbs the last
     bits of H (and very occasionally a ternary code at a rounding boundary).
+
+    No attention mask is passed: with ``attention_mask=None`` the HF attention
+    path is already causal (checked -- editing the last token leaves the first
+    token's output bit-identical). Sliding-window donors are handled by the
+    guard in ``convert_streaming``, not here.
     """
+    rotary_kw = _rotary_kwargs(rotary, block)
     out: list[torch.Tensor] = []
     for chunk in buffer:
         pieces = (chunk.split(micro_batch, dim=0) if micro_batch and micro_batch > 0
@@ -535,7 +678,7 @@ def _run_block(block, buffer, rotary, device, micro_batch, collect):
         for piece in pieces:
             hidden = piece.to(device)
             positions = torch.arange(hidden.shape[1], device=device).unsqueeze(0)
-            pos_emb = rotary(hidden, positions)
+            pos_emb = rotary(hidden, positions, **rotary_kw)
             result = block(hidden, position_embeddings=pos_emb)
             result = result[0] if isinstance(result, tuple) else result
             if collect:

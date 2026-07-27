@@ -173,8 +173,13 @@ optim + activation pools the method zeroes.
    streamed on CPU, state written per block, then reloaded through the normal
    `restore_counter_structure` — 196 counter linears restored, 0 missing / 0 unexpected
    keys, forward finite, top-5 after "The capital of France is" = the/not/a/,/also
-   (solver-only, no recovery finetune). Ternary body on disk: **63.0 MiB** against
-   6.2 GB of fp32 donor weights.
+   (solver-only, no recovery finetune). Counter state on disk: **937.1 MiB** of
+   6-bit packed `.state`, **1130.6 MiB** with scales + salient + perm.
+   CORRECTION: this line used to read "63.0 MiB", measured with a filter matching
+   `counter.state`. Only the 84 BIAS-carrying attention linears nest under
+   `CounterLinearWithBias` and get that `.counter.` infix; the 112 bias-free ones
+   (MLP + o_proj) end in plain `.state` and were silently skipped — 15x too low.
+   Match `.state`, never `counter.state`.
 
 ## Gotchas (hard-won, keep)
 
