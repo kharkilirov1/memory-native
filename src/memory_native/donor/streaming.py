@@ -24,11 +24,11 @@ fp-tower semantics (each block calibrated on unquantized inputs).
 Output is incremental: one file per block plus a manifest, so an interrupted run
 resumes at the first unfinished block instead of starting over.
 
-MoE donors are NOT supported here yet and are rejected loudly: transformers
-stores Mixtral-style experts on disk in the legacy per-expert layout and
-converts them to stacked tensors at load time without exposing the mapping, so
-resolving expert weights by name from the shards needs per-family conversion
-code. The in-memory path (which lets transformers do the loading) handles MoE.
+MoE donors work: transformers stores Mixtral-style experts on disk one module
+per expert and stacks them at load time without exposing the mapping, so the
+weight reader reconstructs it (gate_up_proj[e] = cat([w1, w3]), down_proj[e] =
+w2 -- verified bit-exact against from_pretrained). Layouts the reader does not
+recognise still fail loudly rather than converting a subset.
 """
 from __future__ import annotations
 
@@ -41,11 +41,15 @@ import torch
 from torch import nn
 
 from ..convert import CounterLinearWithBias
+from ..convert import SwapReport
 from .ptq import (
     _assert_no_unhandled_moe,
     _group_counter_from_state,
+    _legacy_expert_targets,
     _moe_router_paths,
     _parent_and_name,
+    _stacked_moe_targets,
+    _swap_stacked_moe,
     _target_paths,
     solve_group_state,
 )
@@ -100,7 +104,16 @@ class _WeightSource:
     def keys(self):
         return self._file_of.keys()
 
+    def has(self, name: str) -> bool:
+        """Present verbatim, or assemblable from a legacy expert layout."""
+        return name in self._file_of or self._assemble_plan(name) is not None
+
     def get(self, name: str, dtype=None) -> torch.Tensor:
+        if name not in self._file_of:
+            assembled = self._assemble(name, dtype)
+            if assembled is None:
+                raise KeyError(name)
+            return assembled
         file = self._file_of[name]
         handle = self._handles.get(file)
         if handle is None:
@@ -108,6 +121,53 @@ class _WeightSource:
             self._handles[file] = handle
         t = handle.get_tensor(name)
         return t.to(dtype) if dtype is not None else t
+
+    # --- legacy expert layout -------------------------------------------------
+    # transformers stores Mixtral-style experts one module per expert on disk and
+    # stacks them at load time; the mapping is not exposed, so the reader
+    # reconstructs it. Verified bit-exact against from_pretrained:
+    #   gate_up_proj[e] = cat([w1, w3], dim=0)      down_proj[e] = w2
+    _LEGACY_LAYOUTS = (
+        ("block_sparse_moe", ("w1", "w3", "w2")),        # Mixtral
+        ("mlp", ("gate_proj", "up_proj", "down_proj")),  # Qwen3-MoE style
+    )
+
+    def _assemble_plan(self, name: str):
+        """Return (layer_prefix, container, parts, what) if `name` can be built."""
+        for suffix, what in ((".mlp.experts.gate_up_proj", "gate_up"),
+                             (".mlp.experts.down_proj", "down"),
+                             (".mlp.gate.weight", "router")):
+            if not name.endswith(suffix):
+                continue
+            layer_prefix = name[: -len(suffix)]
+            for container, parts in self._LEGACY_LAYOUTS:
+                probe = (f"{layer_prefix}.{container}.gate.weight" if what == "router"
+                         else f"{layer_prefix}.{container}.experts.0.{parts[0]}.weight")
+                if probe in self._file_of and probe != name:
+                    return layer_prefix, container, parts, what
+        return None
+
+    def _assemble(self, name: str, dtype):
+        plan = self._assemble_plan(name)
+        if plan is None:
+            return None
+        layer_prefix, container, parts, what = plan
+        if what == "router":
+            return self.get(f"{layer_prefix}.{container}.gate.weight", dtype)
+        gate, up, down = parts
+        slices = []
+        expert = 0
+        while True:
+            base = f"{layer_prefix}.{container}.experts.{expert}"
+            if f"{base}.{gate}.weight" not in self._file_of:
+                break
+            if what == "gate_up":
+                slices.append(torch.cat([self.get(f"{base}.{gate}.weight", dtype),
+                                         self.get(f"{base}.{up}.weight", dtype)], dim=0))
+            else:
+                slices.append(self.get(f"{base}.{down}.weight", dtype))
+            expert += 1
+        return torch.stack(slices) if slices else None
 
     def close(self):
         self._handles.clear()
@@ -128,13 +188,13 @@ def _materialize(module: nn.Module, prefix: str, src: _WeightSource, device, dty
     with torch.no_grad():
         for name, param in list(module.named_parameters(recurse=True)):
             key = f"{prefix}.{name}"
-            if key not in src.keys():
+            if not src.has(key):
                 missing.append(key)
                 continue
             param.copy_(src.get(key, dtype).to(device))
         for name, buf in list(module.named_buffers(recurse=True)):
             key = f"{prefix}.{name}"
-            if key in src.keys():
+            if src.has(key):
                 buf.copy_(src.get(key, dtype).to(device))
             else:
                 missing.append(key)
@@ -258,9 +318,11 @@ def convert_streaming(
             continue
 
         _materialize(block, f"model.layers.{index}", src, device, dtype)
+        stacked = _stacked_moe_targets(block)
+        legacy = _legacy_expert_targets(block)
         # keep the fail-loudly property of the in-memory path: a MoE layout this
         # driver cannot convert must raise, never silently convert attention only.
-        _assert_no_unhandled_moe(block, [], {})
+        _assert_no_unhandled_moe(block, stacked, legacy)
         targets = _block_targets(block, extra_skip or [])
 
         # --- pass 1: Hessians for this block's targets ---
@@ -281,6 +343,9 @@ def convert_streaming(
         for path in targets:
             lin = block.get_submodule(path)
             hooks.append(lin.register_forward_pre_hook(make_hook(path, lin.in_features)))
+        for target in stacked:
+            hooks.append(target.module.register_forward_pre_hook(
+                _make_stacked_moe_hook(target, hessians)))
         fp_out = _run_block(block, buffer, rotary, device, micro_batch,
                             collect=not cascade)
         for hook in hooks:
@@ -313,6 +378,38 @@ def convert_streaming(
                 state_out[f"model.layers.{index}.{path}.{key}"] = value.cpu()
             hessians.pop(path, None)
 
+        # --- stacked MoE experts: solve each slice, then swap through ptq's builder ---
+        if stacked:
+            moe_states: dict[str, list[tuple]] = {}
+            moe_report = SwapReport()
+            for target in stacked:
+                per_expert = []
+                for expert in range(target.num_experts):
+                    slices = []
+                    for path, weight in (
+                        (target.gate_up_path(expert), target.module.gate_up_proj[expert]),
+                        (target.down_path(expert), target.module.down_proj[expert]),
+                    ):
+                        H = hessians.get(path)
+                        if H is None:      # expert saw no tokens: data-free solve
+                            H = torch.eye(weight.shape[1], dtype=torch.float32,
+                                          device=weight.device)
+                        state, _ = solve_group_state(weight.data.float(), H,
+                                                     group=group, C=C, **solve_kw)
+                        slices.append(state)
+                        hessians.pop(path, None)
+                    per_expert.append(tuple(slices))
+                    report.coeffs += (target.module.gate_up_proj[expert].numel()
+                                      + target.module.down_proj[expert].numel())
+                    report.targets.append(
+                        f"model.layers.{index}.{target.expert_path(expert)}")
+                moe_states[target.path] = per_expert
+            _swap_stacked_moe(block, stacked, moe_states, moe_report, is_group=True,
+                              kind=kind, group=group, C=C, counter_kw=counter_kw)
+            for key, value in block.state_dict().items():
+                if "experts" in key:
+                    state_out[f"model.layers.{index}.{key}"] = value.cpu()
+
         # --- next block's activations ---
         # cascade: re-run the CONVERTED block so block i+1 calibrates on quantized
         # outputs (error compounds into the statistics, like the asym cascade).
@@ -338,6 +435,33 @@ def convert_streaming(
     src.close()
     report.peak_bytes = peak
     return report
+
+
+def _make_stacked_moe_hook(target, hessians: dict):
+    """Accumulate H per expert over exactly the tokens routed to it, mirroring
+    ptq.collect_hessians' MoE branch (the expert's own inputs are the routed
+    slice, and down_proj sees the SwiGLU activation, not the block input)."""
+    import torch.nn.functional as F
+
+    def accumulate(path, x):
+        x = x.detach().reshape(-1, x.shape[-1]).to(torch.float32)
+        h = hessians.get(path)
+        if h is None:
+            h = torch.zeros(x.shape[1], x.shape[1], dtype=torch.float32, device=x.device)
+            hessians[path] = h
+        h.addmm_(x.t(), x)
+
+    def hook(module, inputs):
+        hidden_states, top_k_index = inputs[:2]
+        for expert in range(target.num_experts):
+            token_idx = torch.where(top_k_index == expert)[0]
+            if token_idx.numel() == 0:
+                continue
+            current = hidden_states[token_idx]
+            accumulate(target.gate_up_path(expert), current)
+            gate, up = F.linear(current, module.gate_up_proj[expert]).chunk(2, dim=-1)
+            accumulate(target.down_path(expert), module.act_fn(gate) * up)
+    return hook
 
 
 def _reload_block_counters(block, index: int, out_dir: str, *, kind, group, C,
