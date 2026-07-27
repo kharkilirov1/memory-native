@@ -154,3 +154,22 @@ def test_restore_from_streamed_state(tmp_path):
     with torch.no_grad():
         logits = fresh(calib[0]).logits
     assert torch.isfinite(logits).all()
+
+
+def test_moe_donor_is_rejected_with_a_reason(tmp_path):
+    """Streaming cannot resolve expert weights by name yet: transformers stores
+    them in the legacy per-expert layout and converts at load time. That must be
+    an explicit refusal, not a partial conversion."""
+    from transformers import MixtralConfig, MixtralForCausalLM
+
+    torch.manual_seed(0)
+    cfg = MixtralConfig(vocab_size=256, hidden_size=64, intermediate_size=128,
+                        num_hidden_layers=2, num_attention_heads=4,
+                        num_key_value_heads=2, max_position_embeddings=128,
+                        num_local_experts=4, num_experts_per_tok=2)
+    path = os.path.join(str(tmp_path), "moe")
+    MixtralForCausalLM(cfg).eval().save_pretrained(path, safe_serialization=True)
+
+    with pytest.raises(NotImplementedError, match="legacy per-expert layout"):
+        convert_streaming(path, _calib(cfg), os.path.join(str(tmp_path), "out"),
+                          micro_batch=2, progress=False, **SOLVE)

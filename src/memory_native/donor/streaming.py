@@ -23,6 +23,12 @@ fp-tower semantics (each block calibrated on unquantized inputs).
 
 Output is incremental: one file per block plus a manifest, so an interrupted run
 resumes at the first unfinished block instead of starting over.
+
+MoE donors are NOT supported here yet and are rejected loudly: transformers
+stores Mixtral-style experts on disk in the legacy per-expert layout and
+converts them to stacked tensors at load time without exposing the mapping, so
+resolving expert weights by name from the shards needs per-family conversion
+code. The in-memory path (which lets transformers do the loading) handles MoE.
 """
 from __future__ import annotations
 
@@ -133,9 +139,20 @@ def _materialize(module: nn.Module, prefix: str, src: _WeightSource, device, dty
             else:
                 missing.append(key)
     if missing:
+        # Distinguish the two ways a tensor can be absent, because the fix differs.
+        expert_miss = [k for k in missing if "expert" in k or "mlp.gate." in k]
+        if expert_miss and any("experts." in k for k in src.keys()):
+            raise NotImplementedError(
+                "this checkpoint stores MoE experts in the legacy per-expert layout "
+                "(block_sparse_moe.experts.N.w1/w2/w3) while the module expects stacked "
+                f"tensors ({expert_miss[:2]}); transformers converts between the two at "
+                "load time and does not expose the mapping, so streaming cannot resolve "
+                "expert weights by name yet. Use the in-memory path for MoE donors until "
+                "the per-family checkpoint mapping lands."
+            )
         raise RuntimeError(
             f"checkpoint has no tensor for {missing[:4]}"
-            f"{chr(32) + chr(46) * 3 if len(missing) > 4 else chr(0) * 0}; refusing to run on "
+            f"{' ...' if len(missing) > 4 else ''}; refusing to run on "
             "uninitialized memory (rebuild such modules from config instead)"
         )
 
