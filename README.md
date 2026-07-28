@@ -210,6 +210,15 @@ tests/              pytest: encode/decode, learning, reversible grad-check, pack
                     optimizers, memory gate, triton (CUDA-skipped)
 ```
 
+## How this was built
+
+Built entirely by AI (Claude) under sustained human direction, over months, by someone
+with no formal CS/math background. Working protocol: every claim needs an executable
+witness — tests, frozen pre-run forecasts, raw logs committed next to results, negative
+results reported first-class. The repo, not the author, answers technical questions.
+Status: **frozen** (July 2026) — out of money and hardware, not out of ideas.
+Everything reproduces from a cold clone.
+
 ## License
 
 MIT.
