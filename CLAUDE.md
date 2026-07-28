@@ -180,6 +180,26 @@ optim + activation pools the method zeroes.
    `CounterLinearWithBias` and get that `.counter.` infix; the 112 bias-free ones
    (MLP + o_proj) end in plain `.state` and were silently skipped — 15x too low.
    Match `.state`, never `counter.state`.
+15. **gemma-4-12B FULLY CONVERTED on this CPU box (48/48 blocks, 0 errors) —
+   results/gemma4_12b_full_conversion.md.** Peak resident **1.86 GiB** vs 22.3 GiB of
+   donor weights; output 9.2 GB counter state; ~13 min/block solve, ~45 s/block replay;
+   the resume was exercised for real (run died at block 46, replay 0–45 + solve 46–47
+   lost nothing). Platform fixes that made it survive, each with the real cause pinned:
+   (a) batched-LU `torch.linalg.solve` intermittently corrupts pivots on this MKL
+   (SLASWP flood → wrong-pivot RuntimeError / access violation / silently wrong
+   scales) — the align matrix is Gram-PSD, so the solve is now Cholesky with per-row
+   fallback; (b) safetensors mmap reads intermittently access-violate on Windows
+   (even 118 MiB tensors) — the reader now uses plain file I/O + `frombuffer` for
+   everything the header describes; (c) gemma-4's last layer per attention type WRITES
+   `shared_kv_states` — `_run_block` passes a fresh dict (sound only because
+   `num_kv_shared_layers=0`; donors with real KV sharing are refused); (d) the
+   computed-buffer probe is 1 layer × 2048 vocab (buffers are vocab/depth-independent,
+   verified bit-identical) and embeddings load only the calibration-touched rows
+   (gather+scale == module output exactly; dropping `embed_scale` errs by 6.22).
+   NOTE: full-attention layers (5, 11, …, 47) have NO `v_proj` — they reuse K as V
+   (`value_states = key_states`), so 6 targets there is correct, not a skip.
+   Restore witness + PPL/KL gate vs fp: NOT yet run (first restore attempt died
+   silently; restored model needs ~11–12 GiB resident).
 
 ## Gotchas (hard-won, keep)
 
