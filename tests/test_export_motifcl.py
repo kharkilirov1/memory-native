@@ -1,4 +1,5 @@
-"""MotifCL bridge exporter gates.
+"""MotifCL bridge exporter gates. Requires the optional `safetensors` dependency
+(pip install safetensors); the module skips cleanly when it is absent.
 
 Claims:
   * export -> reference_decode reproduces every counter layer's visible_weight()
@@ -11,6 +12,8 @@ import copy
 import os
 
 import pytest
+
+pytest.importorskip("safetensors", reason="optional dependency of the MotifCL export path")
 
 torch = pytest.importorskip("torch")
 nn = torch.nn
