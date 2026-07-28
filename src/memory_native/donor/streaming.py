@@ -35,6 +35,7 @@ from __future__ import annotations
 import gc
 import json
 import os
+import struct
 from dataclasses import dataclass, field
 
 import torch
@@ -57,6 +58,9 @@ from .ptq import (
 __all__ = ["StreamingReport", "convert_streaming", "load_streamed_state"]
 
 MANIFEST = "manifest.json"
+
+# Vocabulary the computed-buffer probe is built with (see _shallow_config).
+PROBE_VOCAB = 2048
 
 
 @dataclass
@@ -83,11 +87,30 @@ def _tensor_bytes(*tensors) -> int:
 class _WeightSource:
     """Lazy per-tensor access to a HF checkpoint (single-file or sharded)."""
 
+    # safetensors hands back tensors that VIEW its memory map. On this box
+    # (safetensors 0.8.0, torch 2.12.1, Windows) reading a large one out of a
+    # 22 GiB file access-violates inside UntypedStorage.__getitem__ — not an
+    # exception, the process just dies — and it is INTERMITTENT: the identical
+    # call succeeded minutes earlier. Plain file I/O plus torch.frombuffer
+    # reproduces the same bytes without ever mapping the file, so it is used for
+    # every tensor. A 256 MiB threshold was tried first and was not enough: the
+    # fault also hit ordinary block weights (down_proj, 118 MiB bf16). The mmap
+    # path stays only as a fallback for tensors the header cannot describe.
+    _MMAP_BYTES_LIMIT = 0
+
+    _DTYPES = {
+        "BF16": torch.bfloat16, "F16": torch.float16, "F32": torch.float32,
+        "F64": torch.float64, "I64": torch.int64, "I32": torch.int32,
+        "I16": torch.int16, "I8": torch.int8, "U8": torch.uint8,
+        "BOOL": torch.bool,
+    }
+
     def __init__(self, path: str):
         from safetensors import safe_open
 
         self._safe_open = safe_open
         self.path = path
+        self._headers: dict[str, tuple[int, dict]] = {}
         index = os.path.join(path, "model.safetensors.index.json")
         if os.path.exists(index):
             with open(index, encoding="utf-8") as handle:
@@ -104,6 +127,36 @@ class _WeightSource:
     def keys(self):
         return self._file_of.keys()
 
+    def get_rows(self, name: str, indices: torch.Tensor, chunk: int = 8192
+                 ) -> torch.Tensor:
+        """Gather rows of a 2-D tensor without materializing the whole thing.
+
+        INDEXING a safetensors tensor faults on this platform. ``get_tensor``
+        returns a view over the memory map, and indexing it goes through
+        ``UntypedStorage.__getitem__``, which dies with a Windows access
+        violation — not an exception — on the 262144x3840 embedding inside
+        gemma-4's 22 GiB file. Bulk reads of the same tensor are fine, which is
+        why this only ever showed up as a mysterious process death. ``.clone()``
+        forces the bytes out of the mapping first; the gather then runs on
+        ordinary memory. ``chunk`` bounds how much is cloned at once.
+        """
+        full = self.get(name)
+        if full.ndim != 2 or full.shape[0] <= chunk:
+            return full.clone()[indices]
+        order = torch.argsort(indices)
+        wanted = indices[order]
+        parts = []
+        for start in range(0, int(full.shape[0]), chunk):
+            stop = min(start + chunk, int(full.shape[0]))
+            hit = wanted[(wanted >= start) & (wanted < stop)]
+            if hit.numel() == 0:
+                continue
+            parts.append(full[start:stop].clone()[hit - start])
+        gathered = torch.cat(parts, dim=0)
+        out = torch.empty_like(gathered)
+        out[order] = gathered                     # restore the caller's order
+        return out
+
     def has(self, name: str) -> bool:
         """Present verbatim, or assemblable from a legacy expert layout."""
         return name in self._file_of or self._assemble_plan(name) is not None
@@ -115,12 +168,49 @@ class _WeightSource:
                 raise KeyError(name)
             return assembled
         file = self._file_of[name]
-        handle = self._handles.get(file)
-        if handle is None:
-            handle = self._safe_open(file, framework="pt")
-            self._handles[file] = handle
-        t = handle.get_tensor(name)
+        t = self._read_direct(file, name)
+        if t is None:
+            handle = self._handles.get(file)
+            if handle is None:
+                handle = self._safe_open(file, framework="pt")
+                self._handles[file] = handle
+            t = handle.get_tensor(name)
         return t.to(dtype) if dtype is not None else t
+
+    def _file_header(self, file: str) -> tuple[int, dict]:
+        cached = self._headers.get(file)
+        if cached is None:
+            with open(file, "rb") as handle:
+                size = struct.unpack("<Q", handle.read(8))[0]
+                cached = (size, json.loads(handle.read(size).decode("utf-8")))
+            self._headers[file] = cached
+        return cached
+
+    def _read_direct(self, file: str, name: str):
+        """Read one tensor with ordinary file I/O, bypassing the memory map.
+
+        Returns None for small tensors (the mmap path is fine and cheaper there)
+        or if the header does not describe this tensor the way we expect, so the
+        caller falls back rather than guessing.
+        """
+        header_size, header = self._file_header(file)
+        info = header.get(name)
+        if not isinstance(info, dict) or "data_offsets" not in info:
+            return None
+        start, stop = info["data_offsets"]
+        if stop - start <= self._MMAP_BYTES_LIMIT:
+            return None
+        dtype = self._DTYPES.get(info.get("dtype"))
+        if dtype is None:
+            return None
+        with open(file, "rb") as handle:
+            handle.seek(8 + header_size + start)
+            raw = bytearray(handle.read(stop - start))
+        if len(raw) != stop - start:
+            raise RuntimeError(
+                f"{name}: short read, {len(raw)} of {stop - start} bytes"
+            )
+        return torch.frombuffer(raw, dtype=dtype).reshape(info["shape"])
 
     # --- legacy expert layout -------------------------------------------------
     # transformers stores Mixtral-style experts one module per expert on disk and
@@ -274,17 +364,39 @@ def _shallow_config(config):
 
     probe = copy.deepcopy(config)
     for holder in (getattr(probe, "text_config", None), probe):
-        if holder is not None and getattr(holder, "num_hidden_layers", None):
+        if holder is None:
+            continue
+        if getattr(holder, "num_hidden_layers", None):
             holder.num_hidden_layers = 1
+        # The vocabulary only sizes the embedding table, which the probe never
+        # reads -- it exists to expose computed buffers. Keeping the donor's real
+        # 262144 rows costs 2.23 GiB against 0.55 GiB here, and all five of
+        # gemma-4's computed buffers were measured bit-identical either way.
+        # _build_probe re-checks that nothing actually depends on it.
+        if getattr(holder, "vocab_size", 0) > PROBE_VOCAB:
+            holder.vocab_size = PROBE_VOCAB
     return probe
 
 
 def _build_probe(config, device):
-    """One-layer real instance, the single source of every computed value."""
+    """One-layer, small-vocab real instance: the single source of every computed value."""
     from transformers import AutoModelForCausalLM
 
     with torch.device(device):
-        return AutoModelForCausalLM.from_config(_shallow_config(config))
+        probe = AutoModelForCausalLM.from_config(_shallow_config(config))
+    # The shrink is only safe while no computed buffer is sized by the vocabulary.
+    # A buffer carrying the probe's vocab in its shape would be exactly that, and
+    # would be silently wrong for the real donor -- refuse instead.
+    for path, module in probe.named_modules():
+        for name in getattr(module, "_non_persistent_buffers_set", ()):
+            buf = getattr(module, name, None)
+            if buf is not None and PROBE_VOCAB in tuple(buf.shape):
+                raise NotImplementedError(
+                    f"computed buffer {path}.{name} has the probe's vocabulary in its "
+                    f"shape {tuple(buf.shape)}; it depends on vocab_size and the "
+                    "shrunken probe would give the wrong value"
+                )
+    return probe
 
 
 def _build_rotary(config, device):
@@ -407,14 +519,37 @@ def convert_streaming(
     del probe
     gc.collect()
 
-    # --- embeddings once: the activation buffer lives on CPU, blocks pull micro-batches ---
-    _materialize(inner.embed_tokens, f"{stack}.embed_tokens", src, device, dtype,
-                 computed=computed_embed)
+    # --- embeddings: only the rows the calibration actually touches ---
+    # Materializing the whole table costs vocab*dim*4 B — 3.75 GiB for gemma-4's
+    # 262144x3840 — and every byte of it is dead once the activation buffer
+    # exists. A lookup is a row gather, so the module runs against a compact
+    # table holding just the unique ids, with the ids remapped onto it. The
+    # module's own forward is kept (gemma scales by embed_scale, and rolling the
+    # lookup by hand would silently drop that: measured 6.22 max error).
     buffer: list[torch.Tensor] = []
     id_batches = [b for b in calib_batches]
     _assert_window_covers(config, id_batches)
-    for ids in id_batches:
-        buffer.append(inner.embed_tokens(ids.to(device)).to("cpu"))
+    flat = torch.cat([b.reshape(-1) for b in id_batches])
+    unique, inverse = torch.unique(flat, return_inverse=True)
+    compact_weight = src.get_rows(f"{stack}.embed_tokens.weight", unique)
+    inner.embed_tokens.to_empty(device=device)
+    # Match the dtype to_empty produced rather than forcing `dtype`: to_empty
+    # keeps the skeleton's own dtype (bf16 for this donor's config), and the
+    # blocks are materialized the same way, so forcing fp32 here alone makes the
+    # first matmul fail on mismatched operands.
+    embed_dtype = inner.embed_tokens.weight.dtype
+    inner.embed_tokens.weight = nn.Parameter(
+        compact_weight.to(embed_dtype).to(device), requires_grad=False)
+    with torch.no_grad():
+        for name, value in computed_embed.items():
+            _set_by_path(inner.embed_tokens, name).copy_(value.to(device))
+        cursor = 0
+        for ids in id_batches:
+            n = ids.numel()
+            compact = inverse[cursor:cursor + n].reshape(ids.shape)
+            cursor += n
+            buffer.append(inner.embed_tokens(compact.to(device)).to("cpu"))
+    del compact_weight
     inner.embed_tokens.to("meta")
 
     peak = _tensor_bytes(*buffer)
@@ -616,6 +751,12 @@ def _assert_window_covers(config, id_batches) -> None:
     this driver does not build yet.
     """
     text = getattr(config, "text_config", config)
+    if getattr(text, "num_kv_shared_layers", 0):
+        raise NotImplementedError(
+            f"donor declares num_kv_shared_layers={text.num_kv_shared_layers}: later "
+            "layers read key/value produced by earlier ones, so a block cannot be run "
+            "in isolation and this driver's premise does not hold"
+        )
     window = getattr(text, "sliding_window", None)
     types = set(getattr(text, "layer_types", None) or ())
     if not window or "sliding_attention" not in types:
@@ -663,6 +804,28 @@ def _rotary_kwargs(rotary, block) -> dict:
     return {"layer_type": layer_type}
 
 
+def _block_kwargs(block) -> dict:
+    """Extra kwargs this donor's decoder layer requires, from its own signature.
+
+    gemma-4's attention writes its key/value into a caller-supplied
+    ``shared_kv_states`` dict when it is the last layer of its attention type
+    (``store_full_length_kv``). Running the block bare passes None and it dies
+    with "'NoneType' object does not support item assignment" — 46 blocks into a
+    48-block run, because only two layers in the model do it.
+
+    A fresh dict per block is correct ONLY while nothing READS it across blocks;
+    ``convert_streaming`` refuses donors that declare real KV sharing, where
+    block-at-a-time conversion would not be sound in the first place.
+    """
+    import inspect
+
+    try:
+        params = inspect.signature(block.forward).parameters
+    except (TypeError, ValueError):
+        return {}
+    return {"shared_kv_states": {}} if "shared_kv_states" in params else {}
+
+
 def _run_block(block, buffer, rotary, device, micro_batch, collect):
     """Push the activation buffer through one block; optionally keep the output.
 
@@ -677,6 +840,7 @@ def _run_block(block, buffer, rotary, device, micro_batch, collect):
     guard in ``convert_streaming``, not here.
     """
     rotary_kw = _rotary_kwargs(rotary, block)
+    block_kw = _block_kwargs(block)
     out: list[torch.Tensor] = []
     for chunk in buffer:
         pieces = (chunk.split(micro_batch, dim=0) if micro_batch and micro_batch > 0
@@ -686,7 +850,7 @@ def _run_block(block, buffer, rotary, device, micro_batch, collect):
             hidden = piece.to(device)
             positions = torch.arange(hidden.shape[1], device=device).unsqueeze(0)
             pos_emb = rotary(hidden, positions, **rotary_kw)
-            result = block(hidden, position_embeddings=pos_emb)
+            result = block(hidden, position_embeddings=pos_emb, **block_kw)
             result = result[0] if isinstance(result, tuple) else result
             if collect:
                 produced.append(result.to("cpu"))
