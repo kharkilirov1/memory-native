@@ -27,6 +27,30 @@ in **pure PyTorch** — no custom engine, runs on stock CPU/CUDA. Pure-Python pa
 > memory. See [`docs/MLX_PORT.md`](docs/MLX_PORT.md), package
 > [`src/memory_native_mlx/`](src/memory_native_mlx/), demo [`scripts/mlx_demo.py`](scripts/mlx_demo.py).
 
+## Solver ladder on a 1.5B donor
+
+Strict ternary warm PPL at `alpha=0`, Qwen2.5-1.5B donor. Every row is a
+zero-training PTQ conversion except the last. Scope, carried from the evidence
+file itself: calibration 524k tokens; the corpus is rebuilt from the public HF
+sources (shares en40/ru30/code12/math8/science5/instruct5), NOT the historical
+150M val slices — **absolute PPLs are comparable only within this table**; the
+classic arm is the internal baseline (its EN 77.9 lands next to the historical
+74.6, confirming the refactored solve path reproduces the production solver).
+
+| solver config | EN PPL | mean log-PPL, 6 domains |
+|---|---:|---:|
+| production solver (classic arm) | 77.9 | 3.792 |
+| + `salient_scope=layer` | 68.0 | 3.687 |
+| + `calibration=asym`, strength 0.15 | 46.75 | 3.156 |
+| + salient 2%, 2 asym passes — **deploy default** | 35.59 | 2.899 |
+| + salient 3% (quality option, ~3.1–3.6 bpw) | 31.68 | 2.795 |
+| deploy default + 6000-step KD recovery (trained) | **30.06** (RU 22.39) | 2.678 |
+
+Full tables, the ASYM_STRENGTH sweep (smooth, unimodal, minimum at 0.15) and the
+run protocol: [`results/solver_v3_salient_scope_asym_gate_colab.md`](results/solver_v3_salient_scope_asym_gate_colab.md).
+The earlier rungs — naive 575k → optimal ternary 187k → GPTQ 17.5k EN warm PPL —
+are in [`results/recovery_15b_main.md`](results/recovery_15b_main.md).
+
 ## Project map
 
 | Start here | Purpose |
