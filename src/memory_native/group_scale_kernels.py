@@ -16,11 +16,14 @@ __all__ = [
     "HAS_TRITON",
     "group_counter_update_hashsr",
     "group_counter_update_from_io_hashsr",
+    "group_counter_update_grouplocal_hashsr",
+    "group_counter_update_grouplocal_from_io_hashsr",
     "group_update_scratch_bytes",
     "triton_group_decode_matmul",
     "triton_group_grad_x",
     "triton_group_counter_update_from_io",
     "triton_group_counter_update_dense",
+    "triton_group_counter_update_fused",
     "zero_packed_codes",
 ]
 
@@ -143,6 +146,127 @@ def group_counter_update_from_io_hashsr(
     perm_long = perm.to(device=x2.device, dtype=torch.long)
     grad_w_perm = go2.transpose(0, 1) @ x2[:, perm_long]
     return group_counter_update_hashsr(
+        codes_perm, scale, v, grad_w_perm, perm, **kwargs
+    )
+
+
+@torch.no_grad()
+def group_counter_update_grouplocal_hashsr(
+    codes_perm: torch.Tensor,
+    scale: torch.Tensor,
+    v: torch.Tensor,
+    grad_w_perm: torch.Tensor,
+    perm: torch.Tensor,
+    *,
+    group: int,
+    C: int,
+    lr: float,
+    lr_scale: float,
+    rms_beta: float,
+    rms_eps: float,
+    seed: int,
+    residual_alpha: float = 0.0,
+    lagged: bool = False,
+    clip: float = 0.0,
+) -> torch.Tensor:
+    """Group-local update: ALL statistics live on the storage geometry (the 128-wide scale group).
+
+    The row-scope update (``group_counter_update_hashsr``) keys the RMS denominator and the
+    grad-norm clip to the whole output row, which couples every weight's tick to a full-row
+    reduction of the CURRENT gradient — the structural blocker for a one-pass tiled-GEMM
+    epilogue (FUSION_PLAN lever #1). Here ``v`` is ``[out, n_groups]`` and the denominator and
+    clip are computed over the weight's own scale group, so the tick of weight [o, p] depends
+    only on its group's slice of grad_w — everything a group-aligned GEMM tile already holds.
+    The denominator granularity CHANGES the optimizer (finer than row: 128 weights vs K), so
+    this path is parity-gated, not bit-compatible with row scope. With a single group
+    (group == in_features) it degenerates to exactly the row-scope math.
+
+    SR keys (original-column hash), carry, saturation and the 6-bit encoding are unchanged.
+    Scale/v are mutated in place; new act-ordered unpacked codes are returned.
+    """
+    _validate_layout(codes_perm, scale, perm, group)
+    out, in_features = codes_perm.shape
+    groups = scale.shape[1]
+    if grad_w_perm.shape != codes_perm.shape:
+        raise ValueError("grad_w_perm shape mismatch")
+    if v.shape != (out, groups):
+        raise ValueError(f"group-local v must be [out, n_groups]={out, groups}, got {tuple(v.shape)}")
+    t, c = decode_state(codes_perm, C)
+    t = t.float()
+    c = c.float()
+    gw = grad_w_perm.float()
+
+    group_idx = torch.div(
+        torch.arange(in_features, device=codes_perm.device), group, rounding_mode="floor"
+    )
+    idx_expand = group_idx.unsqueeze(0).expand(out, -1)
+    counts = torch.bincount(group_idx, minlength=groups).to(gw.dtype)
+
+    if in_features % group == 0:
+        # Same reduction op/order as the row reference's mean(dim=1): with a single group
+        # this makes the degenerate case (group == in_features) bit-identical to row scope.
+        g_sq = gw.view(out, groups, group).square().mean(dim=2)
+    else:
+        g_sq = torch.zeros_like(scale, dtype=gw.dtype)
+        g_sq.scatter_add_(1, idx_expand, gw * gw)
+        g_sq = g_sq / counts.clamp_min(1.0)
+    if lagged:
+        denom = v.sqrt().clamp_min(rms_eps)
+        v.mul_(rms_beta).add_(g_sq, alpha=1.0 - rms_beta)
+    else:
+        v.mul_(rms_beta).add_(g_sq, alpha=1.0 - rms_beta)
+        denom = v.sqrt().clamp_min(rms_eps)
+    if clip > 0:
+        group_norm = (g_sq * counts).sqrt() / denom
+        denom = denom / (clip / group_norm.clamp_min(1e-30)).clamp_max(1.0)
+
+    code_value = t + float(residual_alpha) * c / C
+    grad_scale = torch.zeros_like(scale)
+    grad_scale.scatter_add_(1, idx_expand, gw * code_value)
+    grad_scale.div_(counts.sqrt().clamp_min(1.0))
+
+    scale_old = scale.clone()
+    scale_new = (scale_old - float(lr_scale) * grad_scale).clamp_(1e-5, 10.0)
+    s_old_col = scale_old[:, group_idx]
+    s_new_col = scale_new[:, group_idx]
+    denom_col = denom[:, group_idx]
+
+    rows = torch.arange(out, device=codes_perm.device, dtype=torch.int64).unsqueeze(1)
+    original_cols = perm.to(device=codes_perm.device, dtype=torch.int64).unsqueeze(0)
+    elem = rows * in_features + original_cols
+    rnd = uniform01((int(seed) ^ hash_u32(elem)) & 0xFFFFFFFF)
+    tick = (-float(lr)) * (gw / denom_col) * (C / s_new_col)
+    value = c * (s_old_col / s_new_col) + tick
+    floor = torch.floor(value)
+    cc = floor + (rnd < (value - floor)).to(value.dtype)
+    carry = torch.trunc(cc / C)
+    remainder = cc - carry * C
+    proposed = t + carry
+    new_t = proposed.clamp(-1, 1)
+    remainder = torch.where(
+        proposed != new_t, torch.sign(cc) * (C - 1), remainder
+    ).clamp_(-(C - 1), C - 1)
+
+    scale.copy_(scale_new)
+    return encode_state(new_t.to(torch.int16), remainder.to(torch.int16), C)
+
+
+@torch.no_grad()
+def group_counter_update_grouplocal_from_io_hashsr(
+    codes_perm: torch.Tensor,
+    scale: torch.Tensor,
+    v: torch.Tensor,
+    x: torch.Tensor,
+    grad_out: torch.Tensor,
+    perm: torch.Tensor,
+    **kwargs,
+) -> torch.Tensor:
+    """Group-local reference from IO: act-ordered correlation, then the group-local update."""
+    x2 = x.reshape(-1, x.shape[-1]).float()
+    go2 = grad_out.reshape(-1, grad_out.shape[-1]).float()
+    perm_long = perm.to(device=x2.device, dtype=torch.long)
+    grad_w_perm = go2.transpose(0, 1) @ x2[:, perm_long]
+    return group_counter_update_grouplocal_hashsr(
         codes_perm, scale, v, grad_w_perm, perm, **kwargs
     )
 
@@ -488,6 +612,126 @@ if HAS_TRITON:
         tl.store(state_ptr + base + 1, p1b.to(tl.uint8), mask=gmask)
         tl.store(state_ptr + base + 2, p2b.to(tl.uint8), mask=gmask)
 
+    @triton.jit
+    def _group_fused_update_kernel(
+        state_ptr, scale_ptr, v_ptr, x_ptr, go_ptr, perm_ptr, seed_ptr,
+        M, N, K, G, C, group_size, lr, lr_scale, rms_beta, rms_eps, clip, residual_alpha,
+        stride_sn, stride_xm, stride_xk, stride_gom, stride_gon,
+        stride_scn, stride_scg, stride_vn, stride_vg,
+        BLOCK_N: tl.constexpr, BLOCK_M: tl.constexpr,
+        BLOCK_K: tl.constexpr, BLOCK_PG: tl.constexpr,
+        X_BF16: tl.constexpr, X_FP16: tl.constexpr, LAGGED: tl.constexpr,
+    ):
+        # One-pass GROUP-LOCAL update (v is [N, G]): each program owns a [BLOCK_N rows x one
+        # scale group] tile, forms its slice of grad_w = go^T x with tl.dot ENTIRELY in
+        # registers (persistent over M -- grad_w never touches HBM), then runs the whole
+        # automaton in the epilogue: group stats -> v-EMA/denom/clip -> scale step -> SR tick
+        # -> 6-bit repack. Sound only because every statistic of the group-local math lives
+        # inside this tile; the row-scope math (full-row denom/clip) canNOT be fused this way.
+        pid_n = tl.program_id(0)
+        grp = tl.program_id(1)
+        seed = tl.load(seed_ptr).to(tl.uint32)
+        offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+        nmask = offs_n < N
+        offs_p = grp * group_size + tl.arange(0, BLOCK_K)
+        pmask = offs_p < K
+        cols = tl.load(perm_ptr + offs_p, mask=pmask, other=0).to(tl.int32)
+
+        acc = tl.zeros((BLOCK_N, BLOCK_K), dtype=tl.float32)
+        for m0 in range(0, M, BLOCK_M):
+            offs_m = m0 + tl.arange(0, BLOCK_M)
+            mmask = offs_m < M
+            go = tl.load(
+                go_ptr + offs_m[:, None] * stride_gom + offs_n[None, :] * stride_gon,
+                mask=mmask[:, None] & nmask[None, :], other=0.0,
+            )
+            xv = tl.load(
+                x_ptr + offs_m[:, None] * stride_xm + cols[None, :] * stride_xk,
+                mask=mmask[:, None] & pmask[None, :], other=0.0,
+            )
+            if X_BF16:
+                acc += tl.dot(tl.trans(go.to(tl.bfloat16)), xv.to(tl.bfloat16))
+            elif X_FP16:
+                acc += tl.dot(tl.trans(go.to(tl.float16)), xv.to(tl.float16))
+            else:
+                acc += tl.dot(tl.trans(go.to(tl.float32)), xv.to(tl.float32))
+
+        # Lane split of the accumulator: [BLOCK_N, BLOCK_K] -> 4x [BLOCK_N, BLOCK_PG].
+        # Masked rows/columns hold exact zeros (masked loads), so they add 0 to every stat.
+        even, odd = tl.split(tl.reshape(acc, (BLOCK_N, BLOCK_PG * 2, 2)))
+        gw0, gw2 = tl.split(tl.reshape(even, (BLOCK_N, BLOCK_PG, 2)))
+        gw1, gw3 = tl.split(tl.reshape(odd, (BLOCK_N, BLOCK_PG, 2)))
+
+        lv = 2 * C - 1
+        Cf = C * 1.0
+        packed_per_group = group_size // 4
+        local_pg = tl.arange(0, BLOCK_PG)
+        packed_group = grp * packed_per_group + local_pg
+        p0 = packed_group * 4
+        gmask = (local_pg < packed_per_group) & (p0 < K)
+        base = offs_n[:, None] * stride_sn + packed_group[None, :] * 3
+        bmask = nmask[:, None] & gmask[None, :]
+        b0 = tl.load(state_ptr + base + 0, mask=bmask, other=0).to(tl.int32)
+        b1 = tl.load(state_ptr + base + 1, mask=bmask, other=0).to(tl.int32)
+        b2 = tl.load(state_ptr + base + 2, mask=bmask, other=0).to(tl.int32)
+        code0 = b0 & 0x3F
+        code1 = ((b0 >> 6) | (b1 << 2)) & 0x3F
+        code2 = ((b1 >> 4) | (b2 << 4)) & 0x3F
+        code3 = (b2 >> 2) & 0x3F
+
+        # Group statistics (gw is zero wherever masks were false, so plain sums are exact).
+        count = tl.maximum(tl.sum(gmask.to(tl.float32), axis=0) * 4.0, 1.0)
+        g_sq = (
+            tl.sum(gw0 * gw0, axis=1) + tl.sum(gw1 * gw1, axis=1)
+            + tl.sum(gw2 * gw2, axis=1) + tl.sum(gw3 * gw3, axis=1)
+        ) / count
+        vis0 = (code0 // lv - 1).to(tl.float32) + residual_alpha * (code0 % lv - (C - 1)).to(tl.float32) / Cf
+        vis1 = (code1 // lv - 1).to(tl.float32) + residual_alpha * (code1 % lv - (C - 1)).to(tl.float32) / Cf
+        vis2 = (code2 // lv - 1).to(tl.float32) + residual_alpha * (code2 % lv - (C - 1)).to(tl.float32) / Cf
+        vis3 = (code3 // lv - 1).to(tl.float32) + residual_alpha * (code3 % lv - (C - 1)).to(tl.float32) / Cf
+        vis0 = tl.where(bmask, vis0, 0.0)
+        vis1 = tl.where(bmask, vis1, 0.0)
+        vis2 = tl.where(bmask, vis2, 0.0)
+        vis3 = tl.where(bmask, vis3, 0.0)
+        grad_s = (
+            tl.sum(gw0 * vis0, axis=1) + tl.sum(gw1 * vis1, axis=1)
+            + tl.sum(gw2 * vis2, axis=1) + tl.sum(gw3 * vis3, axis=1)
+        ) / tl.sqrt(count)
+
+        v_off = offs_n * stride_vn + grp * stride_vg
+        v_old = tl.load(v_ptr + v_off, mask=nmask, other=0.0)
+        v_new = rms_beta * v_old + (1.0 - rms_beta) * g_sq
+        tl.store(v_ptr + v_off, v_new, mask=nmask)
+        denom = tl.maximum(tl.sqrt(v_old if LAGGED else v_new), rms_eps)
+        group_norm = tl.sqrt(g_sq * count) / denom
+        cmult = tl.where(
+            clip > 0.0, tl.minimum(clip / tl.maximum(group_norm, 1e-30), 1.0), 1.0
+        )
+        denom = denom / cmult
+        sc_off = offs_n * stride_scn + grp * stride_scg
+        s_old = tl.load(scale_ptr + sc_off, mask=nmask, other=1.0)
+        s_new = tl.minimum(tl.maximum(s_old - lr_scale * grad_s, 1e-5), 10.0)
+        tl.store(scale_ptr + sc_off, s_new, mask=nmask)
+
+        c0_orig = tl.load(perm_ptr + p0 + 0, mask=gmask, other=0).to(tl.int32)
+        c1_orig = tl.load(perm_ptr + p0 + 1, mask=gmask, other=0).to(tl.int32)
+        c2_orig = tl.load(perm_ptr + p0 + 2, mask=gmask, other=0).to(tl.int32)
+        c3_orig = tl.load(perm_ptr + p0 + 3, mask=gmask, other=0).to(tl.int32)
+        row2 = offs_n[:, None]
+        d2 = denom[:, None]
+        so2 = s_old[:, None]
+        sn2 = s_new[:, None]
+        nc0 = _tick(code0, gw0, row2, c0_orig[None, :], K, lv, C, Cf, lr, d2, so2, sn2, seed)
+        nc1 = _tick(code1, gw1, row2, c1_orig[None, :], K, lv, C, Cf, lr, d2, so2, sn2, seed)
+        nc2 = _tick(code2, gw2, row2, c2_orig[None, :], K, lv, C, Cf, lr, d2, so2, sn2, seed)
+        nc3 = _tick(code3, gw3, row2, c3_orig[None, :], K, lv, C, Cf, lr, d2, so2, sn2, seed)
+        p0b = (nc0 | (nc1 << 6)) & 0xFF
+        p1b = ((nc1 >> 2) | (nc2 << 4)) & 0xFF
+        p2b = ((nc2 >> 4) | (nc3 << 2)) & 0xFF
+        tl.store(state_ptr + base + 0, p0b.to(tl.uint8), mask=bmask)
+        tl.store(state_ptr + base + 1, p1b.to(tl.uint8), mask=bmask)
+        tl.store(state_ptr + base + 2, p2b.to(tl.uint8), mask=bmask)
+
 
 def _dtype_flags(tensor: torch.Tensor) -> tuple[bool, bool]:
     return tensor.dtype == torch.bfloat16, tensor.dtype == torch.float16
@@ -697,6 +941,75 @@ def triton_group_counter_update_dense(
         K, G, C, group, float(lr),
         state.stride(0), gw.stride(0),
         BLOCK_PG=block_pg,
+    )
+
+
+@torch.no_grad()
+def triton_group_counter_update_fused(
+    state_packed_perm: torch.Tensor,
+    scale: torch.Tensor,
+    v: torch.Tensor,
+    x: torch.Tensor,
+    grad_out: torch.Tensor,
+    perm: torch.Tensor,
+    *,
+    group: int,
+    C: int,
+    lr: float,
+    lr_scale: float,
+    rms_beta: float,
+    rms_eps: float,
+    seed: int,
+    residual_alpha: float = 0.0,
+    lagged: bool = False,
+    clip: float = 0.0,
+) -> None:
+    """One-launch fused GROUP-LOCAL update: tensor-core correlation + counter epilogue.
+
+    Requires the group-local statistics variant (``v`` of shape [out, n_groups] — see
+    ``group_counter_update_grouplocal_hashsr``, which is the CPU oracle for this kernel).
+    grad_w lives only in registers: no [out, in] correlation, no fp32 input casts, no
+    O(out*groups) scratch launches — the memory profile is strictly below the strict
+    3-launch path while the correlation runs on the matrix units. Parity contract vs the
+    oracle is quanta-level (fp summation order can tip an SR boundary), same as the dense
+    kernels. Salient codes are ticked like everything else — callers re-zero them after
+    (``zero_packed_codes``), identical to the dense/reference flow.
+    """
+    if group & (group - 1) or group < 16:
+        raise ValueError(
+            "fused group update requires a power-of-two group size >= 16 "
+            "(tl.dot tile constraint); use the group-local torch reference otherwise"
+        )
+    if not HAS_TRITON:
+        raise RuntimeError("triton not available")
+    x2 = x.reshape(-1, x.shape[-1]).contiguous()
+    go2 = grad_out.reshape(-1, grad_out.shape[-1]).contiguous()
+    state = state_packed_perm
+    if not all(t.is_cuda for t in (state, scale, v, x2, go2, perm)):
+        raise ValueError("fused group update requires CUDA tensors")
+    if x2.dtype != go2.dtype:
+        raise ValueError("x and grad_out must share a dtype")
+    N, G = scale.shape
+    M, K = x2.shape
+    if go2.shape != (M, N):
+        raise ValueError("grad_out shape mismatch")
+    if v.shape != (N, G):
+        raise ValueError(f"group-local v must be [out, n_groups]={N, G}, got {tuple(v.shape)}")
+    if K % 4 or G != (K + group - 1) // group or perm.numel() != K:
+        raise ValueError("invalid group layout")
+    seed_t = torch.tensor([int(seed) & 0xFFFFFFFF], dtype=torch.int64, device=x2.device)
+    bf16, fp16 = _dtype_flags(x2)
+    BLOCK_N, BLOCK_M = 32, 32
+    grid = (triton.cdiv(N, BLOCK_N), G)
+    _group_fused_update_kernel[grid](
+        state, scale, v, x2, go2, perm, seed_t,
+        M, N, K, G, C, group,
+        float(lr), float(lr_scale), float(rms_beta), float(rms_eps),
+        float(clip), float(residual_alpha),
+        state.stride(0), x2.stride(0), x2.stride(1), go2.stride(0), go2.stride(1),
+        scale.stride(0), scale.stride(1), v.stride(0), v.stride(1),
+        BLOCK_N=BLOCK_N, BLOCK_M=BLOCK_M, BLOCK_K=group, BLOCK_PG=group // 4,
+        X_BF16=bf16, X_FP16=fp16, LAGGED=lagged,
     )
 
 

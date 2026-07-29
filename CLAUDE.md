@@ -201,6 +201,23 @@ optim + activation pools the method zeroes.
    Restore witness + PPL/KL gate vs fp: NOT yet run (first restore attempt died
    silently; restored model needs ~11–12 GiB resident).
 
+16. **Group-local update + one-launch fused kernel (CPU-gated, GPU gates pending) —
+   results/GROUP_LOCAL_UPDATE.md.** `stats_scope="group"` on `PackedGroupScaleCounterLinear`
+   puts EVERY update statistic on the storage geometry (v `[out, n_groups]`; RMS denom and
+   clip over the 128-group instead of the row). That removes the FUSION_PLAN-lever-#1
+   blocker by construction: the tick of [o,p] depends only on its group's grad slice, so
+   `triton_group_counter_update_fused` computes the correlation with `tl.dot` tiles held
+   in REGISTERS over all of M and runs the full automaton (stats→v→clip→scale→SR→repack)
+   in the epilogue — one launch, no [out,in] grad_w, no fp32 casts, no scratch. CPU
+   witnesses green (tests/test_grouplocal_update.py): locality (perturb one gw element →
+   only its group changes; row scope provably couples the row), degeneracy (group==K is
+   BIT-identical to row math — g² must reduce via `view(...).square().mean(-1)`;
+   scatter_add drifts an ULP and that class of drift tips SR), teacher recovery at
+   clip=1.0, salient frozen, checkpoint round-trip (row↔group refuse to cross-load —
+   different optimizer, on purpose). Pending on GPU: [L3] benchmark arm vs dense,
+   quanta-parity vs the group-local oracle, occupancy, and the KD-parity gate before any
+   deploy use. Row scope stays the default everywhere.
+
 ## Gotchas (hard-won, keep)
 
 - Counter layers are **eager-only**: exactly one forward per backward; wrap measurement

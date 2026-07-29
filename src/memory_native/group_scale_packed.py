@@ -9,9 +9,11 @@ from .counter import decode_state, encode_state
 from .group_scale_kernels import (
     HAS_TRITON,
     group_counter_update_from_io_hashsr,
+    group_counter_update_grouplocal_from_io_hashsr,
     group_update_scratch_bytes,
     triton_group_counter_update_dense,
     triton_group_counter_update_from_io,
+    triton_group_counter_update_fused,
     triton_group_decode_matmul,
     triton_group_grad_x,
     zero_packed_codes,
@@ -95,6 +97,7 @@ class PackedGroupScaleCounterLinear(nn.Module):
         perm: torch.Tensor | None = None,
         kernel_mode: str = "auto",
         strict_update: bool = True,
+        stats_scope: str = "row",
         init_gain: float = 1.0,
         flip_sample_size: int = 4096,
     ) -> None:
@@ -108,6 +111,8 @@ class PackedGroupScaleCounterLinear(nn.Module):
             raise ValueError("C is too large for uint8 state encoding")
         if kernel_mode not in {"auto", "gemm", "triton", "torch"}:
             raise ValueError("kernel_mode must be 'auto', 'gemm', 'triton' or 'torch'")
+        if stats_scope not in {"row", "group"}:
+            raise ValueError("stats_scope must be 'row' or 'group'")
         self.in_features = int(in_features)
         self.out_features = int(out_features)
         self.group = int(group)
@@ -121,6 +126,7 @@ class PackedGroupScaleCounterLinear(nn.Module):
         self.residual_alpha = float(residual_alpha)
         self.kernel_mode = kernel_mode
         self.strict_update = bool(strict_update)
+        self.stats_scope = stats_scope
         self.update_enabled = True
         self._outstanding_forward = False
         self._sr_step = 0
@@ -131,7 +137,14 @@ class PackedGroupScaleCounterLinear(nn.Module):
             "scale",
             torch.full((self.out_features, self.n_groups), 1e-2, dtype=torch.float32),
         )
-        self.register_buffer("v", torch.zeros((self.out_features, 1), dtype=torch.float32))
+        # stats_scope="row": one RMS second moment per output row (classic).
+        # stats_scope="group": one per scale group -- every update statistic then lives on
+        # the storage geometry, which is what makes the one-pass fused GEMM-epilogue kernel
+        # sound (and is finer-grained adaptivity, not coarser). Different optimizer -> the
+        # two scopes are checkpoint-incompatible on purpose (v shapes differ).
+        v_shape = (self.out_features, 1) if stats_scope == "row" else (
+            self.out_features, self.n_groups)
+        self.register_buffer("v", torch.zeros(v_shape, dtype=torch.float32))
         # int32 is sufficient for model dimensions and halves checkpoint/metadata bytes.
         self.register_buffer("perm", torch.empty(self.in_features, dtype=torch.int32))
         # Salient channel: flat ORIGINAL-order indices (o*in_features + j) + fp16 values.
@@ -342,6 +355,9 @@ class PackedGroupScaleCounterLinear(nn.Module):
                 "PackedGroupScaleCounterLinear strict update is single-rank for now; "
                 "a distributed run would need a groupwise correlation all-reduce before state mutation"
             )
+        if self.stats_scope == "group":
+            self._update_from_io_grouplocal(x2, go2)
+            return
         want_triton = self._use_triton(x2) and self.strict_update
         if want_triton and not _is_power_of_two(self.group):
             raise ValueError(
@@ -388,6 +404,41 @@ class PackedGroupScaleCounterLinear(nn.Module):
                 rms_beta=self.rms_beta, rms_eps=self.rms_eps, seed=seed,
                 residual_alpha=self.residual_alpha, clip=self.local_grad_clip,
             )
+            if self._has_salient():
+                new_codes = new_codes.clone()
+                new_codes.reshape(-1)[self._salient_perm_flat] = self._salient_zero_code
+            old_t, _ = decode_state(old_codes, self.C)
+            new_t, _ = decode_state(new_codes, self.C)
+            self.state.copy_(pack_codes(new_codes))
+            self.weight_flips.add_((new_t != old_t).sum().to(self.weight_flips.dtype))
+        self._sr_step += 1
+        self.sr_step.fill_(self._sr_step)
+        self.update_events.add_(self.out_features * self.in_features)
+
+    @torch.no_grad()
+    def _update_from_io_grouplocal(self, x2: torch.Tensor, go2: torch.Tensor) -> None:
+        """Group-local statistics path: one-launch fused tensor-core kernel on CUDA (grad_w
+        stays in registers -- no [out,in] temporary, no fp32 input casts, no scratch), the
+        bit-exact torch reference elsewhere. Salient codes stay frozen on both."""
+        seed = self._sr_step
+        use_fused = (
+            HAS_TRITON and x2.is_cuda and _is_power_of_two(self.group) and self.group >= 16
+        )
+        upd_kw = dict(
+            group=self.group, C=self.C, lr=self.lr, lr_scale=self.lr_scale,
+            rms_beta=self.rms_beta, rms_eps=self.rms_eps, seed=seed,
+            residual_alpha=self.residual_alpha, clip=self.local_grad_clip,
+        )
+        if use_fused:
+            triton_group_counter_update_fused(
+                self.state, self.scale, self.v, x2, go2, self.perm, **upd_kw)
+            if self._has_salient():
+                zero_packed_codes(self.state, self._salient_perm_flat,
+                                  self.in_features, self.C)
+        else:
+            old_codes = self._all_codes_perm()
+            new_codes = group_counter_update_grouplocal_from_io_hashsr(
+                old_codes, self.scale, self.v, x2, go2, self.perm, **upd_kw)
             if self._has_salient():
                 new_codes = new_codes.clone()
                 new_codes.reshape(-1)[self._salient_perm_flat] = self._salient_zero_code
@@ -501,5 +552,5 @@ class PackedGroupScaleCounterLinear(nn.Module):
         return (
             f"in={self.in_features}, out={self.out_features}, group={self.group}, C={self.C}, "
             f"alpha={self.residual_alpha:.3f}, kernel={self.kernel_mode}, strict={self.strict_update}, "
-            f"salient={self.salient_idx.numel()}"
+            f"stats={self.stats_scope}, salient={self.salient_idx.numel()}"
         )

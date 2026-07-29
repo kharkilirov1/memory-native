@@ -114,6 +114,39 @@ def main():
     dense_peak = torch.cuda.max_memory_allocated()
     layer.state.copy_(state0); layer.scale.copy_(scale0); layer.v.copy_(v0)
 
+    # L3: one-launch fused GROUP-LOCAL update (stats_scope="group") — tensor-core
+    # correlation with the counter epilogue, grad_w only in registers. Different
+    # optimizer statistics (v per group), so it gets its own state/scale/v copies and
+    # is gated against ITS OWN torch oracle (quanta-level), not the row-scope reference.
+    from memory_native.group_scale_kernels import (
+        group_counter_update_grouplocal_from_io_hashsr,
+        triton_group_counter_update_fused,
+    )
+    fused_ok = group >= 16 and (group & (group - 1)) == 0
+    fused_upd_ms = fused_peak = fused_mismatch = fused_smax = float("nan")
+    if fused_ok:
+        groups_n = (k + group - 1) // group
+        st_f = state0.clone()
+        sc_f = scale0.clone()
+        v_g = torch.zeros(n, groups_n, device=device)
+
+        def fused_update():
+            triton_group_counter_update_fused(
+                st_f, sc_f, v_g, x, go, layer.perm, **upd_kw)
+
+        torch.cuda.reset_peak_memory_stats()
+        fused_upd_ms = sync_ms(fused_update, iters=args.iters)
+        fused_peak = torch.cuda.max_memory_allocated()
+        # Single-step parity vs the group-local oracle from identical initial state.
+        st_f.copy_(state0); sc_f.copy_(scale0); v_g.zero_()
+        triton_group_counter_update_fused(st_f, sc_f, v_g, x, go, layer.perm, **upd_kw)
+        sc_ref = scale0.clone()
+        v_ref = torch.zeros(n, groups_n, device=device)
+        ref_codes = group_counter_update_grouplocal_from_io_hashsr(
+            unpack_codes(state0, k), sc_ref, v_ref, x, go, layer.perm, **upd_kw)
+        fused_mismatch = (unpack_codes(st_f, k) != ref_codes).float().mean().item()
+        fused_smax = (sc_f - sc_ref).abs().max().item()
+
     # Stage-1 witness: the "gemm" layer mode end-to-end (decode + cuBLAS each call).
     gemm_layer = PackedGroupScaleCounterLinear(
         k, n, group=group, C=11, perm=perm, residual_alpha=0.35,
@@ -156,6 +189,15 @@ def main():
           f"peak={dense_peak / 2**20:.1f} MiB  "
           f"vs strict={strict_upd_ms / max(dense_upd_ms, 1e-9):.0f}x "
           f"vs semi={semi_upd_ms / max(dense_upd_ms, 1e-9):.1f}x")
+    if fused_ok:
+        print(f"[L3] update fused(one-launch group-local)={fused_upd_ms:.3f} ms  "
+              f"peak={fused_peak / 2**20:.1f} MiB  "
+              f"vs dense={dense_upd_ms / max(fused_upd_ms, 1e-9):.1f}x  "
+              f"vs strict={strict_upd_ms / max(fused_upd_ms, 1e-9):.0f}x  "
+              f"code mismatch vs oracle={fused_mismatch:.2e} (quanta contract)  "
+              f"scale max|d|={fused_smax:.2e}")
+    else:
+        print("[L3] fused group-local arm skipped (needs power-of-two group >= 16)")
     print(f"[L1] gemm-mode fwd={gemm_fwd_ms:.3f} ms (max_abs={gemm_y_err:.6g})  "
           f"grad_x={gemm_gx_ms:.3f} ms (max_abs={gemm_gx_err:.6g})  "
           f"speedup vs triton: fwd={forward_ms / max(gemm_fwd_ms, 1e-9):.1f}x "
