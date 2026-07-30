@@ -232,6 +232,11 @@ def phase2_restore() -> nn.Module:
             setattr(parent, leaf, value)
             n_buf += 1
     src.close()
+    # Tied heads: named_parameters() deduplicates shared tensors, so a tied lm_head is
+    # never visited by the loop and still points at the old meta tensor -- re-tie it to
+    # the freshly materialized embeddings (a no-op for untied configs).
+    if hasattr(model, "tie_weights"):
+        model.tie_weights()
     left = [n for n, t in list(model.named_parameters()) + list(model.named_buffers())
             if t.is_meta]
     if left:
