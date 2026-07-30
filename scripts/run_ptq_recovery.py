@@ -87,6 +87,9 @@ ASYM_FP_DEVICE = os.environ.get("ASYM_FP_DEVICE", "") or None
 # HESSIAN_WEIGHTING=end_loss collects GuidedQuant-style loss-weighted Hessians
 # (one backward per calibration batch, weights untouched). fp calibration only.
 HESSIAN_WEIGHTING = os.environ.get("HESSIAN_WEIGHTING", "none")
+# Chunked-H VRAM budget. The 24 GiB default assumes A100/G4-class cards; the full 1.5B
+# H set is ~9.85 GiB, which OOMs a 16 GiB T4 next to the resident student -- set ~4-6.
+HESSIAN_GPU_BUDGET_GIB = float(os.environ.get("HESSIAN_GPU_BUDGET_GIB", "24.0"))
 # TEACHER_DEVICE=cuda:1 splits the KD pair across two GPUs (Kaggle 2xT4): the fp
 # teacher lives on its own card, only its logits (and optional hidden states) hop to
 # the student device each step. Empty = same device as the student.
@@ -294,6 +297,7 @@ if resume_payload is None:
         asym_strength=ASYM_STRENGTH, asym_passes=ASYM_PASSES,
         asym_fp_device=ASYM_FP_DEVICE,
         hessian_weighting=HESSIAN_WEIGHTING,
+        hessian_gpu_budget_gib=HESSIAN_GPU_BUDGET_GIB,
         extra_skip=EXTRA_SKIP, **counter_kwargs,
     )
     print("swap:", report, flush=True)
