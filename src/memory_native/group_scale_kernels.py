@@ -655,8 +655,10 @@ if HAS_TRITON:
         nmask = offs_n < N
         offs_p = grp * group_size + tl.arange(0, BLOCK_K)
         pmask = offs_p < K
-        cols = tl.load(perm_ptr + offs_p, mask=pmask, other=0).to(tl.int32)
 
+        # x_ptr points at PRE-GATHERED x_perm = x[:, perm] (one coalesced copy in the
+        # wrapper): group columns load contiguously here. In-kernel gather through perm
+        # was measured 4-30x slower than dense on T4 -- the H3 pathology.
         acc = tl.zeros((BLOCK_N, BLOCK_K), dtype=tl.float32)
         for m0 in range(0, M, BLOCK_M):
             offs_m = m0 + tl.arange(0, BLOCK_M)
@@ -666,7 +668,7 @@ if HAS_TRITON:
                 mask=mmask[:, None] & nmask[None, :], other=0.0,
             )
             xv = tl.load(
-                x_ptr + offs_m[:, None] * stride_xm + cols[None, :] * stride_xk,
+                x_ptr + offs_m[:, None] * stride_xm + offs_p[None, :] * stride_xk,
                 mask=mmask[:, None] & pmask[None, :], other=0.0,
             )
             if X_BF16:
@@ -1019,17 +1021,22 @@ def triton_group_counter_update_fused(
         raise ValueError("invalid group layout")
     seed_t = torch.tensor([int(seed) & 0xFFFFFFFF], dtype=torch.int64, device=x2.device)
     bf16, fp16 = _dtype_flags(x2)
-    BLOCK_N, BLOCK_M = 32, 32
+    # One coalesced act-order copy of x ([M, K], input dtype -- 12-73 MiB transient at
+    # Qwen shapes, still far below the dense path's fp32 grad_w+casts): the kernel then
+    # streams contiguous group columns instead of gathering through perm per tile.
+    x_perm = x2.index_select(1, perm.to(dtype=torch.long))
+    BLOCK_N, BLOCK_M = 32, 64
     grid = (triton.cdiv(N, BLOCK_N), G)
     _group_fused_update_kernel[grid](
-        state, scale, v, x2, go2, perm, seed_t,
+        state, scale, v, x_perm, go2, perm, seed_t,
         M, N, K, G, C, group,
         float(lr), float(lr_scale), float(rms_beta), float(rms_eps),
         float(clip), float(residual_alpha),
-        state.stride(0), x2.stride(0), x2.stride(1), go2.stride(0), go2.stride(1),
+        state.stride(0), x_perm.stride(0), x_perm.stride(1), go2.stride(0), go2.stride(1),
         scale.stride(0), scale.stride(1), v.stride(0), v.stride(1),
         BLOCK_N=BLOCK_N, BLOCK_M=BLOCK_M, BLOCK_K=group, BLOCK_PG=group // 4,
         X_BF16=bf16, X_FP16=fp16, LAGGED=lagged,
+        num_warps=8,
     )
 
 
