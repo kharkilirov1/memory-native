@@ -32,6 +32,18 @@ But the train-H gain (−3…−11%) largely evaporates on held-out (−0.5…�
 partially fits calibration noise at this tiny 4k-token calib. Attention keeps the most
 (consistent with the salient_scope=layer finding: attention rows are heterogeneous).
 
+## 16× calibration follow-up (64×1024 train / 32×1024 eval) — prediction CONFIRMED
+
+| layer | copy eval-H | refit eval-H | held-out gain |
+|---|---:|---:|---:|
+| q_proj | 0.001600 | 0.001488 | **−7.0%** (was −5.0% @4k) |
+| up_proj | 0.087692 | 0.086288 | −1.6% (was −0.5%) |
+| down_proj | 0.030868 | 0.030090 | −2.5% (was −0.8%) |
+
+The train/eval gap essentially closes at real calibration size — the refit gain carries
+to held-out nearly in full. At deploy calib (524k) expect the train-side −3…−11% to be
+the honest number. Attention benefits most, consistent with salient_scope=layer.
+
 ## Verdict
 
 - **Safe free win, not a step change.** Fold in as an optional post-pass
