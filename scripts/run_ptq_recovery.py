@@ -52,6 +52,12 @@ PTQ_MODE = os.environ.get("PTQ_MODE", "gptq_group")
 COUNTER_KIND = os.environ.get("COUNTER_KIND", "counter_packed")
 GROUP_KERNEL_MODE = os.environ.get("GROUP_KERNEL_MODE", "auto")
 STRICT_UPDATE = env_bool("STRICT_UPDATE", True)
+# STATS_SCOPE=group puts the RMS denom/clip on the 128-group (the fused-kernel format;
+# results/GROUPLOCAL_KD_FULLMODEL_GATE.md). NOTE its lr optimum sits at HALF the row
+# recipe -- re-center COUNTER_LR_START/END when flipping. DECIMATION=S updates 1/S of
+# the groups per step round-robin (group scope only; lr compensation ~x2 at depth).
+STATS_SCOPE = os.environ.get("STATS_SCOPE", "row")
+DECIMATION = int(os.environ.get("DECIMATION", "1"))
 FLIP_SAMPLE_SIZE = int(os.environ.get("FLIP_SAMPLE_SIZE", "4096"))
 REFINE_ITERS = int(os.environ.get("REFINE_ITERS", "2"))
 # Defaults = the measured production config (v3-full: itf + align + salient 1% + in-sweep,
@@ -271,6 +277,8 @@ counter_kwargs = build_ptq_counter_kwargs(
     kernel_mode=GROUP_KERNEL_MODE,
     strict_update=STRICT_UPDATE,
     flip_sample_size=FLIP_SAMPLE_SIZE,
+    stats_scope=STATS_SCOPE,
+    decimation=DECIMATION,
 )
 
 start_step = 0
