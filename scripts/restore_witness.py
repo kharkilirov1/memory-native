@@ -111,7 +111,7 @@ def phase1_fp_reference(windows: torch.Tensor, cache_path: str) -> None:
 
     _materialize(inner.embed_tokens, f"{stack}.embed_tokens", src, "cpu", DTYPE,
                  computed=computed_embed)
-    buffer = [inner.embed_tokens(w) for w in windows]
+    buffer = [inner.embed_tokens(w.unsqueeze(0)) for w in windows]  # [1, T] each
     log(f"embeddings done, buffer {sum(b.numel() for b in buffer) / 1e6:.1f} M elems")
 
     n_blocks = len(inner.layers)
