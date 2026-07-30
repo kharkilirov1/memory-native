@@ -222,8 +222,17 @@ optim + activation pools the method zeroes.
    fp16-vs-bf16 closed NEGATIVE — the residual ~2× is the G-fold go re-read + serial M
    loop, i.e. Stage-2 restructure). Deploy arithmetic already works through decimation
    (grid over 1/4 groups → ~4× → faster than dense at lower memory, plus the KD-pregate
-   quality edge); the grid restriction is the next kernel task. Row scope stays the
-   default until the full KD gate.
+   quality edge); the grid restriction LANDED and MEASURED (v7): fused+dec4 =
+   **1.7-3.0× FASTER than dense** at lower peak memory, dec-parity exact vs the masked
+   reference. FULL-MODEL KD GATE RUN (0.5B, 24 blocks, T4, 300 steps —
+   results/GROUPLOCAL_KD_FULLMODEL_GATE.md): run 1 at a single lr REVERSED the 2-block
+   pre-gate (row 134 vs group 189 ppl) — an lr artifact: group's finer denominator
+   halves its optimal lr. Run 2 lr-matched: **group@1e-3 ppl 112.4 beats row's best
+   134.1 (−16%); dec4@2e-3 ties row's best at 1/4 update FLOPs; dec4 lr×4 is the
+   documented hot-lr failure (264.8).** Deploy candidate: group scope + fused + lr at
+   HALF the row recipe + decimation=4 as the speed option; final promotion gate = the
+   s2i2-start mixed-corpus cosine run at 1.5B with the lr grid re-centered. Row scope
+   stays the default until that run.
 
 17. **Group-local follow-through (2026-07-30, all CPU): decimation lever + KD pre-gate WIN
    + restore machinery proven + standardized eval.** (a) `active_groups` on the
