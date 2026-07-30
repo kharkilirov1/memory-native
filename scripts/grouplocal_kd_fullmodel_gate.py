@@ -162,7 +162,15 @@ def main():
     }
     results = {}
     for arm in ARMS:
-        cfg = arm_defs[arm.strip()]
+        # "name" uses the default lr of arm_defs; "name:0.001" overrides it — the
+        # group denominator is finer than row's, so the effective step differs at
+        # equal lr and a single-lr comparison is apples-to-oranges.
+        arm = arm.strip()
+        if ":" in arm:
+            name, lr_override = arm.split(":")
+            cfg = dict(arm_defs[name], lr=float(lr_override))
+        else:
+            cfg = arm_defs[arm]
         student = clone_arm(base, cfg["stats_scope"], cfg["decimation"], cfg["lr"])
         scopes = {l.stats_scope for l in counter_layers(student)}
         assert scopes == {cfg["stats_scope"]}, scopes
