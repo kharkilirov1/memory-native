@@ -35,15 +35,27 @@ tests: `test_grouplocal_update.py` (9) + `test_dense_update_cuda.py` +
   restriction (below), (2) multi-group programs (BLOCK_K spanning 2-4 groups amortizes
   the go stripe), (3) split-M cooperative scheme, (4) Ampere+ (native bf16 TC).
 
-## Why 0.4-0.8x of dense is already deployable arithmetic
+## v7 — decimated grid restriction MEASURED: fused+dec4 BEATS dense
 
-The fused kernel is the only path that supports **decimation** (row-scope statistics
-forbid it): launching the grid over 1/4 of the groups cuts its cost ~4x at the same
-integrated signal (dec4+lr×4), i.e. **~14-17 ms vs dense's 26-32 ms at M=4096 — faster
-than dense, at lower peak memory, with the KD-pregate quality edge (−29.7% vs −15.9%)
-and the decimation quality edge on top.** The grid restriction is a trivial kernel
-change (offset/stride on program_id(1)); it is the next kernel task.
+`active_groups` grid restriction landed (compact group list + compacted x copy; layer
+schedule `decimation=S`, round-robin `g % S == step % S`). T4, bf16, same suites (11+11
+tests green):
+
+| shape (M, N, K) | dense L2 | fused full | **fused dec4 (1/4 groups)** | dec4 vs dense | dec4 parity |
+|---|---:|---:|---:|---:|---:|
+| 512, 8960, 1536 | 5.9 ms | 8.2 ms | **2.0 ms** | **3.0x** | 0.0 |
+| 512, 1536, 8960 | 6.4 ms | 8.3 ms | **2.1 ms** | **3.0x** | 7.3e-08 |
+| 4096, 8960, 1536 | 29.9 ms | 55.9 ms | **14.5 ms** | **2.1x** | 0.0 |
+| 4096, 1536, 8960 | 26.6 ms | 59.9 ms | **16.0 ms** | **1.7x** | 7.3e-08 |
+
+Scaling from the full fused launch is near-ideal (3.7-4.2x from 1/4 of the groups), and
+the dec arm is gated against the masked reference (exact-restriction contract) — 0 or
+single-quantum mismatch. **The deploy combination on T4 is therefore: group scope +
+fused kernel + dec4(lr×4) — 1.7-3.0× faster than the production dense path, at lower
+peak memory, with the measured quality edges (KD pre-gate −29.7% vs −15.9%; decimation
+teacher-recovery 1.6-5.4× lower final mse).** Row scope cannot join this arithmetic —
+its statistics forbid decimation by construction.
 
 ## Session quota spent
 
-4 T4 runs ≈ 1-1.5 h of the weekly 30 h.
+5 T4 runs ≈ 1.5-2 h of the weekly 30 h (plus the full-model KD gate run).
