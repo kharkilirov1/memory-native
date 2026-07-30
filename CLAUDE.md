@@ -214,9 +214,16 @@ optim + activation pools the method zeroes.
    BIT-identical to row math — g² must reduce via `view(...).square().mean(-1)`;
    scatter_add drifts an ULP and that class of drift tips SR), teacher recovery at
    clip=1.0, salient frozen, checkpoint round-trip (row↔group refuse to cross-load —
-   different optimizer, on purpose). Pending on GPU: [L3] benchmark arm vs dense,
-   quanta-parity vs the group-local oracle, occupancy, and the KD-parity gate before any
-   deploy use. Row scope stays the default everywhere.
+   different optimizer, on purpose). GPU GATES RUN (2026-07-30, Kaggle T4 —
+   results/GPU_GATE_T4_GROUPLOCAL.md): quanta parity ESSENTIALLY EXACT (7e-08…9e-07 code
+   mismatch, scale ≤6e-08), CUDA suites green, peak memory the lowest of all update
+   paths (152-435 MiB vs dense 244-570). Speed after the x_perm+BLOCK_M=64 pass:
+   0.4-0.8× dense (was 0.03-0.2× with in-kernel gather — H3 pinned at kernel scale;
+   fp16-vs-bf16 closed NEGATIVE — the residual ~2× is the G-fold go re-read + serial M
+   loop, i.e. Stage-2 restructure). Deploy arithmetic already works through decimation
+   (grid over 1/4 groups → ~4× → faster than dense at lower memory, plus the KD-pregate
+   quality edge); the grid restriction is the next kernel task. Row scope stays the
+   default until the full KD gate.
 
 17. **Group-local follow-through (2026-07-30, all CPU): decimation lever + KD pre-gate WIN
    + restore machinery proven + standardized eval.** (a) `active_groups` on the
