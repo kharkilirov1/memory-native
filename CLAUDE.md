@@ -218,6 +218,29 @@ optim + activation pools the method zeroes.
    quanta-parity vs the group-local oracle, occupancy, and the KD-parity gate before any
    deploy use. Row scope stays the default everywhere.
 
+17. **Group-local follow-through (2026-07-30, all CPU): decimation lever + KD pre-gate WIN
+   + restore machinery proven + standardized eval.** (a) `active_groups` on the
+   group-local reference: decimation is the full math restricted to a subset (inactive
+   groups BIT-untouched, active groups BIT-equal to the full update — pinned by test;
+   only well-defined under group scope). Witness (results/DECIMATION_WITNESS.md): dec4 +
+   lr×4 beats EVERY full arm on every seed (1.6–5.4× lower final mse) at 0.25× update
+   FLOPs — full-lr×4 crosses fast then bounces into the noise ball, dec4 settles ~5×
+   lower (staggered noise injection at the same integrated signal). (b) KD pre-gate on
+   REAL donor blocks (results/GROUPLOCAL_KD_PREGATE.md): Qwen2.5-0.5B blocks 0-1,
+   identical PTQ start, frozen fp slice, 120 KD steps — **group scope wins at every
+   checkpoint, final 8.54 vs 10.22 held-out MSE (−29.7% vs −15.9% from warm)**; the
+   fused-kernel enabler is a quality WIN at this scale, not a trade-off. (c)
+   `scripts/restore_witness.py` (results/RESTORE_WITNESS.md): restore WITHOUT the donor
+   ever fully resident (meta skeleton + shard materialization + probe-path computed
+   buffers + re-tie; streamed fp reference for PPL/KL; faulthandler+RSS) — proven
+   end-to-end on a real streamed 0.5B conversion (24/24 blocks, 0.14 GiB conversion
+   peak, 2.89 GiB restore peak, 0 meta left); targets the pending 12B gate of item 15
+   (12B projection ~12-13 GiB vs ~44 GiB naive). (d) `scripts/eval_wikitext_ppl.py`:
+   GPTQ-protocol WikiText-2 PPL for fp/streamed/ckpt models — the external-comparability
+   harness (custom val slices cannot sit next to published GPTQ/AWQ/AQLM tables).
+   `ptq_warm_start` now passes `stats_scope` through to packed layers (was silently
+   dropped by the counter_kw filter).
+
 ## Gotchas (hard-won, keep)
 
 - Counter layers are **eager-only**: exactly one forward per backward; wrap measurement
