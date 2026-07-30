@@ -561,6 +561,39 @@ def gptq_group_ternary(
 
 
 @torch.no_grad()
+@torch.no_grad()
+def _refit_salient_values(w: torch.Tensor, Q: torch.Tensor, H: torch.Tensor,
+                          salient_idx: torch.Tensor, percdamp: float):
+    """Exact LSQ refit of the salient channel on the residual layer error.
+
+    After the sweep the k% salient coordinates are the format's only continuous freedom;
+    storing copies of w there is suboptimal — the H-optimal values absorb the ternary
+    part's residual: e_S = -H_SS^{-1} H_SB e_B per row (results/SALIENT_REFIT_WITNESS.md:
+    held-out −7.0% q_proj / −1.6..−2.5% MLP at 65k-token calib, never lost). Per-row SPD
+    solves via Cholesky (batched-LU is the documented MKL hazard), lstsq fallback.
+    Returns the updated (Q, salient_val)."""
+    out, cols = w.shape
+    damp = percdamp * H.diag().mean()
+    Hd = (H + damp * torch.eye(cols, device=H.device, dtype=H.dtype)).double()
+    Qr = Q.clone()
+    rows = salient_idx.long() // cols
+    js = salient_idx.long() % cols
+    for o in rows.unique().tolist():
+        S = js[rows == o]
+        mask = torch.zeros(cols, dtype=torch.bool, device=w.device)
+        mask[S] = True
+        e = (w[o] - Qr[o]).double()
+        H_SS = Hd[S][:, S]
+        rhs = -(Hd[S][:, ~mask] @ e[~mask]).unsqueeze(1)
+        try:
+            L = torch.linalg.cholesky(H_SS)
+            e_S = torch.cholesky_solve(rhs, L).squeeze(1)
+        except RuntimeError:
+            e_S = torch.linalg.lstsq(H_SS, rhs).solution.squeeze(1)
+        Qr[o, S] = (w[o, S].double() - e_S).to(Q.dtype)
+    return Qr, Qr.reshape(-1)[salient_idx.long()].to(torch.float32)
+
+
 def solve_group_state(
     w: torch.Tensor,
     H: torch.Tensor,
@@ -576,6 +609,7 @@ def solve_group_state(
     salient_first: float = 0.0,
     salient_scope: str = "row",
     in_sweep_refit: bool = False,
+    salient_refit: str = "none",
 ):
     """One layer's full DEPLOY solve: the v3 solver, then (for itf grids) the exact sym
     re-solve on the achieved support (the packed format is sym-scale), the residual
@@ -621,6 +655,12 @@ def solve_group_state(
     if salient_idx.numel():
         Q = Q.clone()
         Q.reshape(-1)[salient_idx.long()] = salient_val.float()
+    if salient_refit not in {"none", "align"}:
+        raise ValueError("salient_refit must be 'none' or 'align'")
+    if salient_refit == "align" and salient_idx.numel():
+        Q, salient_val = _refit_salient_values(
+            w.detach().to(torch.float32), Q, H.detach().to(torch.float32),
+            salient_idx, percdamp)
     return (S, t, c, perm, salient_idx, salient_val), Q
 
 
@@ -1176,6 +1216,7 @@ def ptq_warm_start(
     salient_first: float = 0.0,
     salient_scope: str = "row",
     in_sweep_refit: bool = False,
+    salient_refit: str = "none",
     calibration: str = "fp",
     asym_chunk_layers: int = 7,
     asym_strength: float = 1.0,
@@ -1367,7 +1408,7 @@ def ptq_warm_start(
                         act_order=act_order, refine_iters=refine_iters,
                         scale_refit=scale_refit, grid=grid, itf_iters=itf_iters,
                         salient_first=salient_first, salient_scope=salient_scope,
-                        in_sweep_refit=in_sweep_refit,
+                        in_sweep_refit=in_sweep_refit, salient_refit=salient_refit,
                     )
                 states[path] = (S.cpu(), t.cpu(), c.cpu(), perm.cpu(),
                                 salient_idx.cpu(), salient_val.cpu())
@@ -1408,7 +1449,7 @@ def ptq_warm_start(
                             act_order=act_order, refine_iters=refine_iters,
                             scale_refit=scale_refit, grid=grid, itf_iters=itf_iters,
                             salient_first=salient_first, salient_scope=salient_scope,
-                            in_sweep_refit=in_sweep_refit,
+                            in_sweep_refit=in_sweep_refit, salient_refit=salient_refit,
                         )
                         down_state, _ = solve_group_state(
                             down,
@@ -1417,7 +1458,7 @@ def ptq_warm_start(
                             act_order=act_order, refine_iters=refine_iters,
                             scale_refit=scale_refit, grid=grid, itf_iters=itf_iters,
                             salient_first=salient_first, salient_scope=salient_scope,
-                            in_sweep_refit=in_sweep_refit,
+                            in_sweep_refit=in_sweep_refit, salient_refit=salient_refit,
                         )
                     target_states.append(
                         (
