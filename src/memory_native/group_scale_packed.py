@@ -98,6 +98,7 @@ class PackedGroupScaleCounterLinear(nn.Module):
         kernel_mode: str = "auto",
         strict_update: bool = True,
         stats_scope: str = "row",
+        decimation: int = 1,
         init_gain: float = 1.0,
         flip_sample_size: int = 4096,
     ) -> None:
@@ -113,6 +114,17 @@ class PackedGroupScaleCounterLinear(nn.Module):
             raise ValueError("kernel_mode must be 'auto', 'gemm', 'triton' or 'torch'")
         if stats_scope not in {"row", "group"}:
             raise ValueError("stats_scope must be 'row' or 'group'")
+        decimation = int(decimation)
+        if decimation < 1:
+            raise ValueError("decimation must be >= 1")
+        if decimation > 1:
+            # Only well-defined under group-local statistics (nothing crosses a group
+            # boundary); round-robin g % S == step % S. Compensate lr by ~S at the caller
+            # (measured recipe: dec4 + lr*4, results/DECIMATION_WITNESS.md).
+            if stats_scope != "group":
+                raise ValueError("decimation requires stats_scope='group'")
+            if in_features % group:
+                raise ValueError("decimation requires in_features % group == 0")
         self.in_features = int(in_features)
         self.out_features = int(out_features)
         self.group = int(group)
@@ -127,6 +139,7 @@ class PackedGroupScaleCounterLinear(nn.Module):
         self.kernel_mode = kernel_mode
         self.strict_update = bool(strict_update)
         self.stats_scope = stats_scope
+        self.decimation = decimation
         self.update_enabled = True
         self._outstanding_forward = False
         self._sr_step = 0
@@ -424,10 +437,15 @@ class PackedGroupScaleCounterLinear(nn.Module):
         use_fused = (
             HAS_TRITON and x2.is_cuda and _is_power_of_two(self.group) and self.group >= 16
         )
+        active = None
+        if self.decimation > 1:
+            gids = torch.arange(self.n_groups, device=self.state.device)
+            active = (gids % self.decimation) == (self._sr_step % self.decimation)
         upd_kw = dict(
             group=self.group, C=self.C, lr=self.lr, lr_scale=self.lr_scale,
             rms_beta=self.rms_beta, rms_eps=self.rms_eps, seed=seed,
             residual_alpha=self.residual_alpha, clip=self.local_grad_clip,
+            active_groups=active,
         )
         if use_fused:
             triton_group_counter_update_fused(

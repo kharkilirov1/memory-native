@@ -136,6 +136,41 @@ def test_grouplocal_decimation_is_exact_restriction():
     assert torch.equal(v_d[:, active], v_f[:, active])
 
 
+def test_layer_decimation_schedule_touches_only_scheduled_groups():
+    """decimation=S on the layer: at step k only groups g == k (mod S) may change —
+    state bytes, scale and v alike. The round-robin schedule the fused kernel's grid
+    restriction implements."""
+    torch.manual_seed(5)
+    in_, out, group, S = 32, 8, 8, 4
+    lay = PackedGroupScaleCounterLinear(
+        in_, out, group=group, C=11, lr=0.05, stats_scope="group", decimation=S,
+        kernel_mode="torch", local_grad_clip=1.0,
+    ).train()
+    lay.load_group_state(torch.full((out, in_ // group), 0.2),
+                         torch.randint(-1, 2, (out, in_), dtype=torch.int16))
+    x = torch.randn(64, in_)
+    packs_per_group = group // 4 * 3
+    for step in range(2 * S):
+        st0, sc0, v0 = lay.state.clone(), lay.scale.clone(), lay.v.clone()
+        lay(x).pow(2).mean().backward()
+        g_active = step % S
+        for g in range(in_ // group):
+            sl = slice(g * packs_per_group, (g + 1) * packs_per_group)
+            if g == g_active:
+                continue  # allowed to change (may or may not)
+            assert torch.equal(lay.state[:, sl], st0[:, sl]), (step, g)
+            assert torch.equal(lay.scale[:, g], sc0[:, g]), (step, g)
+            assert torch.equal(lay.v[:, g], v0[:, g]), (step, g)
+    assert int(lay.sr_step) == 2 * S
+
+
+def test_decimation_validation():
+    with pytest.raises(ValueError, match="stats_scope"):
+        PackedGroupScaleCounterLinear(32, 8, group=8, decimation=4)
+    with pytest.raises(ValueError, match="in_features"):
+        PackedGroupScaleCounterLinear(36, 8, group=8, stats_scope="group", decimation=4)
+
+
 def test_grouplocal_rejects_row_shaped_v():
     codes = encode_state(torch.zeros(4, 16, dtype=torch.int16),
                          torch.zeros(4, 16, dtype=torch.int16), 11)
