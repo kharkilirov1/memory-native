@@ -72,6 +72,11 @@ SALIENT_FIRST = float(os.environ.get("SALIENT_FIRST", "0.01"))
 # (same total bpw, hard rows take more slots). Gate new runs before flipping the default.
 SALIENT_SCOPE = os.environ.get("SALIENT_SCOPE", "row")
 IN_SWEEP_REFIT = env_bool("IN_SWEEP_REFIT", True)
+# SALIENT_REFIT=align re-solves the salient VALUES as the exact LSQ corrector of the
+# residual layer error after the sweep (copies are suboptimal; held-out −7% q_proj at
+# 65k calib, never lost -- results/SALIENT_REFIT_WITNESS.md). Off by default until a
+# deploy-scale warm gate.
+SALIENT_REFIT = os.environ.get("SALIENT_REFIT", "none")
 # CALIBRATION=asym switches to the GPTAQ-style cascade objective ||X_q Q - X_fp W||^2
 # (donor/asym.py): sequential per-chunk solve against quantized inputs. Costs a resident
 # fp copy of the model + 2*ceil(n_layers/ASYM_CHUNK_LAYERS) calibration passes.
@@ -293,6 +298,7 @@ if resume_payload is None:
         grid=GRID, itf_iters=ITF_ITERS, salient_first=SALIENT_FIRST,
         salient_scope=SALIENT_SCOPE,
         in_sweep_refit=IN_SWEEP_REFIT,
+        salient_refit=SALIENT_REFIT,
         calibration=CALIBRATION, asym_chunk_layers=ASYM_CHUNK_LAYERS,
         asym_strength=ASYM_STRENGTH, asym_passes=ASYM_PASSES,
         asym_fp_device=ASYM_FP_DEVICE,
