@@ -142,7 +142,8 @@ def phase1_fp_reference(windows: torch.Tensor, cache_path: str) -> None:
     targets = windows.view(-1)
     seqlen = windows.shape[1]
     for start in range(0, total, LOGIT_CHUNK):
-        rows = flat[start:start + LOGIT_CHUNK]
+        # _materialize keeps the shard dtype (bf16 donors), the head is DTYPE: cast at use.
+        rows = flat[start:start + LOGIT_CHUNK].to(w_head.dtype)
         logits = rows @ w_head.t()
         logp = F.log_softmax(logits.float(), dim=-1)
         for r in range(rows.shape[0]):
