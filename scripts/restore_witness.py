@@ -169,8 +169,7 @@ def phase1_fp_reference(windows: torch.Tensor, cache_path: str) -> None:
 @torch.no_grad()
 def phase2_restore() -> nn.Module:
     from memory_native.donor.streaming import (
-        _WeightSource, _build_probe, _computed_buffers, _resolve_decoder,
-        load_streamed_state,
+        _WeightSource, _build_probe, _resolve_decoder, load_streamed_state,
     )
     from memory_native.recovery.runtime import restore_counter_structure
     from transformers import AutoConfig, AutoModelForCausalLM
@@ -197,18 +196,15 @@ def phase2_restore() -> nn.Module:
     if unexpected:
         raise SystemExit(f"unexpected keys in state (first 5): {unexpected[:5]}")
 
-    # Materialize every remaining meta tensor straight from the donor shards.
+    # Materialize every remaining meta tensor straight from the donor shards; anything the
+    # shards do not carry is a COMPUTED tensor and comes from the config probe by full
+    # path (depth was the only dimension the probe cut, so `layers.N` maps to `layers.0`).
+    import re
+
     src = _WeightSource(MODEL)
     probe = _build_probe(config, "cpu")
-    probe_inner, _ = _resolve_decoder(probe)
-    computed = {}
-    for mod_name in ("embed_tokens", "rotary_emb"):
-        sub = getattr(probe_inner, mod_name, None)
-        if sub is not None:
-            for k, v in _computed_buffers(sub).items():
-                computed[k] = v
-    computed_block = _computed_buffers(probe_inner.layers[0])
-    inner, stack = _resolve_decoder(model)
+    probe_tensors = {n: t for n, t in list(probe.named_buffers()) + list(probe.named_parameters())}
+    _, stack = _resolve_decoder(model)
 
     n_param, n_buf, n_computed, n_tied = 0, 0, 0, 0
     for name, tensor in list(model.named_parameters()) + list(model.named_buffers()):
@@ -221,14 +217,13 @@ def phase2_restore() -> nn.Module:
         elif name == "lm_head.weight" and src.has(f"{stack}.embed_tokens.weight"):
             value = src.get(f"{stack}.embed_tokens.weight", DTYPE)
             n_tied += 1
-        else:  # computed buffer (rotary inv_freq lives once per model or per block)
-            key = leaf if leaf in computed_block else name
-            source = computed_block.get(key, computed.get(key))
-            if source is None and leaf == "inv_freq":
-                source = _computed_buffers(probe_inner.rotary_emb).get("inv_freq")
+        else:  # computed (rotary inv_freq class): probe by full path, depth remapped to 0
+            source = probe_tensors.get(name)
             if source is None:
+                source = probe_tensors.get(re.sub(r"\.layers\.\d+\.", ".layers.0.", name))
+            if source is None or source.is_meta:
                 raise SystemExit(f"no source for meta tensor {name} -- refusing garbage")
-            value = source.clone()
+            value = source.detach().clone()
             n_computed += 1
         if isinstance(getattr(parent, leaf, None), nn.Parameter):
             setattr(parent, leaf, nn.Parameter(value, requires_grad=False))
