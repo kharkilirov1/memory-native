@@ -156,6 +156,31 @@ def main():
         fused_mismatch = (unpack_codes(st_f, k) != ref_codes).float().mean().item()
         fused_smax = (sc_f - sc_ref).abs().max().item()
 
+        # [L3d] decimated arm: 1/4 of the groups per launch (the dec4 per-step cost).
+        dec_ok = fused_ok and k % group == 0
+        if dec_ok:
+            dec_mask = (torch.arange(groups_n, device=device) % 4) == 0
+            st_d, sc_d = state0.clone(), scale0.clone()
+            v_d = torch.zeros(n, groups_n, device=device)
+
+            def fused_dec_update():
+                triton_group_counter_update_fused(
+                    st_d, sc_d, v_d, x, go, layer.perm,
+                    active_groups=dec_mask, **upd_kw)
+
+            torch.cuda.reset_peak_memory_stats()
+            fused_dec_ms = sync_ms(fused_dec_update, iters=args.iters)
+            fused_dec_peak = torch.cuda.max_memory_allocated()
+            st_d.copy_(state0); sc_d.copy_(scale0); v_d.zero_()
+            triton_group_counter_update_fused(
+                st_d, sc_d, v_d, x, go, layer.perm, active_groups=dec_mask, **upd_kw)
+            sc_rd = scale0.clone()
+            v_rd = torch.zeros(n, groups_n, device=device)
+            ref_dec = group_counter_update_grouplocal_from_io_hashsr(
+                unpack_codes(state0, k), sc_rd, v_rd, x, go, layer.perm,
+                active_groups=dec_mask, **upd_kw)
+            dec_mismatch = (unpack_codes(st_d, k) != ref_dec).float().mean().item()
+
     # Stage-1 witness: the "gemm" layer mode end-to-end (decode + cuBLAS each call).
     gemm_layer = PackedGroupScaleCounterLinear(
         k, n, group=group, C=11, perm=perm, residual_alpha=0.35,
@@ -209,6 +234,12 @@ def main():
               f"vs strict={strict_upd_ms / max(fused_upd_ms, 1e-9):.0f}x  "
               f"code mismatch vs oracle={fused_mismatch:.2e} (quanta contract)  "
               f"scale max|d|={fused_smax:.2e}")
+        if dec_ok:
+            print(f"[L3d] update fused dec4(1/4 groups/launch)={fused_dec_ms:.3f} ms  "
+                  f"peak={fused_dec_peak / 2**20:.1f} MiB  "
+                  f"vs dense={dense_upd_ms / max(fused_dec_ms, 1e-9):.1f}x  "
+                  f"vs full-fused={fused_upd_ms / max(fused_dec_ms, 1e-9):.1f}x  "
+                  f"code mismatch vs oracle={dec_mismatch:.2e}")
     else:
         print("[L3] fused group-local arm skipped (needs power-of-two group >= 16)")
     print(f"[L1] gemm-mode fwd={gemm_fwd_ms:.3f} ms (max_abs={gemm_y_err:.6g})  "

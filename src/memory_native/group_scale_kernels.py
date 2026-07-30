@@ -634,13 +634,14 @@ if HAS_TRITON:
 
     @triton.jit
     def _group_fused_update_kernel(
-        state_ptr, scale_ptr, v_ptr, x_ptr, go_ptr, perm_ptr, seed_ptr,
+        state_ptr, scale_ptr, v_ptr, x_ptr, go_ptr, perm_ptr, seed_ptr, groups_ptr,
         M, N, K, G, C, group_size, lr, lr_scale, rms_beta, rms_eps, clip, residual_alpha,
         stride_sn, stride_xm, stride_xk, stride_gom, stride_gon,
         stride_scn, stride_scg, stride_vn, stride_vg,
         BLOCK_N: tl.constexpr, BLOCK_M: tl.constexpr,
         BLOCK_K: tl.constexpr, BLOCK_PG: tl.constexpr,
         X_BF16: tl.constexpr, X_FP16: tl.constexpr, LAGGED: tl.constexpr,
+        DECIMATED: tl.constexpr,
     ):
         # One-pass GROUP-LOCAL update (v is [N, G]): each program owns a [BLOCK_N rows x one
         # scale group] tile, forms its slice of grad_w = go^T x with tl.dot ENTIRELY in
@@ -649,12 +650,20 @@ if HAS_TRITON:
         # -> 6-bit repack. Sound only because every statistic of the group-local math lives
         # inside this tile; the row-scope math (full-row denom/clip) canNOT be fused this way.
         pid_n = tl.program_id(0)
-        grp = tl.program_id(1)
+        pid_g = tl.program_id(1)
+        # DECIMATED: pid_g indexes the COMPACT active-group list (and the compacted
+        # x copy, which holds only the active groups' columns); groups_ptr maps it to
+        # the true group id used for state/scale/v/perm addressing.
+        if DECIMATED:
+            grp = tl.load(groups_ptr + pid_g).to(tl.int32)
+        else:
+            grp = pid_g
         seed = tl.load(seed_ptr).to(tl.uint32)
         offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
         nmask = offs_n < N
         offs_p = grp * group_size + tl.arange(0, BLOCK_K)
         pmask = offs_p < K
+        offs_x = pid_g * group_size + tl.arange(0, BLOCK_K)
 
         # x_ptr points at PRE-GATHERED x_perm = x[:, perm] (one coalesced copy in the
         # wrapper): group columns load contiguously here. In-kernel gather through perm
@@ -668,7 +677,7 @@ if HAS_TRITON:
                 mask=mmask[:, None] & nmask[None, :], other=0.0,
             )
             xv = tl.load(
-                x_ptr + offs_m[:, None] * stride_xm + offs_p[None, :] * stride_xk,
+                x_ptr + offs_m[:, None] * stride_xm + offs_x[None, :] * stride_xk,
                 mask=mmask[:, None] & pmask[None, :], other=0.0,
             )
             if X_BF16:
@@ -985,8 +994,14 @@ def triton_group_counter_update_fused(
     residual_alpha: float = 0.0,
     lagged: bool = False,
     clip: float = 0.0,
+    active_groups: torch.Tensor | None = None,
 ) -> None:
     """One-launch fused GROUP-LOCAL update: tensor-core correlation + counter epilogue.
+
+    ``active_groups`` (bool mask [n_groups] or int32 group ids): decimated update — the
+    grid launches over the active groups only and the x copy holds only their columns,
+    so cost scales with the active fraction. Inactive groups are untouched (the exact
+    restriction contract of the torch reference). Requires in_features % group == 0.
 
     Requires the group-local statistics variant (``v`` of shape [out, n_groups] — see
     ``group_counter_update_grouplocal_hashsr``, which is the CPU oracle for this kernel).
@@ -1021,21 +1036,41 @@ def triton_group_counter_update_fused(
         raise ValueError("invalid group layout")
     seed_t = torch.tensor([int(seed) & 0xFFFFFFFF], dtype=torch.int64, device=x2.device)
     bf16, fp16 = _dtype_flags(x2)
-    # One coalesced act-order copy of x ([M, K], input dtype -- 12-73 MiB transient at
-    # Qwen shapes, still far below the dense path's fp32 grad_w+casts): the kernel then
-    # streams contiguous group columns instead of gathering through perm per tile.
-    x_perm = x2.index_select(1, perm.to(dtype=torch.long))
+    perm_long = perm.to(dtype=torch.long)
+    # One coalesced act-order copy of x ([M, K] or [M, K_active], input dtype -- far
+    # below the dense path's fp32 grad_w+casts): the kernel then streams contiguous
+    # group columns instead of gathering through perm per tile (H3 pathology, T4 gate).
+    if active_groups is not None:
+        if K % group:
+            raise ValueError("decimated fused update requires in_features % group == 0")
+        if active_groups.dtype == torch.bool:
+            group_ids = active_groups.nonzero().squeeze(1)
+        else:
+            group_ids = active_groups.to(dtype=torch.long)
+        if group_ids.numel() == 0:
+            return
+        group_ids = group_ids.to(device=x2.device)
+        cols = (group_ids.unsqueeze(1) * group
+                + torch.arange(group, device=x2.device)).reshape(-1)
+        x_perm = x2.index_select(1, perm_long[cols])
+        groups_t = group_ids.to(torch.int32).contiguous()
+        grid = (triton.cdiv(N, 32), int(group_ids.numel()))
+        decimated = True
+    else:
+        x_perm = x2.index_select(1, perm_long)
+        groups_t = perm  # dummy pointer; never loaded when DECIMATED=False
+        grid = (triton.cdiv(N, 32), G)
+        decimated = False
     BLOCK_N, BLOCK_M = 32, 64
-    grid = (triton.cdiv(N, BLOCK_N), G)
     _group_fused_update_kernel[grid](
-        state, scale, v, x_perm, go2, perm, seed_t,
+        state, scale, v, x_perm, go2, perm, seed_t, groups_t,
         M, N, K, G, C, group,
         float(lr), float(lr_scale), float(rms_beta), float(rms_eps),
         float(clip), float(residual_alpha),
         state.stride(0), x_perm.stride(0), x_perm.stride(1), go2.stride(0), go2.stride(1),
         scale.stride(0), scale.stride(1), v.stride(0), v.stride(1),
         BLOCK_N=BLOCK_N, BLOCK_M=BLOCK_M, BLOCK_K=group, BLOCK_PG=group // 4,
-        X_BF16=bf16, X_FP16=fp16, LAGGED=lagged,
+        X_BF16=bf16, X_FP16=fp16, LAGGED=lagged, DECIMATED=decimated,
         num_warps=8,
     )
 
