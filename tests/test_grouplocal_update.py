@@ -103,6 +103,39 @@ def test_grouplocal_degenerates_to_row_math():
     assert torch.equal(v_r, v_g)
 
 
+def test_grouplocal_decimation_is_exact_restriction():
+    """active_groups leaves inactive groups BIT-untouched (state, scale, v), and the active
+    groups get BIT-identically what a full update would give them — decimation is the full
+    math restricted to a subset, which is only well-defined because nothing crosses a
+    group boundary. This is the contract the fused-kernel grid restriction will mirror."""
+    torch.manual_seed(4)
+    out, in_, group, C = 8, 32, 8, 11
+    groups = in_ // group
+    codes0 = encode_state(torch.randint(-1, 2, (out, in_), dtype=torch.int16),
+                          torch.randint(-(C - 1), C, (out, in_), dtype=torch.int16), C)
+    scale0 = torch.rand(out, groups) * 0.2 + 0.05
+    v0 = torch.rand(out, groups) * 0.01
+    gw = torch.randn(out, in_)
+    perm = torch.randperm(in_)
+    kw = dict(group=group, C=C, lr=0.05, lr_scale=2e-4, rms_beta=0.9, rms_eps=1e-3,
+              seed=11, residual_alpha=0.35, clip=1.0)
+    active = torch.tensor([True, False, True, False])
+
+    sc_f, v_f = scale0.clone(), v0.clone()
+    full = group_counter_update_grouplocal_hashsr(codes0.clone(), sc_f, v_f, gw.clone(),
+                                                  perm, **kw)
+    sc_d, v_d = scale0.clone(), v0.clone()
+    dec = group_counter_update_grouplocal_hashsr(codes0.clone(), sc_d, v_d, gw.clone(),
+                                                 perm, active_groups=active, **kw)
+    col_active = active[torch.arange(in_) // group]
+    assert torch.equal(dec[:, ~col_active], codes0[:, ~col_active])
+    assert torch.equal(sc_d[:, ~active], scale0[:, ~active])
+    assert torch.equal(v_d[:, ~active], v0[:, ~active])
+    assert torch.equal(dec[:, col_active], full[:, col_active])
+    assert torch.equal(sc_d[:, active], sc_f[:, active])
+    assert torch.equal(v_d[:, active], v_f[:, active])
+
+
 def test_grouplocal_rejects_row_shaped_v():
     codes = encode_state(torch.zeros(4, 16, dtype=torch.int16),
                          torch.zeros(4, 16, dtype=torch.int16), 11)

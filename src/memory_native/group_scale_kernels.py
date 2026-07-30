@@ -168,6 +168,7 @@ def group_counter_update_grouplocal_hashsr(
     residual_alpha: float = 0.0,
     lagged: bool = False,
     clip: float = 0.0,
+    active_groups: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Group-local update: ALL statistics live on the storage geometry (the 128-wide scale group).
 
@@ -183,6 +184,12 @@ def group_counter_update_grouplocal_hashsr(
 
     SR keys (original-column hash), carry, saturation and the 6-bit encoding are unchanged.
     Scale/v are mutated in place; new act-ordered unpacked codes are returned.
+
+    ``active_groups`` (optional bool mask [n_groups]): update ONLY those groups; state,
+    scale and v of inactive groups are returned/kept BIT-untouched. Group-locality is what
+    makes this well-defined — no statistic of an active group depends on an inactive one.
+    This is the decimation lever (update 1/S of the groups per step, S× fewer update FLOPs);
+    on the fused kernel it maps to launching the grid over the scheduled groups only.
     """
     _validate_layout(codes_perm, scale, perm, group)
     out, in_features = codes_perm.shape
@@ -210,12 +217,19 @@ def group_counter_update_grouplocal_hashsr(
         g_sq = torch.zeros_like(scale, dtype=gw.dtype)
         g_sq.scatter_add_(1, idx_expand, gw * gw)
         g_sq = g_sq / counts.clamp_min(1.0)
+    v_old_kept = None
+    if active_groups is not None:
+        if active_groups.shape != (groups,) or active_groups.dtype != torch.bool:
+            raise ValueError("active_groups must be a bool mask of shape [n_groups]")
+        v_old_kept = v.clone()
     if lagged:
         denom = v.sqrt().clamp_min(rms_eps)
         v.mul_(rms_beta).add_(g_sq, alpha=1.0 - rms_beta)
     else:
         v.mul_(rms_beta).add_(g_sq, alpha=1.0 - rms_beta)
         denom = v.sqrt().clamp_min(rms_eps)
+    if v_old_kept is not None:
+        v.copy_(torch.where(active_groups.unsqueeze(0), v, v_old_kept))
     if clip > 0:
         group_norm = (g_sq * counts).sqrt() / denom
         denom = denom / (clip / group_norm.clamp_min(1e-30)).clamp_max(1.0)
@@ -227,6 +241,8 @@ def group_counter_update_grouplocal_hashsr(
 
     scale_old = scale.clone()
     scale_new = (scale_old - float(lr_scale) * grad_scale).clamp_(1e-5, 10.0)
+    if active_groups is not None:
+        scale_new = torch.where(active_groups.unsqueeze(0), scale_new, scale_old)
     s_old_col = scale_old[:, group_idx]
     s_new_col = scale_new[:, group_idx]
     denom_col = denom[:, group_idx]
@@ -248,7 +264,11 @@ def group_counter_update_grouplocal_hashsr(
     ).clamp_(-(C - 1), C - 1)
 
     scale.copy_(scale_new)
-    return encode_state(new_t.to(torch.int16), remainder.to(torch.int16), C)
+    new_codes = encode_state(new_t.to(torch.int16), remainder.to(torch.int16), C)
+    if active_groups is not None:
+        col_active = active_groups[group_idx].unsqueeze(0)
+        new_codes = torch.where(col_active, new_codes, codes_perm)
+    return new_codes
 
 
 @torch.no_grad()

@@ -1023,7 +1023,7 @@ def _group_counter_from_state(
         "lr", "lr_scale", "rms_beta", "rms_eps", "local_grad_clip", "residual_alpha",
     }
     packed_supported = reference_supported | {
-        "kernel_mode", "strict_update", "flip_sample_size",
+        "kernel_mode", "strict_update", "flip_sample_size", "stats_scope",
     }
     S, t, c, perm, salient_idx, salient_val = state
     packed = (
@@ -1474,7 +1474,7 @@ def ptq_warm_start(
             "lr", "lr_scale", "rms_beta", "rms_eps", "local_grad_clip", "residual_alpha",
         }
         packed_supported = reference_supported | {
-            "kernel_mode", "strict_update", "flip_sample_size",
+            "kernel_mode", "strict_update", "flip_sample_size", "stats_scope",
         }
         warned_fallback = False
         for path in targets:
