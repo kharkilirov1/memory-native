@@ -6,8 +6,13 @@ reports its bounded O(out*groups) scratch against the dense fp32 grad_w that is 
 from __future__ import annotations
 
 import argparse
+import os
 
 import torch
+
+# MN_BENCH_FAST=1 skips the strict/semi arms and the end-to-end strict backward witness
+# (30-46 s/call at M=4096) -- for kernel-iteration runs where only L2/L3 matter.
+FAST = os.environ.get("MN_BENCH_FAST", "0") not in {"0", ""}
 
 from memory_native.counter import decode_state
 from memory_native.group_scale_kernels import HAS_TRITON
@@ -103,12 +108,16 @@ def main():
         triton_group_counter_update_dense(
             layer.state, layer.scale, layer.v, gw.contiguous(), layer.perm, **upd_kw)
 
-    strict_upd_ms = sync_ms(strict_update, iters=args.iters)
-    layer.state.copy_(state0); layer.scale.copy_(scale0); layer.v.copy_(v0)
-    torch.cuda.reset_peak_memory_stats()
-    semi_upd_ms = sync_ms(semi_update, iters=args.iters)
-    semi_peak = torch.cuda.max_memory_allocated()
-    layer.state.copy_(state0); layer.scale.copy_(scale0); layer.v.copy_(v0)
+    if FAST:
+        strict_upd_ms = semi_upd_ms = float("nan")
+        semi_peak = 0
+    else:
+        strict_upd_ms = sync_ms(strict_update, iters=args.iters)
+        layer.state.copy_(state0); layer.scale.copy_(scale0); layer.v.copy_(v0)
+        torch.cuda.reset_peak_memory_stats()
+        semi_upd_ms = sync_ms(semi_update, iters=args.iters)
+        semi_peak = torch.cuda.max_memory_allocated()
+        layer.state.copy_(state0); layer.scale.copy_(scale0); layer.v.copy_(v0)
     torch.cuda.reset_peak_memory_stats()
     dense_upd_ms = sync_ms(dense_update, iters=args.iters)
     dense_peak = torch.cuda.max_memory_allocated()
@@ -163,13 +172,17 @@ def main():
     # One strict update correctness/peak-memory witness. No dense grad_w is built on this path.
     state_before = layer.state.clone()
     torch.cuda.reset_peak_memory_stats()
-    layer.train()
-    x_train = x.detach().requires_grad_(True)
-    y = layer(x_train)
-    y.backward(go)
-    torch.cuda.synchronize()
-    peak = torch.cuda.max_memory_allocated()
-    changed = (layer.state != state_before).any().item()
+    if FAST:
+        peak = 0
+        changed = True
+    else:
+        layer.train()
+        x_train = x.detach().requires_grad_(True)
+        y = layer(x_train)
+        y.backward(go)
+        torch.cuda.synchronize()
+        peak = torch.cuda.max_memory_allocated()
+        changed = (layer.state != state_before).any().item()
     codes = unpack_codes(layer.state, k)
     td, cd = decode_state(codes, layer.C)
 
