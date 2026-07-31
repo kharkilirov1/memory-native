@@ -167,6 +167,7 @@ def restore_counter_structure(
             allowed = {
                 "lr", "lr_scale", "rms_beta", "rms_eps", "local_grad_clip",
                 "residual_alpha", "kernel_mode", "strict_update", "flip_sample_size",
+                "stats_scope", "decimation",
             }
             kw = {key: value for key, value in counter_kw.items() if key in allowed}
             if packed:
@@ -205,6 +206,7 @@ def restore_counter_structure(
         allowed = {
             "lr", "lr_scale", "rms_beta", "rms_eps", "local_grad_clip",
             "residual_alpha", "kernel_mode", "strict_update", "flip_sample_size",
+            "stats_scope", "decimation",
         }
         kw = {key: value for key, value in counter_kw.items() if key in allowed}
         if packed:
