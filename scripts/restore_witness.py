@@ -186,9 +186,22 @@ def phase2_restore() -> nn.Module:
     config = AutoConfig.from_pretrained(MODEL)
     with torch.device("meta"):
         model = AutoModelForCausalLM.from_config(config)
+    # Partially-converted donors (gemma-4 unified: vision/audio towers are NOT converted
+    # by the decoder-only streaming pass): any linear the state does not cover stays fp
+    # and is materialized straight from the shards below. Full paths as skip tokens —
+    # substring matching is safe while uncovered modules live in distinctly-named towers.
+    uncovered = [
+        path for path, mod in model.named_modules()
+        if isinstance(mod, nn.Linear)
+        and f"{path}.state" not in state and f"{path}.counter.state" not in state
+        and path != "lm_head"
+    ]
+    if uncovered:
+        log(f"  {len(uncovered)} linears without counter state (multimodal/skipped) stay fp")
     report = restore_counter_structure(
         model, state, kind=KIND, group=GROUP, C=C,
         kernel_mode="torch", strict_update=False, flip_sample_size=0,
+        extra_skip=uncovered,
     )
     log(f"  rebuilt {len(report.swapped)} counter linears ({report.coeffs:,} coeffs)")
     missing, unexpected = model.load_state_dict(state, strict=False)
