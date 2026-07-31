@@ -33,7 +33,41 @@ Monotone, best = final. Context: the entire previous campaign's best (6000 steps
 richer s2i2 start, G4) was 2.6779 — this run reaches 2.712 with 1/8 the KD tokens on a
 weaker start: the production loop is healthy on Kaggle T4s.
 
-## Group arm (COUNTER_LR 0.001→5e-5 cosine — the re-centered grid) — running
+## Group arm (COUNTER_LR 0.001→5e-5 cosine — the re-centered grid) — COMPLETE
+
+| step | strict metric | en | ru |
+|---:|---:|---:|---:|
+| warm | 3.2992 | 51.7 | 62.0 |
+| 300 | 3.2346 | 44.1 | 59.7 |
+| 600 | 3.1877 | 43.0 | 50.8 |
+| 900 | 3.0518 | 36.7 | 41.8 |
+| 1200 | 2.7648 | 29.5 | 27.4 |
+| **1500** | **2.7262** | 28.38 | **25.87** |
+
+**Group 2.7262 vs row 2.7120 — a virtual tie with a marginal row edge (+1.4% mean PPL).**
+Per-domain: group WINS ru (25.87 vs 26.61) and instruct (10.55 vs 10.58); row wins en
+(27.65 vs 28.38), math, science. Both curves still descending at 1500 — neither
+converged. The 0.5B lr-matched −16% group win did NOT fully transfer to the 1.5B
+production loop (which adds homotopy alpha, feature-KD and the fp AdamW tail); one lr
+point per arm, single seed.
+
+## Verdict (per the pre-registered rule — honored strictly)
+
+2.7262 > 2.7120 is not "win/tie": **row scope KEEPS the quality-production default.**
+What IS promoted to production (the measured, unambiguous wins):
+
+- `stats_scope="group"` + fused kernel + `decimation=4` becomes the OFFICIAL SPEED
+  RECIPE — 1.7-3.0x faster than the dense update at lower peak memory (T4-measured,
+  results/GPU_GATE_T4_GROUPLOCAL.md) at a quality cost bounded by ~1.4% mean PPL at
+  this budget (dec4's own 1.5B number below). Fully wired: layer → ptq_warm_start →
+  run_ptq_recovery (STATS_SCOPE/DECIMATION envs) → restore/resume.
+- `SALIENT_REFIT=align` available as the solver's free post-pass (held-out-gated).
+
+Re-open conditions for the quality flip: a group lr micro-grid at 1.5B (0.0007-0.0015),
+longer budgets (both curves unconverged), and/or homotopy-off comparison — the 0.5B
+evidence says the gap is regime-sensitive, not structural.
+
+## dec4 arm (group + decimation=4, lr 0.002→1e-4) — running
 
 v1-v3 debug ledger (all pinned in code): B4 OOM at the first KD step (fp32 logits on a
 14.5 GiB card → B2 + expandable_segments); kernel_sources of an ERROR version do not
