@@ -257,6 +257,27 @@ optim + activation pools the method zeroes.
    `ptq_warm_start` now passes `stats_scope` through to packed layers (was silently
    dropped by the counter_kw filter).
 
+18. **PRODUCTION GATE 1.5B DONE (Kaggle 2xT4, results/PROD_GATE_15B.md) — recipe
+   SWITCHED to group+dec4.** Three arms, identical v3-layer start (warm 3.2992,
+   solver-determinism witnessed at 1.5B), same 12M mixed pilot corpus (bit-exact bins),
+   production loop (homotopy, feature-KD, fp AdamW tail, cosine), 1500 steps B2x512:
+   row@0.002 → 2.7120; group@0.001 → 2.7262; **dec4@0.002 → 2.7107 (ties row, best
+   code/science, at 1/4 update FLOPs)**. Plain group did NOT beat row at the production
+   loop (the 0.5B −16% win is regime-sensitive: one lr point, homotopy interaction) —
+   per the pre-registered rule row keeps the CLASS defaults; the PRODUCTION RECIPE is
+   now `STATS_SCOPE=group DECIMATION=4` + fused kernel + unchanged row lr schedule
+   (quality parity + 1.7-3.0x faster update at lower memory). dec4 homotopy phase is
+   turbulent (3.30→3.49 by step 600) before the cosine collapse — consider starting
+   decimation after the homotopy hold. Also productionized: `SALIENT_REFIT=align`
+   (solver post-pass, held-out-gated, off by default). Debug ledger pinned in the gate
+   doc: B4 OOMs a 16 GiB T4 at the first KD step (fp32 logits) → B2 +
+   expandable_segments; kernel_sources of an ERROR version do not mount; FOUR kw-filter
+   sites (2x ptq.py, 2x runtime.py) must pass stats_scope/decimation — all fixed.
+   Inference-export arithmetic (bare ternary, no counter residual): body bits ≈ 1.6-2.0
+   + 0.125 scales + 0.64 salient@2% → a 284B DeepSeek-V4-Flash-class MoE ≈ 81 GiB
+   deploy pack vs 529 GiB bf16; export utility (state→t, drop c, repack) not yet
+   written.
+
 ## Gotchas (hard-won, keep)
 
 - Counter layers are **eager-only**: exactly one forward per backward; wrap measurement
