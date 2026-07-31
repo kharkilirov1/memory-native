@@ -67,7 +67,41 @@ Re-open conditions for the quality flip: a group lr micro-grid at 1.5B (0.0007-0
 longer budgets (both curves unconverged), and/or homotopy-off comparison — the 0.5B
 evidence says the gap is regime-sensitive, not structural.
 
-## dec4 arm (group + decimation=4, lr 0.002→1e-4) — running
+## dec4 arm (group + decimation=4, lr 0.002→1e-4) — COMPLETE, BEST OF GATE
+
+| step | strict metric | en | ru |
+|---:|---:|---:|---:|
+| warm | 3.2992 | 51.7 | 62.0 |
+| 300 | 3.3082 | 56.2 | 52.6 |
+| 600 | 3.4855 | 68.4 | 63.4 |
+| 900 | 3.4569 | 61.7 | 66.8 |
+| 1200 | 2.8795 | 33.3 | 34.4 |
+| **1500** | **2.7107** | 27.85 | 27.05 |
+
+Early homotopy phase is TURBULENT under dec4's hot lr (metric rises to 3.49 by step 600
+— the alpha>0 visible weight amplifies the staggered hot ticks), then the cosine cooldown
+collapses it 3.46→2.88→2.71. Final: **ties row's best (2.7107 vs 2.7120), best-of-gate
+code (6.63) and science (16.34), at 1/4 of the update FLOPs.**
+
+## FINAL GATE TABLE + PRODUCTION SWITCH
+
+| arm | final metric | update FLOPs | update path (T4, M=4096) |
+|---|---:|---:|---:|
+| row @0.002 | 2.7120 | 1x | dense 26-30 ms |
+| group @0.001 | 2.7262 | 1x | fused 56-60 ms |
+| **dec4 @0.002** | **2.7107** | **1/4x** | **fused-dec 14.5-16 ms** |
+
+**PRODUCTION RECIPE (switched): `STATS_SCOPE=group DECIMATION=4` + the fused kernel,
+with the ROW lr recipe unchanged (COUNTER_LR 0.002→1e-4 cosine).** Quality parity with
+the best arm demonstrated on the production loop at 1.5B; the update path is 1.7-3.0x
+faster than the production dense kernels at lower peak memory
+(results/GPU_GATE_T4_GROUPLOCAL.md). Class defaults stay row (checkpoint compat; scopes
+refuse to cross-load) — the switch is the RECIPE, wired end-to-end as envs:
+solver (`ptq_warm_start`) → runner (`run_ptq_recovery.py`) → restore/resume.
+
+Refinement backlog (not blockers): start decimation after the homotopy hold (the early
+turbulence), group lr micro-grid at 1.5B, longer budgets (all three curves were still
+descending at 1500), salient_refit=align deploy-scale gate.
 
 v1-v3 debug ledger (all pinned in code): B4 OOM at the first KD step (fp32 logits on a
 14.5 GiB card → B2 + expandable_segments); kernel_sources of an ERROR version do not
