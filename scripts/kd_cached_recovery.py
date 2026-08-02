@@ -15,7 +15,24 @@ Run: MODEL=<donor> STATE_DIR=<streamed state> DATA_DIR=<mix bins> CACHE=<cache d
 env: STEPS (from cache), BATCH/SEQ/SEED (must match cache), KD_T (2.0), CE_ALPHA (0.3),
      COUNTER_LR_START (0.002) / COUNTER_LR_END (1e-4), FP_LR (1e-4), GRAD_CLIP (1.0),
      STATS_SCOPE (group), DECIMATION (4), HOMOTOPY_HOLD (0.2) / HOMOTOPY_END (0.9),
-     EVAL_EVERY (300), EVAL_MAX_TOKENS (60000), NUM_BLOCKS (0; smoke only), DEVICE.
+     EVAL_EVERY (300), EVAL_MAX_TOKENS (60000), NUM_BLOCKS (0; smoke only), DEVICE,
+     GRAD_CKPT (1), FREEZE_EMBED (1).
+
+The two 12B-on-T4 fit levers (both default ON, both no-ops at small scale):
+- GRAD_CKPT: REENTRANT activation checkpointing on the decoder blocks. Reentrant is
+  the only mode compatible with the eager-only counter layers: its first pass runs
+  under no_grad, where the counter forward takes the plain path (no reuse guard, no
+  autograd Function), and the backward-time recompute builds the Function graph
+  exactly once -- its backward fires the counter update as usual. Non-reentrant
+  checkpointing re-invokes the Function with the guard already set and raises.
+  Without this the 48-block forward alone carries ~5 GiB of activations on top of a
+  ~12 GiB resident student (v3 died at 14.31 GiB allocated, inside the HF forward).
+- FREEZE_EMBED: the tied 262k x 3840 embedding is ~1.0B fp params; AdamW would
+  lazily allocate ~8.5 GiB of moments at the FIRST step (after the forward already
+  fits), plus a ~2 GiB dense lm_head weight grad every step. Frozen embeddings keep
+  the fp AdamW tail = norms (+ never-exercised multimodal linears); recovery
+  capacity rides the counter layers, which is the point of the method. Documented
+  delta vs the 1.5B production recipe (there the tail includes embeddings).
 """
 from __future__ import annotations
 
@@ -52,6 +69,8 @@ EVAL_EVERY = int(os.environ.get("EVAL_EVERY", "300"))
 EVAL_MAX_TOKENS = int(os.environ.get("EVAL_MAX_TOKENS", "60000"))
 NUM_BLOCKS = int(os.environ.get("NUM_BLOCKS", "0"))
 LOG_EVERY = int(os.environ.get("LOG_EVERY", "25"))
+GRAD_CKPT = os.environ.get("GRAD_CKPT", "1") == "1"
+FREEZE_EMBED = os.environ.get("FREEZE_EMBED", "1") == "1"
 
 
 def log(msg: str) -> None:
@@ -218,13 +237,33 @@ def main() -> None:
             p.data = p.data.to(torch.bfloat16)
         student = student.to(DEVICE)
     student.train()
+    if FREEZE_EMBED:
+        seen, frozen = set(), 0
+        for mod in (student.get_input_embeddings(), student.get_output_embeddings()):
+            for p in (mod.parameters() if mod is not None else []):
+                if id(p) in seen:
+                    continue
+                seen.add(id(p))
+                p.requires_grad_(False)
+                frozen += p.numel()
+        log(f"froze embeddings/lm_head ({frozen / 1e6:.0f}M params)")
+    if GRAD_CKPT:
+        # reentrant ONLY -- see module docstring for the counter-guard interaction
+        student.config.use_cache = False
+        student.gradient_checkpointing_enable(
+            gradient_checkpointing_kwargs={"use_reentrant": True})
+        # frozen embeddings would leave the checkpointed blocks with no grad-requiring
+        # input -> no backward would ever reach the counter layers; the hook restores
+        # the grad path without unfreezing the weight
+        student.enable_input_require_grads()
     counters = [m for m in student.modules()
                 if isinstance(m, PackedGroupScaleCounterLinear)]
     fp_params = [p for p in student.parameters() if p.requires_grad]
     opt = torch.optim.AdamW(fp_params, lr=FP_LR, weight_decay=0.0)
     log(f"student on {DEVICE}: {len(counters)} counter layers, "
         f"{sum(p.numel() for p in fp_params) / 1e6:.0f}M fp params; "
-        f"scope={STATS_SCOPE} dec={DECIMATION} steps={STEPS} batch={BATCH}x{SEQ}")
+        f"scope={STATS_SCOPE} dec={DECIMATION} steps={STEPS} batch={BATCH}x{SEQ} "
+        f"ckpt={int(GRAD_CKPT)} freeze_embed={int(FREEZE_EMBED)}")
 
     val = mix.val_batches(DEVICE, max_tokens=EVAL_MAX_TOKENS)
 
