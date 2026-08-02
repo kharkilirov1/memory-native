@@ -91,13 +91,21 @@ class ShardedCache:
         return self._shard["idx"][sl].to(device), self._shard["val"][sl].to(device)
 
 
-def kd_topk_loss(student_logits: torch.Tensor, idx: torch.Tensor, val: torch.Tensor,
-                 T: float) -> torch.Tensor:
-    """KL(teacher_topK || student) with the teacher renormalized over its cached top-K."""
-    p = F.softmax(val.float() / T, dim=-1)                              # [B, S, K]
-    logq_full = F.log_softmax(student_logits.float() / T, dim=-1)
-    logq = logq_full.gather(-1, idx.long())
-    return (p * (torch.log(p.clamp_min(1e-9)) - logq)).sum(-1).mean() * (T * T)
+def kd_and_ce_losses(logits: torch.Tensor, idx: torch.Tensor, val: torch.Tensor,
+                     targets: torch.Tensor, T: float):
+    """Top-K KD (teacher renormalized over its cached K) + CE, WITHOUT any full-vocab
+    fp32 copy: gathered logits minus logsumexp. At 262k vocab the log_softmax(float())
+    route costs ~1.6-2 GiB of transient+retained on top of a 12 GiB-resident 12B student
+    — the difference between OOM and fitting a T4."""
+    lse_T = torch.logsumexp(logits / T, dim=-1, keepdim=True)           # [B, S, 1]
+    logq_T = logits.gather(-1, idx.long()) / T - lse_T                  # [B, S, K]
+    p = F.softmax(val.float() / T, dim=-1)
+    kd = (p * (torch.log(p.clamp_min(1e-9)) - logq_T.float())).sum(-1).mean() * (T * T)
+    shifted = logits[:, :-1]
+    lse_1 = torch.logsumexp(shifted, dim=-1)                            # [B, S-1]
+    tgt = shifted.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
+    ce = (lse_1.float() - tgt.float()).mean()
+    return kd, ce
 
 
 @torch.no_grad()
@@ -239,9 +247,7 @@ def main() -> None:
         ids = mix.batch_at(step, DEVICE)
         idx, valp = cache.step(step, DEVICE)
         out = student(ids).logits
-        loss_kd = kd_topk_loss(out, idx, valp, KD_T)
-        loss_ce = F.cross_entropy(out[:, :-1].reshape(-1, out.shape[-1]).float(),
-                                  ids[:, 1:].reshape(-1))
+        loss_kd, loss_ce = kd_and_ce_losses(out, idx, valp, ids[:, 1:], KD_T)
         loss = loss_kd + CE_ALPHA * loss_ce
         loss.backward()
         torch.nn.utils.clip_grad_norm_(fp_params, GRAD_CLIP)
