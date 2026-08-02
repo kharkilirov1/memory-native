@@ -136,6 +136,20 @@ def restore_student():
         extra_skip=uncovered,
     )
     log(f"restored {len(report.swapped)} counter linears; {len(uncovered)} fp-only linears")
+    # The RMS second moment is scope-shaped ([out,1] row vs [out,G] group) and a WARM
+    # state carries zeros there anyway: drop mismatching .v keys so the fresh zeros of
+    # the restored scope stand (cross-scope v is meaningless, not restorable).
+    dropped_v = 0
+    for key in [k for k in state if k.endswith(".v")]:
+        try:
+            buf = model.get_submodule(key.rsplit(".", 1)[0]).v
+        except AttributeError:
+            continue
+        if buf.shape != state[key].shape:
+            del state[key]
+            dropped_v += 1
+    if dropped_v:
+        log(f"  dropped {dropped_v} scope-mismatched .v keys (fresh zeros stand)")
     missing, unexpected = model.load_state_dict(state, strict=False)
     if unexpected:
         raise SystemExit(f"unexpected keys: {unexpected[:5]}")
