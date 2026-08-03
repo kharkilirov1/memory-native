@@ -16,7 +16,11 @@ env: STEPS (from cache), BATCH/SEQ/SEED (must match cache), KD_T (2.0), CE_ALPHA
      COUNTER_LR_START (0.002) / COUNTER_LR_END (1e-4), FP_LR (1e-4), GRAD_CLIP (1.0),
      STATS_SCOPE (group), DECIMATION (4), HOMOTOPY_HOLD (0.2) / HOMOTOPY_END (0.9),
      EVAL_EVERY (300), EVAL_MAX_TOKENS (60000), NUM_BLOCKS (0; smoke only), DEVICE,
-     GRAD_CKPT (1), FREEZE_EMBED (1).
+     GRAD_CKPT (1), FREEZE_EMBED (1), SPLIT_GPUS (1; 2-GPU model-parallel when >=2
+     CUDA devices — see split_across_gpus), SPLIT_AT (0 = n_layers//2), CKPT_TMP
+     (staging dir for the atomic best.pt write; point it OFF the output volume when
+     the output has a size cap — the ckpt is written slim + best-only for the same
+     reason).
 
 The two 12B-on-T4 fit levers (both default ON, both no-ops at small scale):
 - GRAD_CKPT: REENTRANT activation checkpointing on the decoder blocks. Reentrant is
@@ -39,6 +43,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import shutil
 import sys
 import time
 
@@ -71,6 +76,9 @@ NUM_BLOCKS = int(os.environ.get("NUM_BLOCKS", "0"))
 LOG_EVERY = int(os.environ.get("LOG_EVERY", "25"))
 GRAD_CKPT = os.environ.get("GRAD_CKPT", "1") == "1"
 FREEZE_EMBED = os.environ.get("FREEZE_EMBED", "1") == "1"
+SPLIT_GPUS = os.environ.get("SPLIT_GPUS", "1") == "1"
+SPLIT_AT = int(os.environ.get("SPLIT_AT", "0"))
+CKPT_TMP = os.environ.get("CKPT_TMP", "")
 
 
 def log(msg: str) -> None:
@@ -89,6 +97,48 @@ def homotopy_alpha(progress: float) -> float:
         return 0.0
     span = (progress - HOMOTOPY_HOLD) / (HOMOTOPY_END - HOMOTOPY_HOLD)
     return 0.5 * (1.0 + math.cos(math.pi * span))
+
+
+def _tree_to(obj, dev):
+    if torch.is_tensor(obj):
+        return obj.to(dev)
+    if isinstance(obj, (tuple, list)):
+        moved = [_tree_to(o, dev) for o in obj]
+        return tuple(moved) if isinstance(obj, tuple) else moved
+    return obj
+
+
+def split_across_gpus(student) -> int:
+    """Model-parallel over 2 GPUs: layers[split:] move to cuda:1; embeddings, final
+    norm and lm_head STAY on cuda:0 so the embed/head tie survives untouched. Device
+    movers ride forward pre-hooks (inside the checkpointed region, so both the
+    no-grad pass and the recompute cross the boundary identically, and autograd's
+    .to nodes route grads back). The two hidden-state boundaries (block split-1 ->
+    split, last block -> final norm) are the only real transfers -- [B, S, d] each.
+
+    The v4 lesson forcing this: the 12B counter buffers alone are ~11.7 GiB resident
+    (packed state 8.2 + salient idx/val 1.3 + salient perm 1.7 + scales/v 0.5) plus
+    the frozen embedding 2.0 -- ~13.8 GiB before a single activation on a 14.56 GiB
+    T4. No activation trick fixes resident state; a second T4 does."""
+    from memory_native.donor.streaming import _resolve_decoder
+
+    inner, _ = _resolve_decoder(student)
+    n = len(inner.layers)
+    split = SPLIT_AT if SPLIT_AT > 0 else n // 2
+    dev0, dev1 = torch.device("cuda", 0), torch.device("cuda", 1)
+
+    def mover(dev):
+        def hook(module, args, kwargs):
+            return _tree_to(args, dev), {k: _tree_to(v, dev) for k, v in kwargs.items()}
+        return hook
+
+    for i in range(split, n):
+        inner.layers[i].to(dev1)
+        inner.layers[i].register_forward_pre_hook(mover(dev1), with_kwargs=True)
+    inner.norm.register_forward_pre_hook(mover(dev0), with_kwargs=True)
+    log(f"2-GPU split: layers {split}..{n - 1} -> cuda:1; embed/norm/head + "
+        f"layers 0..{split - 1} on cuda:0")
+    return split
 
 
 class ShardedCache:
@@ -232,10 +282,6 @@ def main() -> None:
     cache = ShardedCache(CACHE, BATCH)
 
     student = restore_student()
-    if DEVICE == "cuda":
-        for p in student.parameters():
-            p.data = p.data.to(torch.bfloat16)
-        student = student.to(DEVICE)
     student.train()
     if FREEZE_EMBED:
         seen, frozen = set(), 0
@@ -247,9 +293,15 @@ def main() -> None:
                 p.requires_grad_(False)
                 frozen += p.numel()
         log(f"froze embeddings/lm_head ({frozen / 1e6:.0f}M params)")
+    if DEVICE == "cuda":
+        for p in student.parameters():
+            p.data = p.data.to(torch.bfloat16)
+        student = student.to(DEVICE)
+        if SPLIT_GPUS and torch.cuda.device_count() >= 2:
+            split_across_gpus(student)
+    student.config.use_cache = False    # never needed: KD forward + labels-CE eval only
     if GRAD_CKPT:
         # reentrant ONLY -- see module docstring for the counter-guard interaction
-        student.config.use_cache = False
         student.gradient_checkpointing_enable(
             gradient_checkpointing_kwargs={"use_reentrant": True})
         # frozen embeddings would leave the checkpointed blocks with no grad-requiring
@@ -271,6 +323,25 @@ def main() -> None:
         res = {f"ppl_{n}": perplexity(student, b) for n, b in val.items()}
         return res
 
+    # Slim checkpoint: a full 12B student state_dict is ~13-15 GiB; best+latest+tmp
+    # would blow Kaggle's ~20 GiB output cap at the FIRST eval. Keep best.pt only and
+    # drop everything reconstructible: frozen fp params (donor has them; tied lm_head
+    # is caught via remove_duplicate=False) and the immutable salient/perm/v buffers
+    # (the conversion state has them; v is an optimizer stat, not model state).
+    frozen_fp = {name for name, p in student.named_parameters(remove_duplicate=False)
+                 if not p.requires_grad}
+    drop_suffix = (".salient_idx", ".salient_val", ".perm", ".v")
+
+    def slim_payload(step: int, metric: float) -> dict:
+        keep = {k: v.cpu() for k, v in student.state_dict().items()
+                if k not in frozen_fp and not k.endswith(drop_suffix)}
+        return {"step": step, "student": keep, "strict_metric": metric,
+                "format": {"group": 128, "C": 11, "stats_scope": STATS_SCOPE,
+                           "decimation": DECIMATION},
+                "partial_state": "frozen fp + salient/perm/v dropped; rebase on the "
+                                 "conversion state + donor to reload"}
+
+    history = []
     best = float("inf")
     t0 = time.time()
     for step in range(STEPS):
@@ -300,19 +371,18 @@ def main() -> None:
             res = evaluate_at_alpha(student, 0.0, strict_eval)
             metric = metric_from_ppl(res)
             log(f"strict alpha=0 {res} metric={metric:.4f}")
-            payload = {"step": step + 1, "student": student.state_dict(),
-                       "strict_metric": metric,
-                       "format": {"group": 128, "C": 11, "stats_scope": STATS_SCOPE,
-                                  "decimation": DECIMATION}}
-            tmp = os.path.join(CKPT_DIR, "latest.pt.tmp")
-            torch.save(payload, tmp)
-            os.replace(tmp, os.path.join(CKPT_DIR, "latest.pt"))
+            history.append({"step": step + 1, "metric": metric,
+                            **{k: float(v) for k, v in res.items()}})
+            json.dump(history, open(os.path.join(CKPT_DIR, "metrics.json"), "w"),
+                      indent=1)
             if metric < best:
                 best = metric
-                torch.save(payload, os.path.join(CKPT_DIR, "best.pt.tmp"))
-                os.replace(os.path.join(CKPT_DIR, "best.pt.tmp"),
-                           os.path.join(CKPT_DIR, "best.pt"))
-                log(f"new best metric={metric:.4f}")
+                stage = CKPT_TMP if CKPT_TMP else CKPT_DIR
+                os.makedirs(stage, exist_ok=True)
+                tmp = os.path.join(stage, "best.pt.tmp")
+                torch.save(slim_payload(step + 1, metric), tmp)
+                shutil.move(tmp, os.path.join(CKPT_DIR, "best.pt"))
+                log(f"new best metric={metric:.4f} (slim ckpt)")
     log(f"done: best strict metric={best:.4f}")
 
 
