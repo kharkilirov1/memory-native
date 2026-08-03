@@ -794,13 +794,14 @@ def triton_group_decode_matmul(
     BM, BN, BK = 32, 32, 32
     bf16, fp16 = _dtype_flags(x)
     grid = (triton.cdiv(M, BM), triton.cdiv(N, BN))
-    _group_decode_matmul_kernel[grid](
-        x, state, scale, perm, y,
-        M, N, K, G, C, group, float(residual_alpha),
-        x.stride(0), x.stride(1), state.stride(0), scale.stride(0), scale.stride(1),
-        y.stride(0), y.stride(1),
-        BLOCK_M=BM, BLOCK_N=BN, BLOCK_K=BK, X_BF16=bf16, X_FP16=fp16,
-    )
+    with torch.cuda.device(x.device):  # launch on the tensors' GPU, not the current one
+        _group_decode_matmul_kernel[grid](
+            x, state, scale, perm, y,
+            M, N, K, G, C, group, float(residual_alpha),
+            x.stride(0), x.stride(1), state.stride(0), scale.stride(0), scale.stride(1),
+            y.stride(0), y.stride(1),
+            BLOCK_M=BM, BLOCK_N=BN, BLOCK_K=BK, X_BF16=bf16, X_FP16=fp16,
+        )
     return y
 
 
@@ -829,13 +830,14 @@ def triton_group_grad_x(
     BM, BN, BK = 32, 32, 32
     bf16, fp16 = _dtype_flags(go)
     grid = (triton.cdiv(M, BM), triton.cdiv(K, BK))
-    _group_gradx_kernel[grid](
-        go, state, scale, perm, gx,
-        M, N, K, scale.shape[1], C, group, float(residual_alpha),
-        go.stride(0), go.stride(1), state.stride(0), scale.stride(0), scale.stride(1),
-        gx.stride(0), gx.stride(1),
-        BLOCK_M=BM, BLOCK_N=BN, BLOCK_K=BK, GO_BF16=bf16, GO_FP16=fp16,
-    )
+    with torch.cuda.device(go.device):  # launch on the tensors' GPU, not the current one
+        _group_gradx_kernel[grid](
+            go, state, scale, perm, gx,
+            M, N, K, scale.shape[1], C, group, float(residual_alpha),
+            go.stride(0), go.stride(1), state.stride(0), scale.stride(0), scale.stride(1),
+            gx.stride(0), gx.stride(1),
+            BLOCK_M=BM, BLOCK_N=BN, BLOCK_K=BK, GO_BF16=bf16, GO_FP16=fp16,
+        )
     return gx
 
 
@@ -1062,17 +1064,18 @@ def triton_group_counter_update_fused(
         grid = (triton.cdiv(N, 32), G)
         decimated = False
     BLOCK_N, BLOCK_M = 32, 64
-    _group_fused_update_kernel[grid](
-        state, scale, v, x_perm, go2, perm, seed_t, groups_t,
-        M, N, K, G, C, group,
-        float(lr), float(lr_scale), float(rms_beta), float(rms_eps),
-        float(clip), float(residual_alpha),
-        state.stride(0), x_perm.stride(0), x_perm.stride(1), go2.stride(0), go2.stride(1),
-        scale.stride(0), scale.stride(1), v.stride(0), v.stride(1),
-        BLOCK_N=BLOCK_N, BLOCK_M=BLOCK_M, BLOCK_K=group, BLOCK_PG=group // 4,
-        X_BF16=bf16, X_FP16=fp16, LAGGED=lagged, DECIMATED=decimated,
-        num_warps=8,
-    )
+    with torch.cuda.device(x2.device):  # launch on the tensors' GPU, not the current one
+        _group_fused_update_kernel[grid](
+            state, scale, v, x_perm, go2, perm, seed_t, groups_t,
+            M, N, K, G, C, group,
+            float(lr), float(lr_scale), float(rms_beta), float(rms_eps),
+            float(clip), float(residual_alpha),
+            state.stride(0), x_perm.stride(0), x_perm.stride(1), go2.stride(0), go2.stride(1),
+            scale.stride(0), scale.stride(1), v.stride(0), v.stride(1),
+            BLOCK_N=BLOCK_N, BLOCK_M=BLOCK_M, BLOCK_K=group, BLOCK_PG=group // 4,
+            X_BF16=bf16, X_FP16=fp16, LAGGED=lagged, DECIMATED=decimated,
+            num_warps=8,
+        )
 
 
 @torch.no_grad()
