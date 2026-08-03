@@ -79,6 +79,7 @@ FREEZE_EMBED = os.environ.get("FREEZE_EMBED", "1") == "1"
 SPLIT_GPUS = os.environ.get("SPLIT_GPUS", "1") == "1"
 SPLIT_AT = int(os.environ.get("SPLIT_AT", "0"))
 CKPT_TMP = os.environ.get("CKPT_TMP", "")
+EVAL_AT_START = os.environ.get("EVAL_AT_START", "1") == "1"
 
 
 def log(msg: str) -> None:
@@ -343,6 +344,15 @@ def main() -> None:
 
     history = []
     best = float("inf")
+    if EVAL_AT_START:
+        # the WARM baseline: without it a homotopy-turbulent curve is unreadable
+        # (recovery-below-warm vs degradation look identical mid-run)
+        res = evaluate_at_alpha(student, 0.0, strict_eval)
+        metric = metric_from_ppl(res)
+        log(f"strict alpha=0 WARM {res} metric={metric:.4f}")
+        history.append({"step": 0, "metric": metric,
+                        **{k: float(v) for k, v in res.items()}})
+        json.dump(history, open(os.path.join(CKPT_DIR, "metrics.json"), "w"), indent=1)
     t0 = time.time()
     for step in range(STEPS):
         progress = step / max(STEPS - 1, 1)
