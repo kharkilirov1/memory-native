@@ -278,6 +278,28 @@ optim + activation pools the method zeroes.
    deploy pack vs 529 GiB bf16; export utility (state→t, drop c, repack) not yet
    written.
 
+19. **gemma-12B cached-KD on 2xT4 (results/GEMMA12B_CACHED_KD.md): infrastructure
+   PROVEN, recipe FAILED the gate.** New and witnessed at 12B: 2-GPU model-parallel
+   split (layers n/2.. → cuda:1, embed/norm/head+tie on cuda:0, pre-hook movers,
+   Triton launches now device-pinned — the multi-GPU fix), reentrant grad-ckpt
+   compatible with the eager-only guard (no-grad first pass = plain path; recompute
+   builds the Function once), FREEZE_EMBED (AdamW moments for the tied 1.0B embedding
+   = 8.5 GiB — a T4 killer), slim best-only ckpt (full 12B state_dict 13-15 GiB blows
+   Kaggle's 20 GiB output cap; drop frozen fp + salient/perm/v, stage via /kaggle/tmp).
+   WHY 2 GPUs are load-bearing: 12B counter buffers are ~11.7 GiB RESIDENT (state 8.2
+   + salient 1.3 + salient perm int64 1.7 + scales/v 0.5) + frozen embed 2.0 → v3/v4
+   OOMed in the first forward at ~14.2/14.3 GiB. Cost: 31-34 s/step (no ckpt) / 46-53
+   (ckpt), eval ~19 min per 12k tok x 6 domains. QUALITY: **warm R1 solver-only 12B =
+   metric 3.2585** (en 46.4/ru 53.7/code 6.8 — same class as the 1.5B prod-gate warm
+   3.2992: the conversion chain stands at 12B). Cached-KD training DEGRADED it
+   monotonically (250: 5.60, 500: 5.59, 750 strict: 11.59); signature = kd falls to
+   ~3-8 while alpha anneals then jumps to ~22-25 at alpha=0 → c absorbed the objective,
+   t drifted. The 1.5B dec4-turbulence-then-collapse precedent does NOT transfer at
+   this depth/compression. Next arms (need Saturday quota): lr 0.001/0.0005, earlier+
+   longer anneal (hold 0.1/end 0.6), dec1 control, 0.5B-at-24-blocks cached-loop
+   sanity. Best 12B artifact remains the WARM conversion state
+   (`mn-gemma12b-counter-state` v2).
+
 ## Gotchas (hard-won, keep)
 
 - Counter layers are **eager-only**: exactly one forward per backward; wrap measurement
