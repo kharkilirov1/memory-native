@@ -234,6 +234,10 @@ tests/              pytest: encode/decode, learning, reversible grad-check, pack
                     optimizers, memory gate, triton (CUDA-skipped)
 ```
 
+## Archived Qwen3.8 27B conversion recipe
+
+The older production-oriented Strict KD v3 Colab recipe is preserved in [`notebooks/MN_Qwen38_27B_StrictKD_V3_RTXPRO6000_H100.ipynb`](notebooks/MN_Qwen38_27B_StrictKD_V3_RTXPRO6000_H100.ipynb). It documents the H100/RTX PRO 6000 path, text-only Qwen3.8 handling, strict alpha=0 KD, teacher-cache validation, GPU preflight, and gate-approved artifact selection. The validated run evidence already committed in `results/` remains the source of truth for published results; this notebook is the reproducible conversion/KD recipe rather than a new metric claim.
+
 ## How this was built
 
 Built entirely by AI (Claude) under sustained human direction, over months, by someone
