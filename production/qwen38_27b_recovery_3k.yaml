@@ -1,0 +1,83 @@
+# ============================================================================
+# Qwen3.8-27B strict KD — PRODUCTION RECOVERY 3k (baseline 3k)
+# Source: decision 2026-08-26 "compute-efficient production recovery".
+# Runner: mn_strict_kd release v3 (kd_cached_strict_v3.py), env-driven.
+# v4 notebook: notebooks/MN_Qwen38_27B_Recovery3k_V4_RTXPRO6000_H100.ipynb
+# Status per knob -> see production/V4_CHANGES.md  [v3-ok | PATCH-NEEDED]
+# ============================================================================
+
+model: Qwen3.8-27B            # DONOR — must pass scripts/check_donor_config.py first
+
+steps: 3000                   # upper bound, not a target (early stopping governs)
+
+micro_batch: 2
+seq_len: 512
+grad_accum: 8                 # ⚠ PATCH-NEEDED / SEMANTIC CONFLICT:
+                              #   counter layers mutate on EVERY backward — ordinary
+                              #   grad accumulation does NOT mean what it means for fp
+                              #   training (see CLAUDE.md gotchas + strict-v3 doctrine).
+                              #   effective_batch=16 ONLY valid if the runner implements
+                              #   an explicitly safe accumulation path. Until then the
+                              #   runner runs micro_batch=2 with ONE update per batch.
+
+bf16: true
+gradient_checkpointing: AUTO  # AUTO = decide via 10-step probe (stage P in notebook):
+                              # GRAD_CKPT=0 if peak_vram + 8 GiB <= total else 1.
+                              # Selective (top-blocks off) is PATCH-NEEDED in the runner.
+
+alpha: 0.0                    # strict. evals and selection at alpha=0 only
+decimation: 1
+
+kd_weight: 1.0
+ce_weight: 1.0
+temperature: 1.0
+max_grad_norm: 0.5
+fp_train_mode: none           # all fp weights frozen; only counter state/scale move
+
+counter_lr:
+  start: 1.25e-4
+  end: 1.0e-5
+scale_lr:
+  start: 2.5e-5
+  end: 5.0e-6
+lr_schedule:                  # ⚠ PATCH-NEEDED (runner has LR_START/END linear only):
+  warmup_steps: 150           #   0    ->150 : 0          -> 1.25e-4 (counter)
+  mid_end_step: 2000          #   150  ->2000: 1.25e-4     -> 2.0e-5
+  mid_end_lr_counter: 2.0e-5  #   2000->3000: 2.0e-5      -> 1.0e-5
+  shape: cosine               # prefer cosine; linear acceptable
+warmup_fraction: 0.05         # documentation of intent (=150/3000)
+
+teacher_cache:
+  enabled: true               # teacher is NEVER rebuilt for this run:
+  required_existing: teacher_cache_v3   # fail loud if missing/fingerprint mismatch
+  K: 1024
+  tail_bucket: true
+  logsumexp_saved: true       # do NOT change K before the first full 3k run
+
+eval:
+  full_every: 500             # [v3-ok] EVAL_EVERY=500 -> evals at 0*,500,...,3000 (7)
+  full_max_tokens: 24000      # keep identical to the warm-comparison protocol
+  proxy_every: 100            # ⚠ PATCH-NEEDED: cheap proxy domains ~2-4k tok each,
+                              #   EN/RU/Code/Math/Science/Instruct, catastrophic-
+                              #   degradation detector only; NOT a selection signal
+  proxy_max_tokens_per_domain: 3000
+
+checkpoint:
+  full_every: 500             # ⚠ PATCH-NEEDED periodic FULL checkpoint (best.pt-only
+                              #   already exists as SAVE_BEST=1 gate artifact)
+  resume_every: 100           # ⚠ PATCH-NEEDED small crash-recovery resume state
+  never_delete_previous: true # runs are append-only; NEVER rm -rf an existing run
+  layout:                     # local run dir == Drive run dir structure
+    - checkpoints/
+    - metrics/
+    - config.json             # resolved recipe copy
+    - manifest.json           # provenance: gpu, donor hash, cache fingerprint, env
+
+early_stop:
+  enabled: true
+  patience: 3                 # full evals without aggregate-metric improvement
+  min_improvement: 0.001      # smaller than the 400-step debug (late gains are slow)
+
+selection:                    # unchanged from strict v3 — gates stay authoritative
+  accepted_kd_requires: best.pt present
+  rejected_kd_requires: USE_WARM_STATE.txt
