@@ -24,6 +24,16 @@ bf16: true
 gradient_checkpointing: AUTO  # AUTO = decide via 10-step probe (stage P in notebook):
                               # GRAD_CKPT=0 if peak_vram + 8 GiB <= total else 1.
                               # Selective (top-blocks off) is PATCH-NEEDED in the runner.
+activation_strategy: grad_ckpt_auto
+                              # reversible is intentionally N/A for this campaign: the
+                              # student is the DONOR's computation graph (dense Qwen3.8
+                              # blocks with counter-swapped linears); grafting coupling
+                              # blocks would invalidate warm-state alignment and teacher-
+                              # cache fingerprints, and fights the eager-only single-
+                              # forward-per-backward guard (CLAUDE.md gotchas). Memory is
+                              # managed by the Stage-P toggle instead. Backlog research:
+                              # "counter-compatible reversible grafting" (own unit-gated
+                              # design), NOT a launch lever for 3k.
 
 alpha: 0.0                    # strict. evals and selection at alpha=0 only
 decimation: 1
