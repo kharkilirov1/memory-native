@@ -201,6 +201,21 @@ optim + activation pools the method zeroes.
    Restore witness + PPL/KL gate vs fp: NOT yet run (first restore attempt died
    silently; restored model needs ~11–12 GiB resident).
 
+20. **PRODUCTION RECOVERY 3k prepared (v4, 2026-08-26).** Baseline recipe:
+    `production/qwen38_27b_recovery_3k.yaml` — Qwen3.8-27B strict KD, 3000 steps,
+    micro-batch 2 x seq 512, dec=1, alpha=0, counter LR 1.25e-4 -> 1e-5, scale LR
+    2.5e-5 -> 5e-6, full eval every 500 @24k tok, early-stop patience 3, min improvement
+    0.001. Runner: notebook `notebooks/MN_Qwen38_27B_Recovery3k_V4_RTXPRO6000_H100.ipynb`.
+    Two mandatory pre-launch gates: (D) donor verification via
+    `scripts/check_donor_config.py` (the Qwen3.5-vs-3.8 mixup already shipped one wrong
+    commit), (P) 10-step GRAD_CKPT=0 VRAM probe -> whole-model toggle decided at >=8 GiB
+    headroom. Teacher cache is RESTORE-ONLY in v4: missing/mismatched cache fails loud —
+    the teacher is never rebuilt. Run dirs are append-only (`run_<ts>/` with checkpoints/
+    metrics/config/manifest; never rm -rf an existing run). Knob status vs runner and the
+    grad_accum CONFLICT (strict counters mutate per backward; ordinary accumulation is a
+    no-go without a safe queue patch): `production/V4_CHANGES.md`. Proxy-eval-every-100,
+    periodic mid-run full ckpts, resume state, warmup/piecewise LR = PATCH items.
+
 ## Gotchas (hard-won, keep)
 
 - Counter layers are **eager-only**: exactly one forward per backward; wrap measurement
