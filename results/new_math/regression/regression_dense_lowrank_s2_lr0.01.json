@@ -1,0 +1,55 @@
+{
+  "task": "regression",
+  "variant": "lowrank",
+  "teacher": "dense",
+  "seed": 2,
+  "lr": 0.01,
+  "steps": 400,
+  "train_examples": 1536,
+  "test_examples": 512,
+  "dimension": 32,
+  "block_size": 8,
+  "rank": 4,
+  "rank16_population_mse_lower_bound": 0.11017995327711105,
+  "teacher_sha256": "d8759469209ab9faf0fc449b049917721b624bd92a487f25eefb917fb6544ae6",
+  "relative_mse": 0.5781587958335876,
+  "train_seconds": 0.14656340699912107,
+  "curve": [
+    {
+      "step": 0,
+      "relative_mse": 2.0401721000671387
+    },
+    {
+      "step": 50,
+      "relative_mse": 0.8287100791931152
+    },
+    {
+      "step": 100,
+      "relative_mse": 0.7074694633483887
+    },
+    {
+      "step": 150,
+      "relative_mse": 0.6476774215698242
+    },
+    {
+      "step": 200,
+      "relative_mse": 0.6147229671478271
+    },
+    {
+      "step": 250,
+      "relative_mse": 0.5944522619247437
+    },
+    {
+      "step": 300,
+      "relative_mse": 0.5847095251083374
+    },
+    {
+      "step": 350,
+      "relative_mse": 0.5817548036575317
+    },
+    {
+      "step": 400,
+      "relative_mse": 0.5781587958335876
+    }
+  ]
+}

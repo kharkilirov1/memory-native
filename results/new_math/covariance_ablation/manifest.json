@@ -1,0 +1,144 @@
+{
+  "protocol_version": 1,
+  "started_utc": "2026-10-02T08:47:25.049191+00:00",
+  "source_commit": "d9ca61709a96df10fd5f6440d3da2cd5b70dcec9",
+  "source_sha256": {
+    "scripts/new_math_covariance_ablation.py": "64c867c562f50f8d19c29aaa90c637e91b80d47016bba96dac7dedc815ba0968",
+    "scripts/new_math_capacity_ablation.py": "acc23d79a4c4a4ebadca2a91b4afed3af904caf3e5d4bcaaef0e2bbcd4861ff6",
+    "scripts/new_math_experiments.py": "f7e71e1c54e3a3daad4b77eb00369c080f4537180e358831a265bdeb6bddf96f",
+    "src/memory_native/counter.py": "ad489f0e2d36ad991771ef64b8ed0bac4dd23db0597c04ffab343ccfb2fe44a9",
+    "src/memory_native/research/structured.py": "6000bc044b964ba6668db651bb35cc061eeb89c1d067c28d8b99b7422be53200",
+    "src/memory_native/research/pam.py": "7ae6bf8464adb5decc7859637b61f91ed307dc46a68db0557ec39622b54dfea1",
+    "src/memory_native/research/covariance.py": "6dedb69a2e782b06ce11d872f213842306f2596b3974fe523336df160c5ca8f4",
+    "tests/test_research_covariance.py": "fe9812c1ae47bef567cf57076d292d2b521239f05c8d6cbcb1119da7708c6694"
+  },
+  "arms_predeclared": [
+    {
+      "name": "baseline_C8",
+      "C": 8,
+      "ridge": null,
+      "lr_scale": 0.0002
+    },
+    {
+      "name": "cov_C8_ridge01",
+      "C": 8,
+      "ridge": 0.1,
+      "lr_scale": 0.0002
+    },
+    {
+      "name": "cov_C8_ridge001",
+      "C": 8,
+      "ridge": 0.01,
+      "lr_scale": 0.0002
+    },
+    {
+      "name": "baseline_C2",
+      "C": 2,
+      "ridge": null,
+      "lr_scale": 0.0002
+    },
+    {
+      "name": "cov_C2_ridge01",
+      "C": 2,
+      "ridge": 0.1,
+      "lr_scale": 0.0002
+    },
+    {
+      "name": "cov_C2_ridge001",
+      "C": 2,
+      "ridge": 0.01,
+      "lr_scale": 0.0002
+    },
+    {
+      "name": "baseline_C8_scale001",
+      "C": 8,
+      "ridge": null,
+      "lr_scale": 0.01
+    },
+    {
+      "name": "cov_C8_ridge01_scale001",
+      "C": 8,
+      "ridge": 0.1,
+      "lr_scale": 0.01
+    }
+  ],
+  "data": {
+    "teacher": "blast",
+    "teacher_seed": 123,
+    "data_seed": 12345,
+    "teacher_weight_sha256": "16f6a74a5aec196d11ec9a7e81a7f190ebf722ab3765dadb709605a1dc2182db",
+    "teacher_rank": 16,
+    "teacher_singular_values": [
+      3.13075590133667,
+      3.01582670211792,
+      2.155494213104248,
+      1.753061294555664,
+      1.5109083652496338,
+      1.4458810091018677,
+      0.9152330756187439,
+      0.7711985111236572,
+      0.5025461912155151,
+      0.3602997362613678,
+      0.32184579968452454,
+      0.239227756857872,
+      0.16290083527565002,
+      0.13010255992412567,
+      0.09866223484277725,
+      0.055557068437337875,
+      1.7863071377632878e-07,
+      1.5931104258015694e-07,
+      1.1390132215183257e-07,
+      1.0000641736951366e-07,
+      9.472120865439138e-08,
+      8.822262032026629e-08,
+      6.67668373921515e-08,
+      6.101546290437909e-08,
+      4.668677533459231e-08,
+      3.703618034478495e-08,
+      2.845650470817418e-08,
+      2.4617447635932876e-08,
+      1.939847926735183e-08,
+      1.1670254096429744e-08,
+      8.910101989556551e-09,
+      3.727515185403263e-09
+    ],
+    "input_sha256": "37c295518928febc8c03c56e326fd6ede36bc86decfbe28628691b1e9f497f24",
+    "targets_sha256": "dad96aa441bc0699f2ba873894091f98880641b33039fbad79f97ca6f4a9b522",
+    "rank16_population_relative_mse_lower_bound": 3.354561967493382e-15,
+    "dimension": 32,
+    "teacher_block_size": 8,
+    "teacher_factor_rank": 4,
+    "train_rows": 1536,
+    "heldout_rows": 512
+  },
+  "args": {
+    "output": "results/new_math/covariance_ablation",
+    "steps": 1000,
+    "seed": 0,
+    "eval_every": 50
+  },
+  "python": "3.12.14",
+  "torch": "2.14.1+cpu",
+  "numpy": "2.5.3",
+  "device": "cpu",
+  "dtype": "float32",
+  "torch_threads": 1,
+  "torch_interop_threads": 1,
+  "cpu_affinity": [
+    4
+  ],
+  "formula": "G=.95*G+.05*X.T@X/n; Htilde=H@(G+(ridge*max(trace(G)/d,1e-6)+1e-6)*I)^-1",
+  "initial_gram": "identity",
+  "input_statistic": "uncentered, observed current training forward",
+  "scope": "small input Gram on every U/V/S; forward and old-weight input derivative unchanged",
+  "update_effect": "both RMS/ticks and scale learning consume the preconditioned correlation",
+  "protocol": "8 arms predeclared before execution; fixed horizon and shared data/batches/initial state; no test-based selection",
+  "limitations": [
+    "single seed, 32x32 linear regression; no LLM or hardware speed evidence",
+    "known input-metric preconditioning; combination with discrete factor learning is a hypothesis",
+    "extra fp32 O(d_local^2) statistics and Gram/Cholesky work; not six-bit total training state",
+    "baseline nearly fixed scales probed separately with lr_scale=.01, not tuned after evaluation",
+    "Gram EMA includes internal activations; factor gauges evolve during learning",
+    "timings exclude evaluation and are CPU reference timings, without isolated hardware guarantees"
+  ]
+}
