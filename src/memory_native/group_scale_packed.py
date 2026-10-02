@@ -18,7 +18,7 @@ from .group_scale_kernels import (
     triton_group_grad_x,
     zero_packed_codes,
 )
-from .packed import pack_codes, unpack_codes
+from .packed import _validate_packed_C, pack_codes, unpack_codes
 
 __all__ = ["PackedGroupScaleCounterLinear"]
 
@@ -108,8 +108,7 @@ class PackedGroupScaleCounterLinear(nn.Module):
             raise ValueError("in_features must be divisible by 4 for 6-bit packing")
         if group <= 0 or group % 4:
             raise ValueError("group must be positive and divisible by 4")
-        if 3 * (2 * C - 1) > 256:
-            raise ValueError("C is too large for uint8 state encoding")
+        C = _validate_packed_C(C)
         if kernel_mode not in {"auto", "gemm", "triton", "torch"}:
             raise ValueError("kernel_mode must be 'auto', 'gemm', 'triton' or 'torch'")
         if stats_scope not in {"row", "group"}:

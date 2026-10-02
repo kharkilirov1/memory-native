@@ -57,9 +57,10 @@ point per arm, single seed.
 What IS promoted to production (the measured, unambiguous wins):
 
 - `stats_scope="group"` + fused kernel + `decimation=4` becomes the OFFICIAL SPEED
-  RECIPE — 1.7-3.0x faster than the dense update at lower peak memory (T4-measured,
+  RECIPE in this historical 1.5B campaign — 1.7-3.0x faster than the dense update kernel at lower update-path peak memory (T4-measured,
   results/GPU_GATE_T4_GROUPLOCAL.md) at a quality cost bounded by ~1.4% mean PPL at
-  this budget (dec4's own 1.5B number below). Fully wired: layer → ptq_warm_start →
+  this budget for the **plain-group** arm. The later dec4 result below supersedes this
+  interim decision. Fully wired: layer → ptq_warm_start →
   run_ptq_recovery (STATS_SCOPE/DECIMATION envs) → restore/resume.
 - `SALIENT_REFIT=align` available as the solver's free post-pass (held-out-gated).
 
@@ -94,10 +95,16 @@ code (6.63) and science (16.34), at 1/4 of the update FLOPs.**
 **PRODUCTION RECIPE (switched): `STATS_SCOPE=group DECIMATION=4` + the fused kernel,
 with the ROW lr recipe unchanged (COUNTER_LR 0.002→1e-4 cosine).** Quality parity with
 the best arm demonstrated on the production loop at 1.5B; the update path is 1.7-3.0x
-faster than the production dense kernels at lower peak memory
+faster than the production dense update kernels at lower measured update-path peak memory
 (results/GPU_GATE_T4_GROUPLOCAL.md). Class defaults stay row (checkpoint compat; scopes
 refuse to cross-load) — the switch is the RECIPE, wired end-to-end as envs:
 solver (`ptq_warm_start`) → runner (`run_ptq_recovery.py`) → restore/resume.
+
+This promotion is limited to the recorded single-seed 1.5B protocol. The 1.7–3.0×
+numbers are separate update-kernel timings, not an end-to-end speedup of this campaign.
+Later 12B cached KD failed despite a useful warm conversion
+([`GEMMA12B_CACHED_KD.md`](GEMMA12B_CACHED_KD.md)); do not assume this recipe transfers
+to larger donors or preserves dense-model quality.
 
 Refinement backlog (not blockers): start decimation after the homotopy hold (the early
 turbulence), group lr micro-grid at 1.5B, longer budgets (all three curves were still

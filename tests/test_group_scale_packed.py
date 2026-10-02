@@ -1,6 +1,7 @@
 """CPU/reference gates for packed group-scale solver-v3 recovery."""
 import math
 
+import pytest
 import torch
 
 from memory_native.counter import decode_state, encode_state
@@ -11,6 +12,25 @@ from memory_native.group_scale_kernels import (
 )
 from memory_native.group_scale_packed import PackedGroupScaleCounterLinear
 from memory_native.packed import unpack_codes
+
+
+@pytest.mark.parametrize("C", [0, -1, 12, 43, 1.5, 11.5])
+def test_packed_group_rejects_unrepresentable_counter_configuration(C):
+    with pytest.raises(ValueError, match="6-bit packing"):
+        PackedGroupScaleCounterLinear(4, 1, group=4, C=C)
+
+
+@pytest.mark.parametrize("C", [1, 11])
+def test_packed_group_preserves_every_reachable_state_at_supported_boundaries(C):
+    levels = 2 * C - 1
+    t = torch.arange(-1, 2, dtype=torch.int16).repeat_interleave(levels).reshape(-1, 1).repeat(1, 4)
+    c = torch.arange(-(C - 1), C, dtype=torch.int16).repeat(3).reshape(-1, 1).repeat(1, 4)
+    layer = PackedGroupScaleCounterLinear(4, t.shape[0], group=4, C=C)
+    layer.load_group_state(torch.ones(t.shape[0], 1), t, c)
+    got_t, got_c = layer._decode_perm()
+    assert torch.equal(got_t, t)
+    assert torch.equal(got_c, c)
+    assert torch.equal(layer.visible_weight(), t.float())
 
 
 def _state(out=3, in_features=16, C=11):

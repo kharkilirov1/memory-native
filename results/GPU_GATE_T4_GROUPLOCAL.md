@@ -51,9 +51,13 @@ tests green):
 Scaling from the full fused launch is near-ideal (3.7-4.2x from 1/4 of the groups), and
 the dec arm is gated against the masked reference (exact-restriction contract) — 0 or
 single-quantum mismatch. **The deploy combination on T4 is therefore: group scope +
-fused kernel + dec4(lr×4) — 1.7-3.0× faster than the production dense path, at lower
-peak memory, with the measured quality edges (KD pre-gate −29.7% vs −15.9%; decimation
-teacher-recovery 1.6-5.4× lower final mse).** Row scope cannot join this arithmetic —
+fused kernel + dec4(lr×4) — 1.7-3.0× faster than the production dense **update kernel**,
+at lower measured update-path peak memory.** This is not an end-to-end training
+speedup: forward, input gradients, teacher/evaluation, caches and the FP tail remain.
+The shallow KD pre-gate and toy teacher-recovery quality results are separate
+witnesses; LR×4 did not transfer to full-depth recovery (see
+[`GROUPLOCAL_KD_FULLMODEL_GATE.md`](GROUPLOCAL_KD_FULLMODEL_GATE.md) and
+[`GEMMA12B_CACHED_KD.md`](GEMMA12B_CACHED_KD.md)). Row scope cannot join this arithmetic —
 its statistics forbid decimation by construction.
 
 ## Session quota spent

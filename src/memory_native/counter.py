@@ -99,7 +99,9 @@ def _rms_eager_pre_sr(grad_w, t_f, c_f, s_i, v_io, g_sq, use_rms: bool, rms_eps:
                       C: int, sqrt_fan: float):
     """Deterministic pre-SR chain of the direct-pulse / eager-rebase RMS update.
     Mutates v_io (the layer's RMS slice) in place exactly like the inline path did;
-    returns (pre_round, s_new)."""
+    returns (pre_round, s_new). The residual-only rebase preserves s*c/C, not the
+    whole latent weight u=s*(t+c/C). Without carry saturation, its conditional
+    mean update is u - lr*grad_eff + t*(s_new-s_i); see preprint Proposition 1."""
     if use_rms:
         v_io.mul_(rms_beta).add_(g_sq, alpha=1.0 - rms_beta)
         denom = v_io.sqrt().clamp_min(rms_eps)
@@ -219,8 +221,10 @@ class _FusedCounterLinearFn(torch.autograd.Function):
         ctx.module = module
         y = module._forward_matmul(x)
         # Activation-memory lever: if act_save_bits is set, store an UNBIASED low-bit
-        # quantization of x (codes + per-row scale) instead of fp x. The update only needs
-        # E[Q(x)|x] = x, so it stays unbiased; the saved activation shrinks from fp to b bits.
+        # quantization of x (codes + per-row scale) instead of fp x. The raw correlation
+        # is unbiased if grad_out is conditionally independent of this quantization noise;
+        # downstream quantized backward operations can invalidate that assumption.
+        # RMS normalization/clipping do not generally preserve gradient unbiasedness.
         if module.act_save_bits:
             from .actquant import pack_int4, quantize_codes
             x2 = x.reshape(-1, x.shape[-1])
@@ -321,7 +325,8 @@ class _FusedCounterLinearFn(torch.autograd.Function):
                     # global RNG stays phase-aligned. It is therefore CONDITIONAL: a data-dependent
                     # random op (e.g. dropout with per-rank masks) would desync the torch.rand
                     # stream and break bit-identity silently. The Triton kernel's hash-SR path
-                    # (per-element deterministic, no global RNG) is unconditionally DDP-safe.
+                    # avoids dependence on the global RNG, but still requires identical state,
+                    # reduced gradients/statistics, hyperparameters and seed/update schedules.
                     _allreduce_grad_w_(grad_w_i)
                     # proxy RMS is built from this rank's raw grad_out/x, not the averaged grad_w,
                     # so it must be reduced too -- otherwise the denominator differs per rank and
@@ -444,10 +449,11 @@ class CompactCounterLinear(nn.Module):
             raise ValueError("update_compute must be 'fp', 'int8', 'int4' or 'fp8'")
         if forward_compute not in {"fp", "int8"}:
             raise ValueError("forward_compute must be 'fp' or 'int8'")
-        # "int8"/"int4" form grad_w with an UNBIASED stochastic low-bit GEMM estimator (Tensor Cores
-        # on CUDA) instead of the fp32 correlation -> training-neutral in expectation. "fp8" is a
-        # deterministic fp8 (e4m3) estimator: slightly biased (round-to-nearest), parity-gated, the
-        # error-feedback absorbs it (fusion-plan lever #5). All opt-in; fp is the default.
+        # "int8"/"int4" estimate the raw correlation with unbiased independent operand rounding;
+        # the nonlinear optimizer need not preserve that unbiasedness. The int8 CUDA path can
+        # use Tensor Cores; int4 here uses int32 matmul. "fp8" uses deterministic rounding and is
+        # generally biased. Training parity must be measured (fusion-plan lever #5).
+        # All are opt-in; fp is the default.
         self.update_compute = update_compute
         # forward_compute="int8" runs the forward Y=XT^T on the integer Tensor Cores (deterministic
         # round-to-nearest activation quant, so reversible/eager stay valid); pairs with the int8
@@ -701,8 +707,8 @@ class CompactCounterLinear(nn.Module):
 class RMSCounterLinear(CompactCounterLinear):
     """CompactCounterLinear + per-row RMS adaptive scaling (the cheap analogue of Adam's
     variance term). A per-output-row second moment v (O(out_features), negligible memory)
-    normalizes the gradient before it drives the counter. This closes most of the gap to
-    AdamW that vanilla counter-SGD leaves open."""
+    normalizes the gradient before it drives the counter. Its quality versus AdamW must
+    be measured for each workload; the statistic is shared across an entire output row."""
 
     def __init__(self, *args, rms_beta: float = 0.9, rms_eps: float = 1e-3,
                  use_rms: bool = True, rms_mode: str = "exact",

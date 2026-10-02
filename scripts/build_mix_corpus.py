@@ -18,9 +18,16 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from pathlib import Path
+import sys
 import time
 
 import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from memory_native.donor.provenance import atomic_write_json
+from memory_native.donor.tokenization import tokenizer_fingerprint
 
 MODEL = os.environ.get("MODEL", "Qwen/Qwen2.5-1.5B")  # tokenizer donor; corpus bins are donor-BPE-specific
 # (domain, train share, dataset, load kwargs, text field)
@@ -105,9 +112,11 @@ def main():
     from transformers import AutoTokenizer
     tokenizer = AutoTokenizer.from_pretrained(MODEL)
     eos = tokenizer.eos_token_id
-    assert eos is not None
+    if eos is None:
+        raise ValueError("the corpus tokenizer must define eos_token_id")
 
     manifest = {"tokenizer": MODEL, "eos": eos, "dtype": "uint32",
+                "tokenizer_fingerprint": tokenizer_fingerprint(tokenizer),
                 "train_tokens_target": args.train_tokens, "domains": {}}
     for name, share, dataset, load_kw, field in SOURCES:
         budget = int(args.train_tokens * share)
@@ -116,8 +125,7 @@ def main():
                               budget, args.val_tokens, args.out)
         manifest["domains"][name] = {"share": share, "dataset": dataset, **counts}
 
-    with open(os.path.join(args.out, "manifest.json"), "w") as f:
-        json.dump(manifest, f, indent=1)
+    atomic_write_json(os.path.join(args.out, "manifest.json"), manifest)
     print("manifest:", json.dumps(manifest["domains"]))
 
 

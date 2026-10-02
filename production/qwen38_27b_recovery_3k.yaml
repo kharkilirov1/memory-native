@@ -1,9 +1,11 @@
 # ============================================================================
-# Qwen3.8-27B strict KD — PRODUCTION RECOVERY 3k (baseline 3k)
+# Qwen3.8-27B strict KD — ARCHIVED EXTERNAL RECOVERY 3k PROPOSAL
 # Source: decision 2026-08-26 "compute-efficient production recovery".
 # Runner: mn_strict_kd release v3 (kd_cached_strict_v3.py), env-driven.
 # v4 notebook: notebooks/MN_Qwen38_27B_Recovery3k_V4_RTXPRO6000_H100.ipynb
 # Status per knob -> see production/V4_CHANGES.md  [v3-ok | PATCH-NEEDED]
+# The mn_strict_kd runner/package/cache are external and absent from this repo.
+# This is a historical policy, not a verified public executable recipe.
 # ============================================================================
 
 model: Qwen3.8-27B            # DONOR — must pass scripts/check_donor_config.py first
@@ -12,13 +14,8 @@ steps: 3000                   # upper bound, not a target (early stopping govern
 
 micro_batch: 2
 seq_len: 512
-grad_accum: 8                 # ⚠ PATCH-NEEDED / SEMANTIC CONFLICT:
-                              #   counter layers mutate on EVERY backward — ordinary
-                              #   grad accumulation does NOT mean what it means for fp
-                              #   training (see CLAUDE.md gotchas + strict-v3 doctrine).
-                              #   effective_batch=16 ONLY valid if the runner implements
-                              #   an explicitly safe accumulation path. Until then the
-                              #   runner runs micro_batch=2 with ONE update per batch.
+grad_accum: 1                 # one counter update per backward; historical request 8
+                              # is unsupported. Effective batch is 2, not 16.
 
 bf16: true
 gradient_checkpointing: AUTO  # AUTO = decide via 10-step probe (stage P in notebook):
@@ -36,6 +33,7 @@ activation_strategy: grad_ckpt_auto
                               # design), NOT a launch lever for 3k.
 
 alpha: 0.0                    # strict. evals and selection at alpha=0 only
+stats_scope: group
 decimation: 1
 
 kd_weight: 1.0
@@ -61,6 +59,8 @@ teacher_cache:
   enabled: true               # teacher is NEVER rebuilt for this run:
   required_existing: teacher_cache_v3   # fail loud if missing/fingerprint mismatch
   K: 1024
+  expected_steps: 400          # archived cache identity, not 3000 unique teacher batches
+                              # cycling/reuse semantics require the external runner
   tail_bucket: true
   logsumexp_saved: true       # do NOT change K before the first full 3k run
 
@@ -88,6 +88,10 @@ early_stop:
   patience: 3                 # full evals without aggregate-metric improvement
   min_improvement: 0.001      # smaller than the 400-step debug (late gains are slow)
 
-selection:                    # unchanged from strict v3 — gates stay authoritative
-  accepted_kd_requires: best.pt present
-  rejected_kd_requires: USE_WARM_STATE.txt
+selection:                    # intended acceptance contract; verify external implementation
+  accepted_kd_requires:
+    - strict alpha=0 improvement over the same-slice warm evaluation
+    - all configured per-domain gates pass
+    - selection metadata identifies donor, corpus, cache, step and checkpoint hash
+    - best.pt present and matches selection metadata
+  rejected_kd_requires: USE_WARM_STATE.txt referencing the original warm artifact
