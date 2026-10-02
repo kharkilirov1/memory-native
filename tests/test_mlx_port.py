@@ -65,6 +65,26 @@ def test_pack_unpack_matches_torch():
     assert np.array_equal(np.array(roundtrip), codes)
 
 
+@pytest.mark.parametrize("C", [0, -1, 12, 43, 1.5, 11.5])
+def test_mlx_packed_rejects_unrepresentable_counter_configuration(C):
+    with pytest.raises(ValueError, match="6-bit packing"):
+        PackedRMSCounterLinear(4, 1, C=C)
+
+
+@pytest.mark.parametrize("C", [1, 11])
+def test_mlx_packed_preserves_every_reachable_state_at_supported_boundaries(C):
+    levels = 2 * C - 1
+    t = np.repeat(np.arange(-1, 2), levels)[:, None].repeat(4, axis=1).astype(np.int32)
+    c = np.tile(np.arange(-(C - 1), C), 3)[:, None].repeat(4, axis=1).astype(np.int32)
+    layer = PackedRMSCounterLinear(4, t.shape[0], C=C)
+    layer._store_codes(encode_state(mx.array(t), mx.array(c), C))
+    layer.scale = mx.ones((t.shape[0], 1))
+    got_t, got_c = decode_state(layer._codes(), C)
+    assert np.array_equal(np.array(got_t), t)
+    assert np.array_equal(np.array(got_c), c)
+    assert np.array_equal(np.array(layer._dense_weight()), t.astype(np.float32))
+
+
 def test_hash_u32_matches_torch():
     from memory_native_mlx import hash_u32, uniform01
 

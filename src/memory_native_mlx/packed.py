@@ -8,9 +8,11 @@ falls back to the pure-MLX unpack -> update -> repack path with identical hash-S
 """
 from __future__ import annotations
 
+import operator
+
 import mlx.core as mx
 
-from .counter import RMSCounterLinear
+from .counter import C_DEFAULT, RMSCounterLinear
 from .metal_update import fused_counter_update_metal, metal_available
 
 __all__ = ["pack_codes", "unpack_codes", "PackedRMSCounterLinear"]
@@ -47,11 +49,19 @@ class PackedRMSCounterLinear(RMSCounterLinear):
     """RMSCounterLinear whose persistent `codes` buffer is packed to 6 bits (0.75 B/weight).
 
     Same learning dynamics as RMSCounterLinear — with hash-SR both layers are bit-identical
-    step for step (tested). Only the storage layout and the update launch differ: on Metal
+    step for step (tested). Integer C must be in [1, 11] for the six-bit state. Only the
+    storage layout and the update launch differ: on Metal
     the update reads and writes the packed state directly (no unpacked tensor at all)."""
 
-    def __init__(self, *args, **kw) -> None:
-        super().__init__(*args, **kw)  # builds unpacked codes [out, in], scale, v
+    def __init__(self, *args, C: int = C_DEFAULT, **kw) -> None:
+        message = "C must be an integer in [1, 11] for 6-bit packing (need 3*(2C-1) <= 64)"
+        try:
+            C = operator.index(C)
+        except TypeError as exc:
+            raise ValueError(message) from exc
+        if not 1 <= C <= 11:
+            raise ValueError(message)
+        super().__init__(*args, C=C, **kw)  # builds unpacked codes [out, in], scale, v
         assert self.in_features % 4 == 0, "in_features must be divisible by 4 for 6-bit packing"
         self.codes = pack_codes(self.codes)  # reassignment keeps the frozen flag
 

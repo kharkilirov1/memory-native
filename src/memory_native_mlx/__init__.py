@@ -15,6 +15,13 @@ from .counter import (
     hash_u32,
     uniform01,
 )
+from .bonsai import (
+    group_counter_from_dense,
+    group_counter_from_quantized,
+    ternary_to_mlx_quant,
+    to_mlx_quantized,
+)
+from .group_scale import GroupScaleCounterLinear
 from .packed import PackedRMSCounterLinear, pack_codes, unpack_codes
 from .reversible import ReversibleCouplingBlock, ReversibleSequence, ReversibleSequential
 
@@ -27,6 +34,11 @@ __all__ = [
     "counter_update_hashsr",
     "RMSCounterLinear",
     "PackedRMSCounterLinear",
+    "GroupScaleCounterLinear",
+    "group_counter_from_dense",
+    "group_counter_from_quantized",
+    "ternary_to_mlx_quant",
+    "to_mlx_quantized",
     "pack_codes",
     "unpack_codes",
     "ReversibleCouplingBlock",

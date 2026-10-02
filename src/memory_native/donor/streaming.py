@@ -33,9 +33,12 @@ recognise still fail loudly rather than converting a subset.
 from __future__ import annotations
 
 import gc
+import hashlib
+import inspect
 import json
 import os
 import struct
+import warnings
 from dataclasses import dataclass, field
 
 import torch
@@ -54,10 +57,22 @@ from .ptq import (
     _target_paths,
     solve_group_state,
 )
+from .provenance import (
+    atomic_torch_save,
+    atomic_write_json,
+    canonical_json,
+    checkpoint_fingerprint,
+    file_fingerprint,
+)
 
 __all__ = ["StreamingReport", "convert_streaming", "load_streamed_state"]
 
 MANIFEST = "manifest.json"
+MANIFEST_VERSION = 2
+_COUNTER_KWARGS = {
+    "lr", "lr_scale", "rms_beta", "rms_eps", "local_grad_clip", "residual_alpha",
+    "kernel_mode", "strict_update", "flip_sample_size", "stats_scope", "decimation",
+}
 
 # Vocabulary the computed-buffer probe is built with (see _shallow_config).
 PROBE_VOCAB = 2048
@@ -82,6 +97,74 @@ class StreamingReport:
 
 def _tensor_bytes(*tensors) -> int:
     return sum(t.numel() * t.element_size() for t in tensors if t is not None)
+
+
+def _calibration_fingerprint(batches) -> dict:
+    """Bind batch boundaries/order and the exact token stream used by the solve."""
+    digest = hashlib.sha256()
+    shapes = []
+    tokens = 0
+    if not batches:
+        raise ValueError("calibration must contain at least one nonempty [B, T] batch")
+    for batch in batches:
+        if (not isinstance(batch, torch.Tensor) or batch.ndim != 2
+                or batch.numel() == 0 or batch.dtype not in (torch.int32, torch.int64)):
+            raise ValueError("calibration batches must be nonempty int32/int64 [B, T] tensors")
+        descriptor = {"shape": list(batch.shape), "dtype": str(batch.dtype)}
+        shapes.append(descriptor)
+        digest.update(canonical_json(descriptor))
+        digest.update(batch.detach().to(device="cpu", dtype=torch.int64)
+                      .contiguous().numpy().astype("<i8", copy=False).tobytes())
+        tokens += batch.numel()
+    return {"sha256": digest.hexdigest(), "batches": shapes, "tokens": tokens}
+
+
+def _validated_blocks(manifest, out_dir, *, require_complete=False,
+                      require_verified=False) -> list[int]:
+    """Validate committed progress and file integrity before loading any tensors."""
+    version = manifest.get("schema_version")
+    if require_verified and version != MANIFEST_VERSION:
+        raise ValueError("legacy streamed manifest has no verified provenance; "
+                         "resume requires a fresh conversion directory")
+    if version not in (None, MANIFEST_VERSION):
+        raise ValueError(f"unsupported streamed manifest schema_version={version!r}")
+    total = manifest.get("blocks_total")
+    done = manifest.get("blocks_done")
+    if (type(total) is not int or total <= 0 or not isinstance(done, list)
+            or any(type(i) is not int for i in done)
+            or done != list(range(len(done))) or len(done) > total):
+        raise ValueError("streamed manifest blocks_done must be a contiguous prefix "
+                         "within blocks_total")
+    if require_complete and len(done) != total:
+        raise ValueError(f"incomplete streamed conversion: {len(done)}/{total} blocks")
+    metadata = manifest.get("block_files", {})
+    if version == MANIFEST_VERSION and not isinstance(metadata, dict):
+        raise ValueError("streamed manifest block_files must be an object")
+    for index in done:
+        filename = f"block_{index:04d}.pt"
+        path = os.path.join(out_dir, filename)
+        if not os.path.isfile(path):
+            raise ValueError(f"streamed block {index}: missing checkpoint {filename}")
+        if version == MANIFEST_VERSION:
+            record = metadata.get(str(index))
+            if not isinstance(record, dict) or record.get("file") != filename:
+                raise ValueError(f"streamed block {index}: missing integrity metadata")
+            if file_fingerprint(path) != {k: record.get(k) for k in ("bytes", "sha256")}:
+                raise ValueError(f"streamed block {index}: checkpoint integrity mismatch")
+    return done
+
+
+def _load_block_state(path, index, stack) -> dict[str, torch.Tensor]:
+    state = torch.load(path, map_location="cpu", weights_only=True)
+    prefix = f"{stack}.layers.{index}."
+    if (not isinstance(state, dict) or not state
+            or any(not isinstance(k, str) or not k.startswith(prefix)
+                   or not isinstance(v, torch.Tensor) for k, v in state.items())):
+        raise ValueError(f"streamed block {index}: invalid tensor state or key prefix")
+    if any(v.is_floating_point() and not torch.isfinite(v).all().item()
+           for v in state.values()):
+        raise ValueError(f"streamed block {index}: nonfinite tensor state")
+    return state
 
 
 class _WeightSource:
@@ -487,27 +570,86 @@ def convert_streaming(
     in-memory path takes). ``micro_batch`` bounds how many sequences are pushed
     through a block at once, which is the knob that bounds peak memory together
     with the per-block Hessians.
+
+    Resume verifies donor bytes, calibration ids/batch boundaries, conversion
+    options, and every committed block's hash. Legacy manifests can be loaded
+    for inference with a warning, but cannot establish a safe resume identity.
     """
     from transformers import AutoConfig, AutoModelForCausalLM
+    import transformers
 
     device = torch.device(device)
+    model_path = os.fspath(model_path)
+    out_dir = os.fspath(out_dir)
     os.makedirs(out_dir, exist_ok=True)
     report = StreamingReport(out_dir=out_dir)
 
     manifest_path = os.path.join(out_dir, MANIFEST)
-    done: set[int] = set()
+    previous = None
     if resume and os.path.exists(manifest_path):
         with open(manifest_path, encoding="utf-8") as handle:
-            done = set(json.load(handle).get("blocks_done", []))
-        report.blocks_resumed = len(done)
+            previous = json.load(handle)
+        if not isinstance(previous, dict):
+            raise ValueError("streamed manifest must be a JSON object")
+        for index in _validated_blocks(previous, out_dir, require_verified=True):
+            # Validate structure even in classic mode, where replay uses the
+            # donor block and would otherwise never deserialize this file.
+            _load_block_state(os.path.join(out_dir, f"block_{index:04d}.pt"),
+                              index, previous.get("stack", "model"))
+
+    counter_kw = {k: solve_kw.pop(k) for k in list(solve_kw) if k in _COUNTER_KWARGS}
+    extra_skip = list(extra_skip or [])
+    # Bind defaults as well as supplied options so omitting a solver option is
+    # equivalent to spelling out its current default.
+    solver_call = inspect.signature(solve_group_state).bind(
+        None, None, group=group, C=C, **solve_kw)
+    solver_call.apply_defaults()
+    solver_options = {k: v for k, v in solver_call.arguments.items() if k not in {"w", "H"}}
+    conversion_options = {
+        "kind": kind, "C": C, "group": group, "dtype": str(dtype),
+        "device": str(device), "micro_batch": micro_batch, "cascade": cascade,
+        "extra_skip": sorted(extra_skip), "solver": solver_options,
+        "counter": counter_kw, "torch_version": str(torch.__version__),
+        "transformers_version": transformers.__version__,
+    }
+    # Reject non-JSON / non-finite knobs before producing any checkpoint files.
+    canonical_json(conversion_options)
+    id_batches = [b for b in calib_batches]
+    calibration = _calibration_fingerprint(id_batches)
+    source_fingerprint = checkpoint_fingerprint(model_path)
+    for key, expected in (("source_fingerprint", source_fingerprint),
+                          ("calibration_fingerprint", calibration),
+                          ("conversion_options", conversion_options)):
+        if previous is not None and previous.get(key) != expected:
+            raise ValueError(f"streamed resume {key} mismatch; use a fresh output directory")
 
     src = _WeightSource(model_path)
     config = AutoConfig.from_pretrained(model_path)
+    text_config = getattr(config, "text_config", config)
+    vocab_size = getattr(text_config, "vocab_size", None)
+    if vocab_size is not None and any(
+            b.min().item() < 0 or b.max().item() >= vocab_size for b in id_batches):
+        raise ValueError(f"calibration token ids must be within [0, {vocab_size})")
     with torch.device("meta"):
         skeleton = AutoModelForCausalLM.from_config(config)
     inner, stack = _resolve_decoder(skeleton)
     blocks = inner.layers
     report.blocks_total = len(blocks)
+    if previous is not None and (
+            previous["blocks_total"] != report.blocks_total or previous.get("stack") != stack):
+        raise ValueError("streamed resume decoder layout mismatch")
+    done = set(previous["blocks_done"] if previous is not None else [])
+    report.blocks_resumed = len(done)
+    manifest = {
+        "schema_version": MANIFEST_VERSION, "blocks_done": sorted(done),
+        "blocks_total": report.blocks_total, "model_path": model_path,
+        "group": group, "C": C, "kind": kind, "stack": stack,
+        "source_fingerprint": source_fingerprint,
+        "calibration_fingerprint": calibration, "conversion_options": conversion_options,
+        "block_files": dict(previous.get("block_files", {})) if previous else {},
+    }
+    _assert_window_covers(config, id_batches)
+    atomic_write_json(manifest_path, manifest)
 
     # --- computed buffers come from one real one-layer probe, never from the
     # checkpoint (they are non-persistent by construction and are not in it) ---
@@ -527,8 +669,6 @@ def convert_streaming(
     # module's own forward is kept (gemma scales by embed_scale, and rolling the
     # lookup by hand would silently drop that: measured 6.22 max error).
     buffer: list[torch.Tensor] = []
-    id_batches = [b for b in calib_batches]
-    _assert_window_covers(config, id_batches)
     flat = torch.cat([b.reshape(-1) for b in id_batches])
     unique, inverse = torch.unique(flat, return_inverse=True)
     compact_weight = src.get_rows(f"{stack}.embed_tokens.weight", unique)
@@ -553,11 +693,6 @@ def convert_streaming(
     inner.embed_tokens.to("meta")
 
     peak = _tensor_bytes(*buffer)
-    counter_kw = {k: solve_kw.pop(k) for k in list(solve_kw) if k in {
-        "lr", "lr_scale", "rms_beta", "rms_eps", "local_grad_clip", "residual_alpha",
-        "kernel_mode", "strict_update", "flip_sample_size",
-    }}
-
     for index, block in enumerate(blocks):
         if index in done:
             # A finished block still has to RUN: block i+1 calibrates on its output,
@@ -565,13 +700,17 @@ def convert_streaming(
             # activations and silently change the result of a resumed run.
             _materialize(block, f"{stack}.layers.{index}", src, device, dtype,
                          computed=computed_block)
-            _reload_block_counters(block, index, out_dir, kind=kind, group=group, C=C,
-                                   counter_kw=counter_kw, stack=stack)
+            # Classic calibration must replay the original fp block, whereas
+            # cascade calibration needs the saved converted one.
+            if cascade:
+                _reload_block_counters(block, index, out_dir, kind=kind, group=group, C=C,
+                                       counter_kw=counter_kw, stack=stack)
             buffer = _run_block(block, buffer, rotary, device, micro_batch, collect=True)
             block.to("meta")
             gc.collect()
             if progress:
-                print(f"[stream] block {index}: already converted, replayed for cascade",
+                print(f"[stream] block {index}: already converted, replayed "
+                      f"{'converted' if cascade else 'fp'} block",
                       flush=True)
             continue
 
@@ -677,13 +816,13 @@ def convert_streaming(
         buffer = (_run_block(block, buffer, rotary, device, micro_batch, collect=True)
                   if cascade else fp_out)
 
-        torch.save(state_out, os.path.join(out_dir, f"block_{index:04d}.pt"))
+        filename = f"block_{index:04d}.pt"
+        block_path = os.path.join(out_dir, filename)
+        atomic_torch_save(block_path, state_out)
+        manifest["block_files"][str(index)] = {"file": filename, **file_fingerprint(block_path)}
         done.add(index)
-        with open(manifest_path, "w", encoding="utf-8") as handle:
-            json.dump({"blocks_done": sorted(done), "blocks_total": report.blocks_total,
-                       "model_path": model_path, "group": group, "C": C, "kind": kind,
-                       "stack": stack},
-                      handle, indent=2)
+        manifest["blocks_done"] = sorted(done)
+        atomic_write_json(manifest_path, manifest)
         report.blocks_converted += 1
 
         block.to("meta")
@@ -730,8 +869,7 @@ def _reload_block_counters(block, index: int, out_dir: str, *, kind, group, C,
     from ..recovery.runtime import restore_counter_structure
 
     prefix = f"{stack}.layers.{index}."
-    saved = torch.load(os.path.join(out_dir, f"block_{index:04d}.pt"),
-                       map_location="cpu", weights_only=True)
+    saved = _load_block_state(os.path.join(out_dir, f"block_{index:04d}.pt"), index, stack)
     stripped = {k[len(prefix):]: v for k, v in saved.items() if k.startswith(prefix)}
     restore_counter_structure(block, stripped, kind=kind, group=group, C=C, **counter_kw)
     missing, unexpected = block.load_state_dict(stripped, strict=False)
@@ -860,13 +998,26 @@ def _run_block(block, buffer, rotary, device, micro_batch, collect):
     return out if collect else buffer
 
 
-def load_streamed_state(out_dir: str) -> dict[str, torch.Tensor]:
-    """Merge per-block files into one state dict for ``restore_counter_structure``."""
+def load_streamed_state(out_dir: str, *, require_complete: bool = True
+                        ) -> dict[str, torch.Tensor]:
+    """Merge verified block files for ``restore_counter_structure``.
+
+    Incomplete output is refused by default; ``require_complete=False`` is for
+    inspecting interrupted runs. Legacy complete output remains loadable with
+    an explicit warning because its original donor/options cannot be verified.
+    """
     manifest_path = os.path.join(out_dir, MANIFEST)
     with open(manifest_path, encoding="utf-8") as handle:
         manifest = json.load(handle)
+    if not isinstance(manifest, dict):
+        raise ValueError("streamed manifest must be a JSON object")
+    done = _validated_blocks(manifest, out_dir, require_complete=require_complete)
+    if manifest.get("schema_version") is None:
+        warnings.warn("Loading legacy streamed state without verified donor/options "
+                      "provenance or block hashes; regenerate it before recovery/resume.",
+                      UserWarning, stacklevel=2)
     merged: dict[str, torch.Tensor] = {}
-    for index in manifest["blocks_done"]:
-        merged.update(torch.load(os.path.join(out_dir, f"block_{index:04d}.pt"),
-                                 map_location="cpu", weights_only=True))
+    for index in done:
+        merged.update(_load_block_state(os.path.join(out_dir, f"block_{index:04d}.pt"),
+                                        index, manifest.get("stack", "model")))
     return merged

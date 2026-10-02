@@ -6,13 +6,15 @@ at a time, so peak memory is set by the block width rather than the model size
 counter state per block plus a manifest, so an interrupted run resumes at the
 first unfinished block.
 
-    MODEL=<path or hf id>  OUT_DIR=<dir>  python scripts/convert_streaming.py
+    MODEL=<local snapshot>  OUT_DIR=<dir>  python scripts/convert_streaming.py
 
-env: MODEL (a LOCAL snapshot directory, or an id already in the HF cache),
-     OUT_DIR, DATA_DIR (mix corpus; falls back to random ids when unset),
+env: MODEL (a LOCAL snapshot directory),
+     OUT_DIR, DATA_DIR (donor-tokenized mix corpus),
      CALIB_BATCHES, SEQ, MICRO_BATCH, GROUP, C, GRID, SALIENT_FIRST,
      SALIENT_SCOPE, IN_SWEEP_REFIT, CASCADE (1 = calibrate each block on the
      already-converted previous one, the default), DEVICE, DTYPE, RESUME.
+     SYNTHETIC_CALIBRATION=1 explicitly enables random/labeled synthetic ids
+     for plumbing checks; they provide no language-quality evidence.
 """
 from __future__ import annotations
 
@@ -25,6 +27,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 import torch
 
 from memory_native.donor.streaming import convert_streaming, load_streamed_state
+from memory_native.donor.tokenization import verify_corpus_tokenizer
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -49,6 +52,7 @@ DEVICE = os.environ.get("DEVICE", "cuda" if torch.cuda.is_available() else "cpu"
 DTYPE = {"fp32": torch.float32, "fp16": torch.float16,
          "bf16": torch.bfloat16}[os.environ.get("DTYPE", "fp32")]
 RESUME = _env_bool("RESUME", True)
+SYNTHETIC_CALIBRATION = os.environ.get("SYNTHETIC_CALIBRATION", "0") == "1"
 
 
 def calibration_batches():
@@ -60,23 +64,24 @@ def calibration_batches():
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         from recovery_session import DomainMix  # type: ignore
 
-        # Corpus bins are donor-BPE-specific: calibrating a 262k-vocab donor on a
-        # Qwen-tokenized corpus produces finite, meaningless Hessians. Cheap to
-        # check, invisible if it goes wrong.
+        # Corpus ids must mean the same tokens to the donor. Names and basenames
+        # cannot establish that: HF snapshot directories are hashes, and two
+        # unrelated tokenizers may have the same directory name.
         with open(os.path.join(DATA_DIR, "manifest.json"), encoding="utf-8") as handle:
-            built_with = json.load(handle).get("tokenizer")
-        if built_with and os.path.basename(str(built_with).rstrip("/")) \
-                != os.path.basename(MODEL.rstrip("/")):
-            raise SystemExit(
-                f"corpus in {DATA_DIR} was tokenized with {built_with!r} but the donor "
-                f"is {MODEL!r}; rebuild it with MODEL={MODEL} "
-                "scripts/build_mix_corpus.py"
-            )
+            manifest = json.load(handle)
+        try:
+            verify_corpus_tokenizer(manifest, MODEL, synthetic=SYNTHETIC_CALIBRATION)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
         mix = DomainMix(DATA_DIR, seq=SEQ, batch=1)
         return [mix.batch_at(100_000 + i, "cpu") for i in range(CALIB_BATCHES)]
+    if not SYNTHETIC_CALIBRATION:
+        raise SystemExit("DATA_DIR is required for language calibration; set "
+                         "SYNTHETIC_CALIBRATION=1 explicitly for a random-id plumbing smoke")
     from transformers import AutoConfig
 
-    vocab = AutoConfig.from_pretrained(MODEL).vocab_size
+    config = AutoConfig.from_pretrained(MODEL)
+    vocab = getattr(config, "text_config", config).vocab_size
     torch.manual_seed(1234)
     print("DATA_DIR unset: calibrating on RANDOM ids — plumbing only, not quality",
           flush=True)

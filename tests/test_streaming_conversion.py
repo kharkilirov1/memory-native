@@ -87,14 +87,16 @@ def test_cascade_changes_the_solve(tmp_path):
     assert any(not torch.equal(a[k], b[k]) for k in last), "later blocks must differ"
 
 
-def test_resume_reproduces_the_uninterrupted_run(tmp_path):
+@pytest.mark.parametrize("cascade", [True, False])
+def test_resume_reproduces_the_uninterrupted_run(tmp_path, cascade):
     """Dropping finished blocks from the manifest and re-running must land on the
     same state -- the replay of finished blocks keeps the cascade intact."""
     path, cfg = _tiny_donor(str(tmp_path))
     calib = _calib(cfg)
     out = os.path.join(str(tmp_path), "streamed")
 
-    convert_streaming(path, calib, out, micro_batch=2, progress=False, **SOLVE)
+    convert_streaming(path, calib, out, cascade=cascade, micro_batch=2,
+                      progress=False, **SOLVE)
     full = load_streamed_state(out)
 
     manifest = os.path.join(out, "manifest.json")
@@ -104,7 +106,8 @@ def test_resume_reproduces_the_uninterrupted_run(tmp_path):
     with open(manifest, "w", encoding="utf-8") as handle:
         json.dump(payload, handle)
 
-    report = convert_streaming(path, calib, out, micro_batch=2, progress=False, **SOLVE)
+    report = convert_streaming(path, calib, out, cascade=cascade, micro_batch=2,
+                               progress=False, **SOLVE)
     assert report.blocks_resumed == 1
     assert report.blocks_converted == cfg.num_hidden_layers - 1
     resumed = load_streamed_state(out)

@@ -8,12 +8,13 @@ T is already int8 in the derived cache (memo M5); this module supplies the activ
   * int8_mm: int8 @ int8 -> int32, via torch._int_mm on CUDA (the Tensor-Core path), fp32 on CPU.
   * int8_correlation: an UNBIASED low-bit estimate of Delta^T X.
 
-Unbiasedness is the whole point: with conditionally-independent stochastic quantizers,
-    E[ Q(Delta)^T Q(X) ] = Delta^T X,
-so the int GEMM estimates the exact update correlation -- variance, not bias. The counter optimizer
-is already a stochastic error-feedback process, so this noise is in-family, not a foreign approx.
-The actual Tensor-Core speedup needs a GPU; correctness (unbiasedness + training parity) is checked
-on CPU and the CUDA path drops in unchanged.
+For fixed operands and conditionally independent unbiased stochastic quantizers,
+    E[ Q(Delta)^T Q(X) | Delta, X ] = Delta^T X.
+This is a raw-correlation identity in exact arithmetic, assuming no accumulator overflow. It
+does not imply unbiased RMS-normalized, clipped or saturated optimizer updates. Saved-activation
+noise also requires checking its conditional independence from the downstream gradient.
+CPU tests check correlation numerics and small teacher-recovery cases; Tensor-Core speed and
+quality on larger workloads require GPU measurements.
 """
 from __future__ import annotations
 
@@ -29,8 +30,8 @@ def fp8_correlation(delta: torch.Tensor, x: torch.Tensor,
     (fusion-plan lever #5, the "fp8 on grad_w" half). delta [M,N], x [M,K] -> G [N,K].
 
     NOT bit-exact and NOT stochastic -- this is deterministic round-to-nearest in fp8, so it is a
-    slightly BIASED low-precision estimate, parity-gated (a loss/accuracy witness is required before
-    adoption; see FUSION_PLAN.md). The counter's error-feedback absorbs the small per-step bias.
+    generally BIASED low-precision estimate, parity-gated (a loss/accuracy witness is required before
+    adoption; see FUSION_PLAN.md). Counter accumulation does not prove the bias is harmless.
     Unlike int8 (no exponent -> needs per-column amax), fp8's exponent carries the range; a single
     per-tensor scale maps amax near the fp8 max so the 3-bit mantissa is used well. On CUDA the same
     scaled fp8 operands map to torch._scaled_mm (the Tensor-Core fp8 GEMM, ~2x fp16 / in-family with
@@ -62,17 +63,17 @@ def _srq(u: torch.Tensor, stochastic: bool, levels: int = 127) -> torch.Tensor:
 
 
 def quantize_int4_cols(x: torch.Tensor, stochastic: bool = True):
-    """Per-COLUMN symmetric int4 of [M, D] (values in [-7,7], stored in int8). The update flip only
-    needs the SIGN and in-row RANK of G=Delta^T X, not fp32 precision -- so the correlation can run
-    in int4 (INT4 IMMA on Turing+, ~4x fp16 / ~2x int8). Unbiased when stochastic."""
+    """Per-COLUMN symmetric int4 of [M, D] (values in [-7,7], stored in int8).
+    Unbiased for the supplied operand when stochastic. The resulting correlation is an
+    estimate whose optimizer behavior and speed must be measured separately."""
     amax = x.abs().amax(dim=0, keepdim=True).clamp_min(1e-12)
     scale = amax / 7.0
     return _srq(x / scale, stochastic, levels=7), scale
 
 
 def int4_correlation(delta: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
-    """Unbiased int4 estimate of the update correlation G = delta^T x. On CPU the int4 GEMM is
-    emulated with int32 matmul (correctness); on a GPU it maps to the INT4 Tensor Cores."""
+    """Unbiased int4 estimate of the raw correlation G = delta^T x for fixed operands.
+    This implementation uses int32 matmul; it does not supply a packed INT4 tensor-core kernel."""
     dq, da = quantize_int4_cols(delta)
     xq, xa = quantize_int4_cols(x)
     acc = (dq.t().to(torch.int32) @ xq.to(torch.int32)).to(torch.float32)
@@ -143,11 +144,11 @@ def int8_correlation_presaved(delta: torch.Tensor, qx_int8: torch.Tensor,
     qx -- no re-quantization of X (the part that made int8_correlation lose to cuBLAS).
     delta [M,N], qx_int8 [M,K], ax_row [M,1] -> G [N,K].
 
-    Bias note: this is unbiased w.r.t. the SAVED activation X_hat = ax*qx, not the original X --
-    only delta is re-randomized per call, qx is frozen. So a SINGLE step's estimate carries the
-    forward's activation-quant error (a per-step bias). It is unbiased OVER TRAINING because the
-    forward re-saves X stochastically each step (a fresh qx), and the counter's error-feedback
-    accumulates the residual. 'Unbiased' here means in-expectation-over-steps, not per-step."""
+    Conditional on fixed delta and SAVED activation X_hat = ax*qx, fresh delta rounding gives
+    E[G_hat | delta, X_hat] = delta^T X_hat, not delta^T X. Averaging over the original saved
+    activation rounding gives delta^T X only if delta is conditionally independent of that
+    rounding noise given X. Fresh rounding across training steps does not prove unbiasedness
+    of the original gradient or of the nonlinear counter optimizer trajectory."""
     dq, db = quantize_int8_cols(delta * ax_row)   # fold row scale into delta, then per-N-col quant
     acc = int8_mm(dq.t().contiguous(), qx_int8)   # [N,K] int32 -- qx is the SAVED int8 activation
     return acc.to(torch.float32) * db.t()         # [N,K] * [N,1]

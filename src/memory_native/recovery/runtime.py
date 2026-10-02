@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import math
 import os
 import random
 from typing import Callable, Iterable
@@ -29,6 +30,7 @@ def build_ptq_counter_kwargs(
     mode: str, *, lr: float, lr_scale: float, local_grad_clip: float,
     residual_alpha: float, cache_mode: str, kernel_mode: str,
     strict_update: bool, flip_sample_size: int,
+    stats_scope: str = "row", decimation: int = 1,
 ) -> dict:
     common = {
         "lr": float(lr), "lr_scale": float(lr_scale),
@@ -38,6 +40,7 @@ def build_ptq_counter_kwargs(
         common.update(
             residual_alpha=float(residual_alpha), kernel_mode=kernel_mode,
             strict_update=bool(strict_update), flip_sample_size=int(flip_sample_size),
+            stats_scope=stats_scope, decimation=int(decimation),
         )
     else:
         common["cache_mode"] = cache_mode
@@ -76,10 +79,21 @@ def prefix_metrics(prefix: str, result: dict) -> dict:
 
 
 def metric_from_ppl(result: dict) -> float:
-    ppls = [float(v) for k, v in result.items() if k.startswith("ppl") and float(v) > 0]
+    """Mean log perplexity across every ppl* entry; reject invalid domains."""
+    ppls = []
+    for key, value in result.items():
+        if not key.startswith("ppl"):
+            continue
+        try:
+            ppl = float(value)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(f"evaluation metric {key} must be a finite positive perplexity") from exc
+        if not math.isfinite(ppl) or ppl <= 0:
+            raise ValueError(f"evaluation metric {key} must be a finite positive perplexity")
+        ppls.append(ppl)
     if not ppls:
-        raise ValueError("evaluation result contains no positive ppl* metrics")
-    return sum(torch.log(torch.tensor(v, dtype=torch.float64)).item() for v in ppls) / len(ppls)
+        raise ValueError("evaluation result contains no ppl* metrics")
+    return sum(math.log(v) for v in ppls) / len(ppls)
 
 
 @torch.no_grad()
@@ -165,6 +179,7 @@ def restore_counter_structure(
             allowed = {
                 "lr", "lr_scale", "rms_beta", "rms_eps", "local_grad_clip",
                 "residual_alpha", "kernel_mode", "strict_update", "flip_sample_size",
+                "stats_scope", "decimation",
             }
             kw = {key: value for key, value in counter_kw.items() if key in allowed}
             if packed:
@@ -203,6 +218,7 @@ def restore_counter_structure(
         allowed = {
             "lr", "lr_scale", "rms_beta", "rms_eps", "local_grad_clip",
             "residual_alpha", "kernel_mode", "strict_update", "flip_sample_size",
+            "stats_scope", "decimation",
         }
         kw = {key: value for key, value in counter_kw.items() if key in allowed}
         if packed:

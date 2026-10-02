@@ -1,7 +1,7 @@
 # Baseline shootout — counter vs real memory-efficient training (T4)
 
-The decisive experiment: is the finite-state counter actually better than the optimizers
-people already use to save training memory, or just another quantizer? Run on Kaggle Tesla T4,
+An exploratory experiment comparing the finite-state counter with optimizers
+used to save training memory. Run on Kaggle Tesla T4,
 s512 (d=512, 8 layers), real tinyshakespeare, 400 steps, batch 16, single seed.
 Raw log: [`gpu_shootout_T4.log`](gpu_shootout_T4.log).
 
@@ -19,20 +19,20 @@ Raw log: [`gpu_shootout_T4.log`](gpu_shootout_T4.log).
 every contestant — 1.20× below AdamW, 1.27× below 8-bit Adam, 1.36× below GaLore/LoMo. The key
 insight: the memory-efficient *optimizers* (8-bit Adam, GaLore, LoMo) only shrink the optimizer
 pool, which is a small slice of the peak at this scale — their peaks barely beat (or exceed)
-plain AdamW. The counter attacks **both** the optimizer pool (zero state) **and** activations
+plain AdamW. The counter reduces **both** separate coefficient optimizer state and activations
 (int4), so it's the only one that moves the peak meaningfully. This is the method's real edge.
 
 **On quality it is competitive — not worse.** counter_int4 (2.516) is second-best, essentially
 tied with LoMo (2.513) and ahead of AdamW (2.567), GaLore (2.618), 8-bit Adam (2.579). The
 spread is within single-seed/short-run noise (~±0.04 seen earlier), so the honest claim is
-"on par with the best," not "beats them" — but it is clearly not paying a quality penalty for
-the memory win.
+"similar short-run loss on these settings," not a proof of converged parity or an
+absence of a quality penalty at other budgets.
 
 **The cost is throughput — but smaller than first measured.** The shootout's counter row
 (3.3k tok/s) used the default tiled update (tile_rows=64). The ~5× gap turned out to be
 *kernel-launch overhead from the per-tile Python loop*, not compute: doing the update untiled
-(now the default) is **2.9× faster at identical peak** — counter_packed+int4 runs at **~8.9k
-tok/s** on T4, i.e. **~2.1× slower than AdamW (18.7k), not 5×.** (Measured: tile_rows 64 →
+(now the default) is **2.9× faster at identical peak** — the separate counter_packed timing runs at **~8.9k
+tok/s** on T4, i.e. **~2.1× slower than AdamW (18.7k)** in that separate timing comparison. (Measured: tile_rows 64 →
 3.1k, 128 → 5.1k, untiled → 8.9k tok/s, all at 1.30 GiB.)
 
 A surprising negative result worth recording: the Triton forward + grad_x kernels (verified
@@ -41,33 +41,35 @@ activation-bound peak) and they are actually *slower* than torch's `decode + cuB
 non-autotuned Triton matmul loses to cuBLAS). So a fused *update* kernel — not a weight kernel
 — is the only remaining throughput lever; the untiled torch path already captures most of it.
 
-Net value proposition: **lowest-memory training (1.2–1.4× below the best memory-efficient
-optimizers) at competitive quality, for ~2× slower steps.**
+These runs show lower training peak for the tested counter configuration, similar
+short-run loss, and a throughput cost. The first shootout's 0.99 GiB peak and the
+later timing run's 8.9k tok/s are different measurements, not one jointly measured point.
 
-## Scale check (d=512 → d=768): the advantage grows
+## Two-width check (d=512 → d=768)
 
-Re-run at two sizes (200 steps, batch 16, untiled counter). The method gets *more* compelling
-as the model grows — on every axis:
+Re-run at two sizes (200 steps, batch 16, untiled counter). The measured memory gap
+widens over these two configurations; extrapolation beyond them remains untested:
 
 | metric | d=512 (8L) | d=768 (12L) |
 |---|---|---|
 | counter peak vs AdamW | 1.19× less | **1.32× less** |
 | counter peak vs 8-bit Adam | 1.36× less | **1.62× less** |
-| counter val vs AdamW | +0.02 (noise) | **−0.146 (−4.7%, clearly better)** |
+| counter val vs AdamW | +0.02 | **−0.146 (−4.7%, one short run)** |
 | counter speed vs AdamW | ~2.0× slower | **~1.7× slower** |
 
 Raw (d=768): counter+int4 **2.06 GiB / val 2.93 / 3.5k tok/s**; dense+AdamW 2.73 GiB / 3.08 /
 6.0k; dense+8-bit-Adam 3.34 GiB / 3.12 / 6.0k. At d=768 counter beats both AdamW and 8-bit Adam
-on **memory and quality simultaneously**, and the speed gap narrows (counter's per-step overhead
+on **peak memory and short-run validation loss**, and the speed gap narrows (counter's per-step overhead
 amortizes as the GEMMs grow). Note 8-bit Adam uses *more* peak than plain AdamW at these scales
 (bitsandbytes block/overhead outweighs its moment savings until much larger models). The
-favorable trajectory — memory gap widening, a real quality edge emerging, speed gap shrinking —
-is the strongest evidence that the method is more than competitive at scale, not just at toy size.
+favorable trajectory is a result on two modest widths, not evidence that converged
+quality or the speed/memory advantage will persist at billion-parameter scale.
 
 ## Caveats
-- Single seed, 400 steps; per-optimizer LRs are reasonable but not exhaustively tuned (GaLore/
-  LoMo could improve with tuning). Quality differences ≤0.05 are within noise.
+- Single seed, 400 steps in the first shootout and 200 in the width sweep;
+  per-optimizer LRs are not exhaustively tuned (GaLore/LoMo could improve).
+  There are no confidence intervals for the width sweep's quality differences.
 - GaLore/LoMo/bnb8 peaks landing at/above AdamW is partly their transient buffers (SVD,
   quantization state) at this small scale; the robust signal is counter's clearly-lowest peak.
-- d=512 is still modest scale. The memory gap should widen at larger d/batch (where activations
-  and optimizer state dominate more), but that needs a bigger-GPU run to confirm.
+- d=512 and d=768 are modest scale. A wider memory gap at larger d/batch remains a
+  hypothesis; compare complete peaks and matched quality on a named architecture.
