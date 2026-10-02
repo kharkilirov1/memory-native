@@ -1,0 +1,65 @@
+{
+  "protocol_version": 1,
+  "started_utc": "2026-10-02T08:25:27.367227+00:00",
+  "args": {
+    "data": "/workspace/memory-native-review/tinyshakespeare.txt",
+    "output": "/workspace/memory-native-review/results/new_math/exact",
+    "mode": "tune",
+    "variants": [
+      "pam_exact"
+    ],
+    "seeds": [
+      0,
+      1,
+      2
+    ],
+    "steps": 400,
+    "tune_steps": 100,
+    "regression_steps": 400,
+    "dim": 64,
+    "layers": 2,
+    "heads": 4,
+    "context": 32,
+    "batch": 4,
+    "block_size": 16,
+    "rank": 8,
+    "eval_batches": 16,
+    "eval_every": 50,
+    "threads": 1
+  },
+  "source_sha256": {
+    "new_math_experiments.py": "f7e71e1c54e3a3daad4b77eb00369c080f4537180e358831a265bdeb6bddf96f",
+    "pam.py": "7ae6bf8464adb5decc7859637b61f91ed307dc46a68db0557ec39622b54dfea1",
+    "structured.py": "6000bc044b964ba6668db651bb35cc061eeb89c1d067c28d8b99b7422be53200"
+  },
+  "data": {
+    "sha256": "86c4e6aa9db7c042ec79f339dcb96d42b0075e16b8fc2e86bf0ca57e2dc565ed",
+    "characters": 1115394,
+    "vocab_size": 65,
+    "vocabulary": "\n !$&',-.3:;?ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz",
+    "split_characters": [
+      892315,
+      111539,
+      111540
+    ],
+    "local_filename": "tinyshakespeare.txt"
+  },
+  "python": "3.12.14",
+  "torch": "2.14.1+cpu",
+  "numpy": "2.5.3",
+  "device": "cpu",
+  "cuda_available": false,
+  "cpu_affinity": [
+    1
+  ],
+  "validation_windows_sha256": "adf8e17516c1a2fae2fc2caa7775cb59aecc5135efd41f3b1ad0d558fe02a8d9",
+  "test_windows_sha256": "168764b51dc0e2e8781377c899b14f2ddd9293fa758bb1e9167fee375616cd3b",
+  "limitations": [
+    "small character model, not an LLM scale result",
+    "CPU PyTorch reference timings",
+    "PAM replaces body linears only",
+    "counter state stored in uint8, not packed six bits",
+    "memory accounting excludes activations and allocator/transient peak",
+    "different operator families cannot share initial body weights"
+  ]
+}

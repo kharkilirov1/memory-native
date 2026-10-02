@@ -29,6 +29,12 @@ in **pure PyTorch** — no custom engine, runs on stock CPU/CUDA. Pure-Python pa
 > validation. See [`docs/MLX_PORT.md`](docs/MLX_PORT.md), package
 > [`src/memory_native_mlx/`](src/memory_native_mlx/), demo [`scripts/mlx_demo.py`](scripts/mlx_demo.py).
 
+> **Forward/backward research pilots:** [interpretation and next steps](results/new_math/INTERPRETATION.md),
+> [raw results and plots](results/new_math/REPORT.md). Scratch CPU experiments compare
+> BLAST factor operators, counter-trained factors, and piecewise-affine multiplication
+> with exact/surrogate backward. These are small character-model experiments; arithmetic
+> reductions and CPU timings do not establish GPU pretraining acceleration.
+
 ## Solver ladder on a 1.5B donor
 
 Strict ternary warm PPL at `alpha=0`, Qwen2.5-1.5B donor. Every row is a

@@ -1,0 +1,8 @@
+{
+  "dense": 0.001,
+  "dense_narrow": 0.003,
+  "counter": 0.01,
+  "blast": 0.001,
+  "blast_counter": 0.01,
+  "lowrank": 0.001
+}

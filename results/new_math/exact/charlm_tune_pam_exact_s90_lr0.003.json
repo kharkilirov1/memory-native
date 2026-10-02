@@ -1,0 +1,66 @@
+{
+  "task": "charlm",
+  "phase": "tune",
+  "variant": "pam_exact",
+  "seed": 90,
+  "body_lr": 0.003,
+  "fp_lr": 0.003,
+  "steps": 100,
+  "training_tokens": 12800,
+  "shape": {
+    "dim": 64,
+    "layers": 2,
+    "context": 32,
+    "batch": 4,
+    "block_size": 16,
+    "rank": 8
+  },
+  "fp_trainable_parameters": 105152,
+  "body_coefficients": 98304,
+  "body_matrix_rank_bounds": [
+    64,
+    64,
+    64,
+    64,
+    64,
+    64,
+    64,
+    64,
+    64,
+    64,
+    64,
+    64
+  ],
+  "counter_coefficients": 0,
+  "persistent_model_bytes": 420896,
+  "body_forward_pair_products_per_step": 12582912,
+  "body_forward_backward_pair_evaluations_per_step": 37748736,
+  "unchanged_attention_and_head_forward_macs_per_step": 1581056,
+  "forward_pair_kind": "PAM",
+  "backward_pair_kind": "exact PAM slope and exponent shift",
+  "curve": [
+    {
+      "step": 0,
+      "train_seconds": 0.0,
+      "validation_loss": 4.169447749853134
+    },
+    {
+      "step": 50,
+      "train_seconds": 25.425679087995377,
+      "train_loss": 3.236961841583252,
+      "validation_loss": 3.143027350306511
+    },
+    {
+      "step": 100,
+      "train_seconds": 48.952334734987744,
+      "train_loss": 2.6291489601135254,
+      "validation_loss": 2.9519654363393784
+    }
+  ],
+  "validation_loss": 2.9519654363393784,
+  "train_seconds": 48.952334734987744,
+  "training_tokens_per_second": 261.4788460917155,
+  "adam_state_bytes": 841312,
+  "retained_fp_gradient_bytes": 420608,
+  "counter_weight_flips": 0
+}

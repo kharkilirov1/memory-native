@@ -1,0 +1,104 @@
+{
+  "task": "charlm",
+  "phase": "main",
+  "variant": "blast",
+  "seed": 1,
+  "body_lr": 0.001,
+  "fp_lr": 0.003,
+  "steps": 400,
+  "training_tokens": 51200,
+  "shape": {
+    "dim": 64,
+    "layers": 2,
+    "context": 32,
+    "batch": 4,
+    "block_size": 16,
+    "rank": 8
+  },
+  "fp_trainable_parameters": 28352,
+  "body_coefficients": 21504,
+  "body_matrix_rank_bounds": [
+    32,
+    32,
+    32,
+    32,
+    32,
+    32,
+    32,
+    32,
+    32,
+    32,
+    32,
+    32
+  ],
+  "counter_coefficients": 0,
+  "persistent_model_bytes": 113888,
+  "body_forward_pair_products_per_step": 2752512,
+  "body_forward_backward_pair_evaluations_per_step": 8257536,
+  "unchanged_attention_and_head_forward_macs_per_step": 1581056,
+  "forward_pair_kind": "ordinary MAC",
+  "backward_pair_kind": "ordinary MAC",
+  "curve": [
+    {
+      "step": 0,
+      "train_seconds": 0.0,
+      "validation_loss": 4.137376844882965
+    },
+    {
+      "step": 50,
+      "train_seconds": 1.2886022519996914,
+      "train_loss": 3.4478001594543457,
+      "validation_loss": 3.171261504292488
+    },
+    {
+      "step": 100,
+      "train_seconds": 2.557461644000796,
+      "train_loss": 2.8816795349121094,
+      "validation_loss": 2.913702219724655
+    },
+    {
+      "step": 150,
+      "train_seconds": 3.850165920001018,
+      "train_loss": 2.709390163421631,
+      "validation_loss": 2.8321771025657654
+    },
+    {
+      "step": 200,
+      "train_seconds": 5.0676455320008245,
+      "train_loss": 2.8074309825897217,
+      "validation_loss": 2.765534207224846
+    },
+    {
+      "step": 250,
+      "train_seconds": 6.112420838997423,
+      "train_loss": 2.7273988723754883,
+      "validation_loss": 2.7463195621967316
+    },
+    {
+      "step": 300,
+      "train_seconds": 7.1265237300031,
+      "train_loss": 2.707366466522217,
+      "validation_loss": 2.7101698368787766
+    },
+    {
+      "step": 350,
+      "train_seconds": 8.255069467993962,
+      "train_loss": 2.581521987915039,
+      "validation_loss": 2.6799911856651306
+    },
+    {
+      "step": 400,
+      "train_seconds": 9.635182830990743,
+      "train_loss": 2.79400372505188,
+      "validation_loss": 2.6541447937488556
+    }
+  ],
+  "validation_loss": 2.6541447937488556,
+  "train_seconds": 9.635182830990743,
+  "training_tokens_per_second": 5313.85868831877,
+  "adam_state_bytes": 227824,
+  "retained_fp_gradient_bytes": 113408,
+  "counter_weight_flips": 0,
+  "test_loss": 2.6122553050518036,
+  "test_perplexity": 13.62975547104354
+}

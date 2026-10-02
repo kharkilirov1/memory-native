@@ -1,0 +1,47 @@
+{
+  "completed_utc": "2026-10-02T08:48:13.698211+00:00",
+  "all_pair_checks_passed": true,
+  "source_hashes_unchanged": true,
+  "results": [
+    {
+      "arm": "baseline_C8",
+      "heldout_relative_mse": 0.5376640558242798,
+      "scale_relative_l2_change": 0.0026669567450881004
+    },
+    {
+      "arm": "cov_C8_ridge01",
+      "heldout_relative_mse": 0.4889868497848511,
+      "scale_relative_l2_change": 0.003177348058670759
+    },
+    {
+      "arm": "cov_C8_ridge001",
+      "heldout_relative_mse": 0.45263367891311646,
+      "scale_relative_l2_change": 0.003719951491802931
+    },
+    {
+      "arm": "baseline_C2",
+      "heldout_relative_mse": 0.5337772369384766,
+      "scale_relative_l2_change": 0.002962323371320963
+    },
+    {
+      "arm": "cov_C2_ridge01",
+      "heldout_relative_mse": 0.6350060701370239,
+      "scale_relative_l2_change": 0.0035612727515399456
+    },
+    {
+      "arm": "cov_C2_ridge001",
+      "heldout_relative_mse": 0.5875349044799805,
+      "scale_relative_l2_change": 0.0038820793852210045
+    },
+    {
+      "arm": "baseline_C8_scale001",
+      "heldout_relative_mse": 0.37906163930892944,
+      "scale_relative_l2_change": 0.10483438521623611
+    },
+    {
+      "arm": "cov_C8_ridge01_scale001",
+      "heldout_relative_mse": 0.3654714524745941,
+      "scale_relative_l2_change": 0.12579020857810974
+    }
+  ]
+}

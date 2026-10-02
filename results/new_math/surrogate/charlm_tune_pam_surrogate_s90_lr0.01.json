@@ -1,0 +1,66 @@
+{
+  "task": "charlm",
+  "phase": "tune",
+  "variant": "pam_surrogate",
+  "seed": 90,
+  "body_lr": 0.01,
+  "fp_lr": 0.003,
+  "steps": 100,
+  "training_tokens": 12800,
+  "shape": {
+    "dim": 64,
+    "layers": 2,
+    "context": 32,
+    "batch": 4,
+    "block_size": 16,
+    "rank": 8
+  },
+  "fp_trainable_parameters": 105152,
+  "body_coefficients": 98304,
+  "body_matrix_rank_bounds": [
+    64,
+    64,
+    64,
+    64,
+    64,
+    64,
+    64,
+    64,
+    64,
+    64,
+    64,
+    64
+  ],
+  "counter_coefficients": 0,
+  "persistent_model_bytes": 420896,
+  "body_forward_pair_products_per_step": 12582912,
+  "body_forward_backward_pair_evaluations_per_step": 37748736,
+  "unchanged_attention_and_head_forward_macs_per_step": 1581056,
+  "forward_pair_kind": "PAM",
+  "backward_pair_kind": "PAM",
+  "curve": [
+    {
+      "step": 0,
+      "train_seconds": 0.0,
+      "validation_loss": 4.169447749853134
+    },
+    {
+      "step": 50,
+      "train_seconds": 30.40417602100024,
+      "train_loss": 3.198592185974121,
+      "validation_loss": 3.105424612760544
+    },
+    {
+      "step": 100,
+      "train_seconds": 56.91915690600399,
+      "train_loss": 2.6940746307373047,
+      "validation_loss": 2.986965551972389
+    }
+  ],
+  "validation_loss": 2.986965551972389,
+  "train_seconds": 56.91915690600399,
+  "training_tokens_per_second": 224.88035128731536,
+  "adam_state_bytes": 841312,
+  "retained_fp_gradient_bytes": 420608,
+  "counter_weight_flips": 0
+}
