@@ -1,0 +1,125 @@
+Executing public notebook cell 1
+Source revision: db257105483431ffe2ad8d958fc9f5be417db6ee
+Executing public notebook cell 3
+Writing model shards:   0%|          | 0/1 [00:00<?, ?it/s]Writing model shards: 100%|██████████| 1/1 [00:00<00:00, 237.75it/s]
+Artifacts: /tmp/memory-native-public-_e5oi105
+Executing public notebook cell 5
+[stream] block 0: 7 targets, peak 0.00 GiB
+[stream] block 1: 7 targets, peak 0.00 GiB
+
+blocks 2 converted (0 already done), targets 14, coeffs 73,728
+peak resident 0.00 GiB, ternary body 0.1 MiB, wall 0.1 min
+state in /tmp/memory-native-public-_e5oi105/warm — load with memory_native.donor.streaming.load_streamed_state()
+Executing public notebook cell 7
+[cache 06:10:55] fingerprinting donor and corpus contents
+[cache 06:10:55] stream: 4 steps x 1x16 = 64 tokens
+[cache 06:10:56] embeddings done (0.00 GiB buffer)
+[cache 06:10:56] block 1/2 (0.2s)
+[cache 06:10:56] block 2/2 (0.2s)
+[cache 06:10:56] cache done: 2 shards -> /tmp/memory-native-public-_e5oi105/teacher_cache
+Executing public notebook cell 9
+[kd 06:11:01] restored 14 counter linears; 0 fp-only linears
+[kd 06:11:01]   dropped 14 scope-mismatched .v keys (fresh zeros stand)
+[kd 06:11:01] froze embeddings/lm_head (0M params)
+[kd 06:11:01] student on cpu: 14 counter layers, 0M fp params; scope=group dec=1 steps=4 batch=1x16 ckpt=0 freeze_embed=1
+[kd 06:11:01] strict alpha=0 WARM {'ppl_smoke': 131.81058986062618} metric=4.8814
+[kd 06:11:01] step 1/4 kd=1.2339 ce=4.8234 clr=0.00013 alpha=1.00 0.03s/step
+[kd 06:11:01] step 2/4 kd=1.2196 ce=4.8241 clr=0.00010 alpha=0.91 0.03s/step
+[kd 06:11:01] strict alpha=0 {'ppl_smoke': 131.80817635873822} metric=4.8813
+[kd 06:11:01] step 3/4 kd=1.2303 ce=4.8677 clr=0.00004 alpha=0.25 0.04s/step
+[kd 06:11:01] step 4/4 kd=1.2140 ce=4.9188 clr=0.00001 alpha=0.00 0.03s/step
+[kd 06:11:01] strict alpha=0 {'ppl_smoke': 131.80810931764995} metric=4.8813
+[kd 06:11:01] done: selected original warm conversion, strict metric=4.8814; warm=4.8814, accepted_kd=False
+Executing public notebook cell 11
+{
+  "accepted_kd": false,
+  "selected_step": 0,
+  "warm_metric": 4.881365966796875,
+  "selected_metric": 4.881365966796875,
+  "min_improvement": 0.001,
+  "selection_rule": "strict alpha=0 mean log perplexity; lower is better"
+}
+{
+  "accepted_kd": false,
+  "selected_step": 0,
+  "warm_metric": 4.881365966796875,
+  "selected_metric": 4.881365966796875,
+  "min_improvement": 0.001,
+  "selection_rule": "strict alpha=0 mean log perplexity; lower is better",
+  "model": "/tmp/memory-native-public-_e5oi105/donor",
+  "conversion_state": "/tmp/memory-native-public-_e5oi105/warm",
+  "format": {
+    "kind": "counter_packed",
+    "group": 32,
+    "C": 11,
+    "stats_scope": "group",
+    "decimation": 1,
+    "num_blocks": 0,
+    "fp_dtype": "float32"
+  },
+  "residual_alpha": 0.0,
+  "artifact_type": "warm_conversion_state",
+  "provenance": {
+    "cache_schema_version": 2,
+    "synthetic_calibration": true,
+    "cache_identities": {
+      "model": {
+        "schema_version": 1,
+        "files": [
+          {
+            "path": "config.json",
+            "bytes": 785,
+            "sha256": "6dd66cdb0ff5243d69b1fdc0b77fc54a4bac42ab6ec21ffafa89a9c854b40b31"
+          },
+          {
+            "path": "model.safetensors",
+            "bytes": 365488,
+            "sha256": "dd69d0d620fb00d44cf97fd7398250aa0dd035c2f7c430b8ed0d846aa7d02015"
+          }
+        ],
+        "sha256": "b55eeed9a1ed38a39224908a65703eda996f30370a9f9ae6779f30e9418024d1"
+      },
+      "data": {
+        "domain_order": [
+          "smoke"
+        ],
+        "files": {
+          "manifest.json": {
+            "bytes": 182,
+            "sha256": "d11e4ab18ef9683ab1c06c3d1ef5d75cccd6790a8dc1b990be486711784a7390"
+          },
+          "train_smoke.bin": {
+            "bytes": 16384,
+            "sha256": "3aa6b348764a3d6da134fb1fb2f9c76cfd1076b71075a9e56445516cc4d1d20e"
+          },
+          "val_smoke.bin": {
+            "bytes": 1024,
+            "sha256": "f5da16740e46c877a6296919e15465217fe6b030f7b1dc31e51897883975aa0c"
+          }
+        }
+      }
+    },
+    "warm_schema_version": 2,
+    "warm_source_fingerprint": {
+      "files": [
+        {
+          "bytes": 785,
+          "path": "config.json",
+          "sha256": "6dd66cdb0ff5243d69b1fdc0b77fc54a4bac42ab6ec21ffafa89a9c854b40b31"
+        },
+        {
+          "bytes": 365488,
+          "path": "model.safetensors",
+          "sha256": "dd69d0d620fb00d44cf97fd7398250aa0dd035c2f7c430b8ed0d846aa7d02015"
+        }
+      ],
+      "schema_version": 1,
+      "sha256": "b55eeed9a1ed38a39224908a65703eda996f30370a9f9ae6779f30e9418024d1"
+    },
+    "warm_manifest_sha256": "0725d70acf8d9a9bbb58bd80ceefd36b5c8ddc37d8475973da03250f24756828"
+  }
+}
+All artifacts: /tmp/memory-native-public-_e5oi105
+[kd 06:11:03] restored 14 counter linears; 0 fp-only linears
+[kd 06:11:03]   dropped 14 scope-mismatched .v keys (fresh zeros stand)
+Reloaded selected metric: 4.881365966796875

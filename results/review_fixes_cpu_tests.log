@@ -1,0 +1,67 @@
+...............................................................sss...... [ 15%]
+.........sss............................sssss........................... [ 31%]
+........................................................................ [ 47%]
+....s................................................................... [ 63%]
+........................................................................ [ 79%]
+s.................................ss.................................... [ 94%]
+.s.............ssss...s                                                  [100%]
+=============================== warnings summary ===============================
+tests/test_asym_calibration.py::test_asym_converts_every_moe_expert
+  /workspace/memory-native-review/src/memory_native/donor/ptq.py:1182: RuntimeWarning: dead MoE expert model.layers.0.mlp.experts[0]: zero routed calibration tokens; using the data-free optimal ternary solve
+    warnings.warn(
+
+tests/test_asym_calibration.py::test_asym_converts_every_moe_expert
+  /workspace/memory-native-review/src/memory_native/donor/ptq.py:1182: RuntimeWarning: dead MoE expert model.layers.0.mlp.experts[1]: zero routed calibration tokens; using the data-free optimal ternary solve
+    warnings.warn(
+
+tests/test_asym_calibration.py::test_asym_converts_every_moe_expert
+  /workspace/memory-native-review/src/memory_native/donor/ptq.py:1182: RuntimeWarning: dead MoE expert model.layers.0.mlp.experts[2]: zero routed calibration tokens; using the data-free optimal ternary solve
+    warnings.warn(
+
+tests/test_asym_calibration.py::test_asym_converts_every_moe_expert
+  /workspace/memory-native-review/src/memory_native/donor/ptq.py:1182: RuntimeWarning: dead MoE expert model.layers.0.mlp.experts[3]: zero routed calibration tokens; using the data-free optimal ternary solve
+    warnings.warn(
+
+tests/test_asym_calibration.py::test_asym_converts_every_moe_expert
+  /workspace/memory-native-review/src/memory_native/donor/ptq.py:1182: RuntimeWarning: dead MoE expert model.layers.1.mlp.experts[0]: zero routed calibration tokens; using the data-free optimal ternary solve
+    warnings.warn(
+
+tests/test_asym_calibration.py::test_asym_converts_every_moe_expert
+  /workspace/memory-native-review/src/memory_native/donor/ptq.py:1182: RuntimeWarning: dead MoE expert model.layers.1.mlp.experts[1]: zero routed calibration tokens; using the data-free optimal ternary solve
+    warnings.warn(
+
+tests/test_asym_calibration.py::test_asym_converts_every_moe_expert
+  /workspace/memory-native-review/src/memory_native/donor/ptq.py:1182: RuntimeWarning: dead MoE expert model.layers.1.mlp.experts[2]: zero routed calibration tokens; using the data-free optimal ternary solve
+    warnings.warn(
+
+tests/test_asym_calibration.py::test_asym_converts_every_moe_expert
+  /workspace/memory-native-review/src/memory_native/donor/ptq.py:1182: RuntimeWarning: dead MoE expert model.layers.1.mlp.experts[3]: zero routed calibration tokens; using the data-free optimal ternary solve
+    warnings.warn(
+
+tests/test_model_integration.py::test_moe_aux_loss_folded_into_loss
+  /workspace/memory-native-review/tests/test_model_integration.py:85: UserWarning: Converting a tensor with requires_grad=True to a scalar may lead to unexpected behavior.
+  Consider using tensor.detach() first. (Triggered internally at /__w/pytorch/pytorch/torch/csrc/autograd/generated/python_variable_methods.cpp:820.)
+    assert aux is not None and torch.isfinite(aux) and float(aux) > 0.0
+
+tests/test_solver_v3_consolidated.py::test_packed_salient_sparse_correction_matches_dense
+  /workspace/memory-native-review/src/memory_native/group_scale_packed.py:312: UserWarning: Sparse invariant checks are implicitly disabled. Memory errors (e.g. SEGFAULT) will occur when operating on a sparse tensor which violates the invariants, but checks incur performance overhead. To silence this warning, explicitly opt in or out. See `torch.sparse.check_sparse_tensor_invariants.__doc__` for guidance.  (Triggered internally at /__w/pytorch/pytorch/aten/src/ATen/Context.cpp:848.)
+    A = torch.sparse_coo_tensor(
+
+tests/test_streaming_conversion.py::test_moe_streaming_matches_in_memory
+  /workspace/memory-native-review/src/memory_native/donor/ptq.py:1189: RuntimeWarning: rank-deficient MoE Hessian for model.layers.0.mlp.experts[0]: 98 routed tokens < 128 input features; damping will regularize the solve, increase the calibration budget if quality suffers
+    warnings.warn(
+
+tests/test_streaming_conversion.py::test_moe_streaming_matches_in_memory
+  /workspace/memory-native-review/src/memory_native/donor/ptq.py:1189: RuntimeWarning: rank-deficient MoE Hessian for model.layers.0.mlp.experts[3]: 120 routed tokens < 128 input features; damping will regularize the solve, increase the calibration budget if quality suffers
+    warnings.warn(
+
+tests/test_streaming_conversion.py::test_moe_streaming_matches_in_memory
+  /workspace/memory-native-review/src/memory_native/donor/ptq.py:1189: RuntimeWarning: rank-deficient MoE Hessian for model.layers.1.mlp.experts[2]: 106 routed tokens < 128 input features; damping will regularize the solve, increase the calibration budget if quality suffers
+    warnings.warn(
+
+tests/test_streaming_conversion.py::test_moe_streaming_matches_in_memory
+  /workspace/memory-native-review/src/memory_native/donor/ptq.py:1189: RuntimeWarning: rank-deficient MoE Hessian for model.layers.1.mlp.experts[3]: 100 routed tokens < 128 input features; damping will regularize the solve, increase the calibration budget if quality suffers
+    warnings.warn(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+434 passed, 21 skipped, 14 warnings in 75.15s (0:01:15)

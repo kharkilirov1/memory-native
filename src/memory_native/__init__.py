@@ -38,9 +38,12 @@ from .group_scale_counter import GroupScaleCounterLinear
 from .group_scale_packed import PackedGroupScaleCounterLinear
 from .group_scale_kernels import (
     group_counter_update_from_io_hashsr,
+    group_counter_update_grouplocal_from_io_hashsr,
+    group_counter_update_grouplocal_hashsr,
     group_counter_update_hashsr,
     group_update_scratch_bytes,
     triton_group_counter_update_from_io,
+    triton_group_counter_update_fused,
     triton_group_decode_matmul,
     triton_group_grad_x,
 )
@@ -106,10 +109,13 @@ __all__ = [
     "PackedGroupScaleCounterLinear",
     "group_counter_update_hashsr",
     "group_counter_update_from_io_hashsr",
+    "group_counter_update_grouplocal_hashsr",
+    "group_counter_update_grouplocal_from_io_hashsr",
     "group_update_scratch_bytes",
     "triton_group_decode_matmul",
     "triton_group_grad_x",
     "triton_group_counter_update_from_io",
+    "triton_group_counter_update_fused",
     "StackCounterLinear",
     "MoDBlock",
     "MNGLM",

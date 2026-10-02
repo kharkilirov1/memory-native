@@ -1,4 +1,10 @@
-# 1.5B end-to-end: v3-full solver -> 6000-step recovery -> benchmark retention
+# 1.5B recovery report: v3f FP-tail-only, then corrected v3f2 live counters
+
+This report preserves both runs and their incidents. Use the **v3f2** section below
+for the measured live-counter result (EN 34.41, RU 30.34, mean accuracy retention
+70.4%); the first v3f section trained only the FP tail. The checkpoints, corpus and
+full eval traces are reported on the author's Drive, not committed public artifacts.
+Reported resume consistency is useful evidence, but a cold clone alone cannot audit it.
 
 Date: 2026-07-19. Hardware: Colab G4 (Blackwell-class, 95.6 GB VRAM). Code: main @ bb0005a.
 Donor: Qwen/Qwen2.5-1.5B (bf16 teacher). Corpus: mix_v2, six domains
@@ -31,11 +37,12 @@ KD(T=2) + 0.3 CE + 0.05 feature KD, fp tail AdamW 1e-4 -> 1e-5. 6000 steps at B8
 - flip_alt stayed 0.0000 for all 6000 steps. RESOLVED post-hoc (incident 2 below): the
   counter self-update path never engaged — this run trained the FP TAIL ONLY. The frozen
   edge=0.0210 (constant to 4 decimals) was correctly read as the signature of a
-  non-updating variable, not of a converged one. Consequences: (a) every number in this
-  file is a LOWER BOUND for the method — EN 74.6 -> 47.4 was achieved by norms/biases/
+  non-updating variable, not of a converged one. Consequences: (a) the v3f numbers in
+  this section describe FP-tail-only training — EN 74.6 -> 47.4 was achieved by norms/biases/
   embeddings alone on top of the solver state; (b) the "solver sets the skeleton" and
   "the LR window was right" readings from the first draft of this report are RETRACTED
-  as unsupported; the counters/scales channel has not been measured at all yet.
+  as unsupported; this run does not measure the counters/scales channel. Activating
+  it could improve or worsen quality; the later v3f2 section measures that change.
 
 ## Benchmark retention (lm-eval, 500 samples/task, acc_norm where defined)
 
@@ -48,8 +55,11 @@ KD(T=2) + 0.3 CE + 0.05 feature KD, fp tail AdamW 1e-4 -> 1e-5. 6000 steps at B8
 | piqa | 0.612 | 0.776 | 78.9% |
 | **average** | | | **70.8%** |
 
-First true retention number of the project: **~70.8% at ~1.7-2.2 bpw strict ternary on a
-1.5B donor, with ~2 bits/weight of TRAINABLE state and 35 minutes of recovery.** The
+This FP-tail-only run reported **~70.8% mean accuracy retention on a 1.5B donor**
+after 35 minutes of recovery. The quoted ~1.7–2.2 bpw concerns a proposed visible
+ternary inference representation, not the actual packed training state: each counter
+coefficient stores six bits, plus scales/RMS statistics/salient metadata and the FP tail.
+The
 easy/commonsense tasks hold 71-82%; deep reasoning (arc_challenge) degrades most (53%) —
 the expected pattern. Context: 1.5B is close to the worst case for ternary (low
 redundancy); the known scale-up levers are a longer run (6k -> 20-30k steps is still

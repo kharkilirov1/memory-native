@@ -1,4 +1,12 @@
-# V4 (recovery-3k) vs archived v3: knob mapping & runner gaps
+# Archived external V4 recovery proposal: knob mapping & runner gaps
+
+The strict-v3 runner `scripts/kd_cached_strict_v3.py`, package `mn_strict_kd`,
+release ZIP and original teacher cache are **not in this repository**. The table
+records the campaign's reported interface; its implementation cannot be checked
+from a public clone. This policy is not a verified production launch recipe.
+Use `notebooks/cached_kd_public.ipynb` for the public cached-KD code path.
+The fail-closed external-release check is documented in
+[`PREFLIGHT_CONTRACT.md`](PREFLIGHT_CONTRACT.md).
 
 Status legend: **[v3-ok]** expressible with existing strict-v3 env knobs ·
 **[PATCH]** requires a `kd_cached_strict_v3.py` runner-side change.
@@ -17,7 +25,7 @@ The notebook is `notebooks/MN_Qwen38_27B_Recovery3k_V4_RTXPRO6000_H100.ipynb`.
 | counter LR 1.25e-4 → 1.0e-5 | [v3-ok]¹ | `COUNTER_LR_START/END` |
 | scale LR 2.5e-5 → 5e-6 | [v3-ok]¹² | `SCALE_LR_START`/`SCALE_LR_END`² |
 | warmup 5% + piecewise/cosine decay (150→2000→3000) | **[PATCH]** | runner interpolates START→END linearly over STEPS; no warmup hook, no multi-phase schedule |
-| grad_accum = 8 (effective batch 16) | **⚠ CONFLICT** | see §2; do NOT enable without runner support |
+| grad_accum = 1 (effective batch 2) | safe requested setting | one counter update per backward; historical request 8 remains unsupported |
 | GRAD_CKPT auto probe | [v3-ok]³ | stage P decides 0/1 whole-model toggle only |
 | selective checkpointing (top blocks off) | **[PATCH]** | runner has whole-model toggle only |
 | teacher cache reuse, K=1024 | [v3-ok] | v4 makes it RESTORE-ONLY: missing/mismatched cache → hard stop |
@@ -31,8 +39,8 @@ The notebook is `notebooks/MN_Qwen38_27B_Recovery3k_V4_RTXPRO6000_H100.ipynb`.
 
 ¹ Runner's exact LR interpolation shape (linear vs cosine) is confirmed for linear
    START→END; cosine is [PATCH].
-² `SCALE_LR_END` support is assumed present-if-harmless: if the runner ignores unknown
-   env names, scale LR stays flat at START (2.5e-5) — verify once in the Stage P log.
+² `SCALE_LR_END` must be verified in the supplied external runner. Silently ignoring
+   a requested learning-rate endpoint is a preflight failure.
 ³ Stage P measures real peak VRAM via nvidia-smi polling and writes `metrics/gck_decision.json`.
 
 ## 2. ⚠ The grad_accum conflict — read before touching BATCH knobs
@@ -42,7 +50,7 @@ Strict KD has a documented invariant (CLAUDE.md gotchas; v3 notebook doctrine):
 before one optimizer step therefore does NOT mean ordinary gradient accumulation:
 updates n+1..N would run against an already-mutated automaton state with stale scales.
 
-So `grad_accum: 8` from the recipe is valid ONLY IF the runner implements a safe
+The historical request `grad_accum: 8` is valid ONLY IF the runner implements a safe
 accumulation path (e.g., queue quanta deltas and apply once per optimizer step). Until
 that patch exists and is unit-gated:
 
@@ -64,4 +72,7 @@ safe_accum:      REJECTED unless a unit test proves byte-equality of a single ba
                  of batch 2x512 vs accumulated 1x512 twice, on quanta AND scales
 ```
 
-Everything else in this document runs as-is on the current v3 release.
+The public preflight fails when the external release, provenance or resolved
+environment is missing. Inspection of this policy alone does not certify a launch.
+The archived cache records 400 steps; 3000 training steps require explicit reuse
+semantics in the external runner and are not 3000 distinct cached teacher batches.
