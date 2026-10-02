@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import math
 import os
 import random
 from typing import Callable, Iterable
@@ -78,10 +79,21 @@ def prefix_metrics(prefix: str, result: dict) -> dict:
 
 
 def metric_from_ppl(result: dict) -> float:
-    ppls = [float(v) for k, v in result.items() if k.startswith("ppl") and float(v) > 0]
+    """Mean log perplexity across every ppl* entry; reject invalid domains."""
+    ppls = []
+    for key, value in result.items():
+        if not key.startswith("ppl"):
+            continue
+        try:
+            ppl = float(value)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(f"evaluation metric {key} must be a finite positive perplexity") from exc
+        if not math.isfinite(ppl) or ppl <= 0:
+            raise ValueError(f"evaluation metric {key} must be a finite positive perplexity")
+        ppls.append(ppl)
     if not ppls:
-        raise ValueError("evaluation result contains no positive ppl* metrics")
-    return sum(torch.log(torch.tensor(v, dtype=torch.float64)).item() for v in ppls) / len(ppls)
+        raise ValueError("evaluation result contains no ppl* metrics")
+    return sum(math.log(v) for v in ppls) / len(ppls)
 
 
 @torch.no_grad()

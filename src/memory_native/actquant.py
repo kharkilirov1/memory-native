@@ -1,12 +1,14 @@
 """Unbiased low-bit activation quantization — the activation-memory lever for the counter update.
 
-The counter update needs grad_w = Delta^T X. It does NOT need X exactly: if X is replaced by an
-*unbiased* low-bit quantization Q(X) with E[Q(X) | X] = X, then
+The raw weight-gradient correlation is grad_w = Delta^T X. If Q(X) is unbiased and Delta is
+conditionally independent of Q(X)'s quantization noise given X, then
 
     E[ Delta^T Q(X) | X, Delta ] = Delta^T X,
 
-so the update stays unbiased (it only gains variance). Storing Q(X) at b bits instead of fp X
-shrinks the saved-activation memory the backward needs. This module provides per-row symmetric
+so the raw correlation is unbiased. The condition is not automatic when a downstream gradient
+depends on quantization noise. Nonlinear RMS normalization, clipping and finite-state saturation
+also need not preserve unbiasedness of the whole optimizer update. Storing Q(X) at b bits
+instead of fp X shrinks the saved-activation memory the backward needs. This module provides per-row symmetric
 stochastic quantization (the unbiasedness comes from stochastic rounding) and an effective-bits
 accounting that includes the per-row scale overhead.
 """

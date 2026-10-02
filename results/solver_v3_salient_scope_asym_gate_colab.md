@@ -11,8 +11,8 @@ kind=counter_packed), calibration 128xB8xT512 = 524k tokens from the mix corpus.
 Corpus: `build_mix_corpus.py --train-tokens 12_000_000` rebuilt IN Colab from the public
 HF sources (v3 shares: en40/ru30/code12/math8/science5/instruct5) — NOT the historical
 mix_v2 150M val slices, so absolute PPLs are comparable only within this table; the
-classic arm is the internal baseline (its EN 77.89 lands next to the historical 74.6,
-confirming the refactored solve path reproduces the production solver).
+classic arm is the internal baseline. Similarity to historical EN 74.6 from another
+validation slice does not establish exact reproduction or regression parity.
 
 ## strict ternary warm PPL (alpha=0), lower is better
 
@@ -43,13 +43,15 @@ asym05 ~11 min (28 chunks x 2 calibration passes on top).
    loses to plain layer. Consistent with the CPU witnesses: full-strength correction
    overcorrects where the true cascade signal is thin. Next knobs (NOT yet measured):
    s in 0.25–0.4, asym only for deep blocks, or per-domain calibration weighting.
-3. classic arm reproduces the production ladder on a fresh runtime + rebuilt corpus +
-   refactored solver — no regression from the 2026-07-22 refactor (unit suite: 230
-   passed locally).
+3. classic arm provides the baseline for this fresh runtime and rebuilt corpus.
+   Unit regression gates passed locally (230 tests at the time); cross-corpus PPL
+   similarity does not replace a same-slice end-to-end regression gate.
 
 Raw logs: /content/{classic,layer,layer_asym05}.log in the Colab session (ephemeral);
 the full per-arm output (solver progress, homotopy diagnostics) was also printed into
-the notebook (Untitled4.ipynb on the account's Drive).
+the notebook (Untitled4.ipynb on the account's Drive). Neither the ephemeral logs nor
+that account notebook are public artifacts in this repository; these tables are a
+historical report of the run, not a complete raw witness.
 
 ## ASYM_STRENGTH sweep (same protocol, all arms = SALIENT_SCOPE=layer + asym c7)
 
@@ -101,7 +103,7 @@ Readings:
    (−1.0 log ≈ 2.7x lower mean PPL), en 77.9 -> 31.7, ru 108 -> 29.8, science
    74.3 -> 21.1 — all PTQ-only, zero training steps.
 
-## Recovery run from the new start (6000 steps, s2i2 config, G4 ~2h07m)
+## Historical recovery report (6000 steps, s2i2 config, G4 ~2h07m)
 
 Config: SALIENT_SCOPE=layer CALIBRATION=asym ASYM_STRENGTH=0.15 ASYM_PASSES=2
 SALIENT_FIRST=0.02, STEPS=6000 B8xT512, fresh 150M mix (en 60M / ru 45M / code 18M /
@@ -110,26 +112,35 @@ KD recipe (counter cosine 2e-3->1e-4, homotopy hold 20%->90%, KD+0.3CE+0.05feat)
 Step time ≈0.9 s (vs 0.33 s of the 1%-salient run — the strict update pays for the
 doubled sparse channel); solve+train+evals ≈ 2h07m ≈ 19 units.
 
-Final (step 6000/6000, the monotone BEST checkpoint, strict ternary alpha=0):
+Reported final (step 6000/6000, selected as BEST in the session, strict ternary alpha=0):
 loss=2.847 kd=1.828 feat=0.182; **ppl_en 30.06, ppl_ru 22.39**, ppl_code 6.6x,
-**metric=2.6779** (trajectory 2.899 warm -> 2.678 trained; the last step is the best).
+**metric=2.6779**. The warm metric 2.899 above belongs to the 12M-corpus sweep;
+the recovery uses a fresh 150M corpus. Without its complete raw trace, do not treat
+these as a verified same-slice warm-to-final trajectory.
 (code/math/science/instruct digits were clipped in the notebook viewport; the full
 line lives in the notebook's grep cell output and /content/recovery.log of that
-session. The run itself: recovery rc: 0, RECOVERY DONE.)
+session, neither of which is committed publicly. The reported run exit was recovery
+rc: 0, RECOVERY DONE.)
 
-vs previous campaign best TRAINED strict (v3f2, 6000 steps from the 74.6 start):
-en 47.4 -> **30.06** (−37%), ru 65.9 -> **22.39** (−66%). fp teacher: en 11.6, ru 9.2.
+Correction to the original comparison: EN 47.4/RU 65.9 were the **v3f FP-tail-only**
+run. The corrected **v3f2 live-counter** result was EN **34.41**/RU **30.34**
+([report](recovery_15b_v3_final.md)), with teacher EN 11.6/RU 9.2 on that campaign's
+held-out slice. Corpus shares and validation slices differ here; no percentage gain
+or cross-run quality ranking is justified without evaluating both checkpoints on
+the same slice.
 
 NOTE: the checkpoint was NOT persisted (session storage only — no Drive grant in the
-automated run); the run is reproducible from the command above (seeded pipeline).
+automated run). The public scripts permit a new seeded run, but there is no downloadable
+checkpoint or complete public metrics trace to verify exact reproduction of this run.
 
-**A WEAK cascade correction on top of layer-scope is a step change, not a trade-off:
-s=0.15 beats every other configuration on EVERY domain.** vs classic: en −40%,
+**Within the sweep, weak cascade correction improves the aggregate metric.**
+At s=0.15 vs classic: en −40%,
 ru −61%, code −45%, math −35%, science −53%, instruct −44%; aggregate 3.792 → 3.156
-(~−0.64 log ≈ almost half the mean PPL). The warm (NO training) EN 46.75 is BELOW the
-best TRAINED strict checkpoint of the whole previous campaign (47.4 after 6000 KD
-steps) — the solver alone now clears last week's post-recovery bar. The s-curve is
-smooth with a single minimum between 0 and 0.25 (0.08/0.20 refinement arms pending);
+(~−0.64 log ≈ almost half the geometric-mean PPL). The s=0.15 arm has the best
+aggregate among the tested strengths, but is not best on every domain (for example,
+RU is lower at s=0.25 and code at s=0.08). Its EN 46.75 does not establish a gain over
+v3f2 EN 34.41, particularly with different slices. The tested aggregate curve is
+smooth with its measured minimum at 0.15;
 the s=0.5 collapse matches the CPU-witness overcorrection story. Mechanism reading:
 the correction direction is right (it is what the litreature's full-strength methods
 exploit at W2), but at 2-bpw ternary + salient the per-layer targets can only absorb

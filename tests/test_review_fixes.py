@@ -1,5 +1,7 @@
 import copy
+import math
 
+import pytest
 import torch
 import torch.nn as nn
 
@@ -11,9 +13,33 @@ from memory_native.packed import pack_codes, unpack_codes
 from memory_native.recovery.runtime import (
     build_ptq_counter_kwargs,
     evaluate_at_alpha,
+    metric_from_ppl,
     observe_counter_telemetry,
     restore_counter_structure,
 )
+
+
+@pytest.mark.parametrize("invalid", [float("nan"), float("inf"), -float("inf"), 0.0, -1.0, None, "bad"])
+def test_selection_metric_rejects_invalid_domain_without_averaging_remaining_domains(invalid):
+    # The healthy domain alone would look excellent. A failed domain must never
+    # disappear from the aggregate used to select a recovered checkpoint.
+    with pytest.raises(ValueError, match="ppl_en.*finite positive perplexity"):
+        metric_from_ppl({"ppl_en": invalid, "ppl_ru": 1.0})
+
+
+@pytest.mark.parametrize("result", [{}, {"generation": "example", "warm_ppl_en": 10.0}])
+def test_selection_metric_requires_at_least_one_ppl_domain(result):
+    with pytest.raises(ValueError, match="no ppl\\* metrics"):
+        metric_from_ppl(result)
+
+
+def test_selection_metric_averages_log_perplexity_and_preserves_prefix_contract():
+    metric = metric_from_ppl({
+        "ppl_en": math.exp(2), "ppl_ru": torch.tensor(math.exp(4), dtype=torch.float64),
+        "ppl_custom": str(math.exp(3)), "warm_ppl_en": float("nan"),
+        "generation": "example",
+    })
+    assert metric == pytest.approx(3.0)
 
 
 def make_layer(*, group=8, k=24, out=5, seed=0, flip_sample_size=4096):

@@ -47,7 +47,8 @@ control arms.
 - Deploy candidate: `stats_scope="group"` + fused kernel + lr at half the row recipe
   (cosine at real recovery scale), `decimation=4` as the speed option at row-class
   quality. Combined with the kernel numbers (results/GPU_GATE_T4_GROUPLOCAL.md):
-  **faster than the production dense path, lowest memory, and better quality.**
+  the update kernel is faster/lower-memory under dec4 on the separately benchmarked
+  shapes. This is not a joint full-model training speed/memory/quality measurement.
 - Caveats that stay open for the production campaign: 300 steps, constant lr, EN-only
   stream, 0.5B; the s2i2-start mixed-corpus cosine run at 1.5B remains the final
   promotion gate (its lr grid should be re-centered at half of the row recipe).

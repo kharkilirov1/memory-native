@@ -14,23 +14,39 @@ and falsifiable.
 
 | Area | Status | Evidence |
 |---|---|---|
-| Six-bit counter state and deterministic update | Verified on CPU | Unit tests under `tests/test_counter.py`, `tests/test_packed.py`, and related suites |
-| Packed persistent state at 0.75 byte/weight | Verified on CPU | Packed round-trip and dynamics tests; `results/SUMMARY.md` |
+| Six-bit coefficient/update code and deterministic update | Verified on CPU for supported `C=1..11` | Unit tests under `tests/test_counter.py`, `tests/test_packed.py`, and related suites |
+| Packed coefficient codes at 0.75 byte/weight | Verified on CPU; additional state excluded | Packed round-trip and dynamics tests; scales, RMS statistics, metadata and FP tail add memory |
 | PyTorch training integration | Verified on CPU/CUDA | CLI gates and `results/VERIFICATION_RESULTS.md` |
 | Triton packed forward and fused update | Verified on Tesla T4 | `results/KERNEL.md`, `results/GPU_KERNEL_VERIFICATION.md` |
 | Reversible activation memory | Verified on Tesla T4 for tested depths | `results/POOLS.md` |
-| 1.21B-parameter allocation/training witness | Verified on one Tesla T4 for the recorded run | `results/SCALE_1B.md` |
+| 1.21B-coefficient allocation/2000-step training | Historical T4 report; primary raw log missing | `results/SCALE_1B.md`; cannot independently audit the original run from this checkout |
 | CUDA data-parallel state synchronization | Verified on 2x T4 for the recorded run | `scripts/fineweb_1b_2xt4.py` and linked results |
-| MLX state compatibility | Verified for covered operations | `docs/MLX_PORT.md` and MLX tests |
+| MLX layer/state compatibility, group scales and Bonsai helpers | Verified for covered operations on Linux CPU | `docs/MLX_PORT.md` and MLX tests; full donor model import/training is not covered |
+| Custom Metal kernel and Mac peak-memory/throughput | Open hardware gate | No committed Apple-silicon execution witness |
 | Dense donor recovery / solver-v3 | Experimental | `docs/solver_v3_consolidated.md` and `results/solver_v3_*` |
+| Group-local fused updates and decimation | T4 kernel witness and limited recovery evidence | `results/GPU_GATE_T4_GROUPLOCAL.md`, `results/PROD_GATE_15B.md`; kernel speed is not end-to-end speed |
+| 12B cached-KD recovery | Infrastructure executed; recipe failed quality gate | `results/GEMMA12B_CACHED_KD.md`; preserve warm state when recovery degrades it |
 | Convergence parity at 7B+ on a real corpus | Open | Primary scientific milestone |
 | Strict update-from-IO without materialized `grad_w` | Verified on Tesla T4, impractical as the default | `results/ACCELERATION.md`, `results/group_kernel_opt_stage01.md` |
 
 ## Claims boundary
 
-The committed 1.21B witness demonstrates that the represented model and training path fit and
-execute under the recorded configuration. It does **not** establish convergence parity for a
-1.21B language model trained to completion.
+The historical 1.21B report describes fit and execution under one configuration; its named
+primary raw log is absent from the public repository. Even with that log restored, a
+2000-step run would not establish convergence parity for a language model trained to completion.
+
+Six bits describe each packed counter coefficient and accumulator, not all model/training
+memory. Scales, RMS statistics, permutations, salient FP channels, optional visible-weight
+caches, FP embeddings/head/norms and their optimizer, activations, and temporary correlation
+buffers must be counted separately. Some strict/group-local update paths avoid dense `grad_w`;
+the default cuBLAS path materializes it transiently.
+
+The corrected Qwen 1.5B v3f2 report records EN PPL 34.41 versus donor 11.6, RU 30.34,
+and 70.4% mean task-accuracy retention. A later s2i2 report records EN 30.06/RU 22.39,
+but its checkpoint and full metrics were not preserved publicly; corpus slices differ.
+The 12B recipe degraded warm EN 46.4 to 46,608. Quality preservation remains unproven.
+Training without master copies has prior work (for example ECO); novelty claims should concern
+the specific finite-state representation, not absence of FP master copies alone.
 
 Likewise, synthetic, character-level, calibration, and short-run recovery experiments are
 reported as such. They are useful regression witnesses, not substitutes for long-horizon
@@ -49,6 +65,10 @@ The most reliable uses today are:
 
 For production training, treat the package as experimental and pin the exact commit, Python,
 PyTorch, CUDA, GPU, seed, and command used.
+
+[`notebooks/cached_kd_public.ipynb`](notebooks/cached_kd_public.ipynb) uses the committed
+conversion/cache/recovery scripts. The older 27B notebooks describe an archived workflow
+that requires an externally supplied runner ZIP; that runner is not included in a cold clone.
 
 ## Maintenance
 

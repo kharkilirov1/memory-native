@@ -43,10 +43,12 @@ v6 curve (strict alpha=0, aggregate metric = mean log-ppl over 6 domains):
 v5 (same recipe at 1500-step schedule, cut at 750): warm not measured, step 300 metric
 9.46, step 600 11.57 — consistent with v6's shape once the baseline is known.
 
-- **The R1 solver-only 12B warm start is strong: metric 3.2585** — the same class as the
-  1.5B production-gate warm start (3.2992) that recovery then improved to 2.71. The
-  12B conversion chain (itf + align + salient 2% layer + refit at 131k calib) stands.
-- **Cached-KD training made it strictly worse at every eval**, ending 3.6x above warm.
+- **The R1 solver-only 12B warm start is useful: metric 3.2585.** It is much better
+  than every evaluated recovered state in this run. It is not directly comparable
+  to 1.5B PPL/aggregates from another donor/tokenizer/protocol and does not establish
+  donor-quality parity.
+- **Cached-KD training made it strictly worse at every eval**, ending at log-PPL
+  metric 11.5862 versus warm 3.2585. A ratio of these log metrics is not a PPL ratio.
   Diagnostic signature: kd-loss falls to 2.7-7.9 while alpha anneals 0.32 -> 0.02 (the
   residual c absorbs the objective), then jumps back to 22-25 at alpha=0 — c compensated
   while t drifted destructively. The 1.5B precedent (dec4 turbulence 3.30 -> 3.49 by
@@ -71,7 +73,13 @@ cached path RECOVERS there (it improved held-out MSE in the 2-block pre-gate); i
 0.5B degrades under the exact v6 config, the bug is in the cached-KD loop itself, not
 scale.
 
-## Artifacts
+## Artifacts and public evidence limits
+
+The tables are committed reports; the original raw metrics/checkpoints named below
+are external Kaggle artifacts, not files in this repository. Version references
+do not by themselves establish public availability or exact reproduction. Preserve
+and checksum raw outputs for any new run. New recovery selection must retain the
+warm state as a candidate and refuse to deploy a degraded recovered state.
 
 - Warm state: dataset `mn-gemma12b-counter-state` v2 (unchanged, still the best 12B).
 - v6 best.pt (step 500, 5.5877 — WORSE than warm, kept only as evidence) + metrics.json

@@ -11,11 +11,25 @@ cc_pack4/cc_unpack4), so a counter model trained here exports to the same packed
 """
 from __future__ import annotations
 
+import operator
+
 import torch
 
-from .counter import RMSCounterLinear, decode_state, encode_state
+from .counter import C_DEFAULT, RMSCounterLinear, decode_state, encode_state
 
 __all__ = ["pack_codes", "unpack_codes", "PackedRMSCounterLinear"]
+
+
+def _validate_packed_C(C: int) -> int:
+    """Validate the automaton once, before any state is packed or updated."""
+    message = "C must be an integer in [1, 11] for 6-bit packing (need 3*(2C-1) <= 64)"
+    try:
+        C = operator.index(C)
+    except TypeError as exc:
+        raise ValueError(message) from exc
+    if not 1 <= C <= 11:
+        raise ValueError(message)
+    return C
 
 
 def pack_codes(codes: torch.Tensor) -> torch.Tensor:
@@ -50,15 +64,36 @@ class PackedRMSCounterLinear(RMSCounterLinear):
 
     Same learning dynamics as RMSCounterLinear; only the storage layout differs. Codes are
     unpacked transiently for the GEMM and the per-tile update, then repacked, so the resident
-    state stays at 0.75 byte/weight.
+    state stays at 0.75 byte/weight. The six-bit format supports integer C in [1, 11].
     """
 
-    def __init__(self, *args, **kw) -> None:
-        super().__init__(*args, **kw)  # builds unpacked state [out, in], scale, v
+    def __init__(self, *args, C: int = C_DEFAULT, **kw) -> None:
+        C = _validate_packed_C(C)
+        super().__init__(*args, C=C, **kw)  # builds unpacked state [out, in], scale, v
         codes = self.state  # uint8 [out, in]
         del self._buffers["state"]
         self.register_buffer("state", pack_codes(codes))  # [out, (in//4)*3]
         self._sr_step = 0  # per-call seed for the kernel's deterministic stochastic rounding
+
+    def _save_to_state_dict(self, destination, prefix, keep_vars):
+        super()._save_to_state_dict(destination, prefix, keep_vars)
+        # Keep the live seed in Python: reading a device scalar per tile would synchronize
+        # CUDA, and a mirrored buffer would need an extra write per update. Serialize a
+        # tensor snapshot here so tensor-only checkpoint/export consumers keep working.
+        destination[prefix + "sr_step"] = torch.tensor(self._sr_step, dtype=torch.int64)
+
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        key = prefix + "sr_step"
+        if key in state_dict:
+            self._sr_step = int(state_dict[key].detach().cpu())
+            # sr_step is checkpoint metadata, not a registered runtime buffer.
+            state_dict = state_dict.copy()
+            del state_dict[key]
+        else:
+            # Historical checkpoints did not save the stream position. They still load
+            # strictly; no past seed can be recovered, so start their stream at zero.
+            self._sr_step = 0
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
 
     def _fused_update(self, lo: int, hi: int, grad_w: torch.Tensor) -> bool:
         """One-launch Triton RMS+SR update for a packed row range.

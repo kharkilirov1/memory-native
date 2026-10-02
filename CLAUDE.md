@@ -2,15 +2,37 @@
 
 Auto-loaded context. Read this first to resume work cold.
 
+## Current evidence boundaries
+
+- The public checkout contains the PyTorch CUDA/group-local recovery work and MLX
+  group-scale/Bonsai helpers. Branch-era references below are historical.
+- Six bits encode a counter coefficient and accumulator (`C=1..11` for packed layers),
+  not all training state. Count FP scales/RMS statistics, salient/perm metadata,
+  caches, ordinary FP tail + its optimizer, activations and transient `grad_w` too.
+- Qwen 1.5B **v3f2** is EN 34.41/RU 30.34 with mean accuracy retention 70.4%;
+  EN 47.4/RU 65.9 were **v3f FP-tail-only**, not v3f2. Later s2i2 EN 30.06/RU
+  22.39 has no persisted checkpoint/full public trace and different corpus slices;
+  do not rank it against v3f2 or the PTQ sweep without same-slice evaluation.
+- Group+dec4's **1.7–3.0×** is an isolated update-kernel speedup, not end-to-end
+  training speed. The 12B cached-KD recipe failed; warm state remains better.
+- Linux MLX tests are CPU witnesses. Metal parity/performance, Mac peak memory and
+  full-model recovery remain untested. Row-scale interop is not a complete solver
+  group-checkpoint bridge.
+- The 1.21B report lacks its named primary raw log and pinned original runner.
+  Older 27B notebooks depend on an external runner ZIP. Use the public workflow in
+  `notebooks/cached_kd_public.ipynb` for new runs. See `REPRODUCIBILITY.md` and
+  `results/ARTIFACT_MANIFEST.md` before claiming exact reproduction.
+
 ## What this repo is
 
 `memory-native` — finite-state **counter synapses** + **reversible activations** for
 memory-efficient training, pure PyTorch (CPU/CUDA, no custom engine), plus an MLX/Metal
 port for Apple silicon (`src/memory_native_mlx`).
 
-**What the method saves (the whole point):** it is NOT a weight compressor — it *eliminates
-the training-state pools*. For a Gemma-4-E2B-shaped model (35 layers, d=2048, vocab 262K,
-seq 2048, batch 8):
+**Illustrative memory model, not a measured donor-training peak:** the counter body
+removes separate master copies, Adam moments and retained coefficient gradients by
+embedding updates in the code. For a Gemma-4-E2B-shaped reversible receiver (35 layers,
+d=2048, vocab 262K, seq 2048, batch 8), an earlier symbolic budget gave:
 
 | pool | BF16 AdamW | counter |
 |---|---:|---:|
@@ -20,9 +42,11 @@ seq 2048, batch 8):
 | activations | 13.12 | **0.47** |
 | **total** | **47.4 GiB** | **2.7 GiB** |
 
-The dominant wins: `optim → 0` (no Adam moments, no fp master), `grad → 0`, reversible
-activations (~28×). This matters most for finetuning, which is dominated by exactly the
-optim + activation pools the method zeroes.
+The zeros concern modeled coefficient-state pools, not the full model: scales/RMS
+statistics, a trainable FP tail and its optimizer, caches and temporary correlation
+add state. Reversible activations require a receiver architecture and do not
+automatically apply to a swapped Qwen/Gemma donor. This table is neither a measured
+Gemma conversion budget nor a guarantee that fine-tuning will fit in 2.7 GiB.
 
 ## Key source files
 
@@ -50,7 +74,7 @@ optim + activation pools the method zeroes.
 - `glm.py`, `moe_ffn.py`, `reversible.py`, `budget.py` — receiver architecture, MoE,
   reversible blocks, 4-pool memory model.
 
-## Where the work stands
+## Historical research ledger (chronological; later entries supersede earlier plans)
 
 1. **Conversion + swap + recovery pipeline: DONE.** Qwen2.5-0.5B/1.5B donors convert,
    warm-start, and recover. Mixed multilingual corpus (EN/RU/code/math) is REQUIRED —
@@ -94,15 +118,15 @@ optim + activation pools the method zeroes.
    ENABLE for the next recovery run. asym(s=0.5, c7): ru 108→51.1 (−53%!) but the
    other domains revert/worsen (aggregate 3.746) — cascade correction is real and
    largest where distortion is worst; tune s∈0.25–0.4 / deep-blocks-only next.
-   classic arm reproduced the ladder (en 77.9 ≈ historical 74.6 on a fresh val slice)
-   — the solve_group_state refactor is non-regressive at deploy scale.
+   classic arm provides the internal baseline. EN 77.9 and historical 74.6 are on
+   different val slices; similarity alone does not establish deploy regression parity.
 10. **ASYM_STRENGTH sweep DONE — s=0.15 is a STEP CHANGE (same gate):** curve
    0/0.08/0.15/0.20/0.25/0.35/0.5 → metric 3.687/3.202/**3.156**/3.184/3.216/3.320/
-   3.746, smooth, unimodal, minimum at 0.15. At s=0.15 EVERY domain beats every other
-   config: en 46.75 (classic 77.9, −40%), ru 42.1 (−61%), code 8.28, math 16.85,
-   science 35.12, instruct 17.38. Warm EN 46.75 is BELOW the best TRAINED strict
-   checkpoint of the previous campaign (47.4 after 6000 KD steps) — solver-only now
-   clears the post-recovery bar. Mechanism: tempered target keeps the cascade
+   3.746, smooth, unimodal, minimum at 0.15. At s=0.15 every domain beats the classic
+   baseline, but not every other strength arm: en 46.75 (classic 77.9, −40%), ru 42.1 (−61%), code 8.28, math 16.85,
+   science 35.12, instruct 17.38. The original cross-campaign comparison was wrong:
+   47.4 was v3f FP-tail-only; v3f2 was 34.41, with a different validation slice.
+   The sweep supports an aggregate gain within its own protocol. Mechanism: tempered target keeps the cascade
    correction inside what the ternary+salient grid can absorb before snapping.
 11. **Capacity+iteration sweep DONE (packs 1-2): the s-curve bottleneck IS capacity.**
    `ASYM_PASSES` implemented (multi-pass asym: re-collect on the quantized net,
@@ -118,9 +142,12 @@ optim + activation pools the method zeroes.
    training. Full sweep tables: results/solver_v3_salient_scope_asym_gate_colab.md.
 12. **Recovery run from the s2i2 start DONE (6000 steps, G4):** strict alpha=0 final
    (= best, monotone) **en 30.06, ru 22.39, metric 2.6779** (warm 2.899 → trained
-   2.678); vs previous campaign best en 47.4 / ru 65.9. Step ≈ 0.9 s (2× salient
+   2.678, reported). The warm 2.899 is from the 12M PTQ sweep; recovery uses a fresh
+   150M corpus. This is not a verified same-slice trajectory or comparison to v3f2
+   (en 34.41 / ru 30.34). Step ≈ 0.9 s (2× salient
    strict channel; was 0.33 s at 1%) — budget ≈19 units for solve+6k steps.
-   Checkpoint NOT persisted (no Drive grant) — rerun is seeded/reproducible.
+   Checkpoint NOT persisted (no Drive grant); full raw metrics are not public.
+   The pipeline can be rerun, but exact reproduction of this result is unverified.
 13. **MoE donor conversion DONE (`efb9879`).** transformers 5.x keeps Mixtral/Qwen3-MoE
    experts as STACKED PARAMETERS (`mlp.experts.gate_up_proj` [E, 2*inter, hidden]), not
    `nn.Linear` — the old target walk found ZERO of them and `ptq_warm_start` reported
@@ -201,7 +228,7 @@ optim + activation pools the method zeroes.
    Restore witness + PPL/KL gate vs fp: NOT yet run (first restore attempt died
    silently; restored model needs ~11–12 GiB resident).
 
-16. **Group-local update + one-launch fused kernel (CPU-gated, GPU gates pending) —
+16. **Group-local update + one-launch fused kernel (CPU and later T4 gates) —
    results/GROUP_LOCAL_UPDATE.md.** `stats_scope="group"` on `PackedGroupScaleCounterLinear`
    puts EVERY update statistic on the storage geometry (v `[out, n_groups]`; RMS denom and
    clip over the 128-group instead of the row). That removes the FUSION_PLAN-lever-#1
@@ -223,7 +250,8 @@ optim + activation pools the method zeroes.
    loop, i.e. Stage-2 restructure). Deploy arithmetic already works through decimation
    (grid over 1/4 groups → ~4× → faster than dense at lower memory, plus the KD-pregate
    quality edge); the grid restriction LANDED and MEASURED (v7): fused+dec4 =
-   **1.7-3.0× FASTER than dense** at lower peak memory, dec-parity exact vs the masked
+   **1.7-3.0× faster than the dense update kernel** at lower update-path peak memory,
+   not a whole-model training speedup; dec-parity exact vs the masked
    reference. FULL-MODEL KD GATE RUN (0.5B, 24 blocks, T4, 300 steps —
    results/GROUPLOCAL_KD_FULLMODEL_GATE.md): run 1 at a single lr REVERSED the 2-block
    pre-gate (row 134 vs group 189 ppl) — an lr artifact: group's finer denominator
@@ -291,8 +319,9 @@ optim + activation pools the method zeroes.
    OOMed in the first forward at ~14.2/14.3 GiB. Cost: 31-34 s/step (no ckpt) / 46-53
    (ckpt), eval ~19 min per 12k tok x 6 domains. QUALITY: **warm R1 solver-only 12B =
    metric 3.2585** (en 46.4/ru 53.7/code 6.8 — same class as the 1.5B prod-gate warm
-   3.2992: the conversion chain stands at 12B). Cached-KD training DEGRADED it
-   monotonically (250: 5.60, 500: 5.59, 750 strict: 11.59); signature = kd falls to
+   3.2992, measured on different donor/data; no cross-donor quality parity follows).
+   Cached-KD training was worse than warm at every eval
+   (250: 5.60, 500: 5.59, 750 strict: 11.59); signature = kd falls to
    ~3-8 while alpha anneals then jumps to ~22-25 at alpha=0 → c absorbed the objective,
    t drifted. The 1.5B dec4-turbulence-then-collapse precedent does NOT transfer at
    this depth/compression. Next arms (need Saturday quota): lr 0.001/0.0005, earlier+
@@ -300,7 +329,9 @@ optim + activation pools the method zeroes.
    sanity. Best 12B artifact remains the WARM conversion state
    (`mn-gemma12b-counter-state` v2).
 
-20. **PRODUCTION RECOVERY 3k prepared (v4, 2026-08-26).** Baseline recipe:
+20. **Archived external-runner recovery recipe (v4, 2026-08-26); not a public cold-clone runner.**
+    The required external runner ZIP is absent. For new public runs use
+    `notebooks/cached_kd_public.ipynb`. Historical baseline recipe:
     `production/qwen38_27b_recovery_3k.yaml` — Qwen3.8-27B strict KD, 3000 steps,
     micro-batch 2 x seq 512, dec=1, alpha=0, counter LR 1.25e-4 -> 1e-5, scale LR
     2.5e-5 -> 5e-6, full eval every 500 @24k tok, early-stop patience 3, min improvement

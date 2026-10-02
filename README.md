@@ -1,41 +1,43 @@
 # memory-native
 
-> **📝 Preprint:** *[Training Without Master Weights: a 6-bit Finite-State Synapse with Optimizer-in-State](paper/MEMORY_NATIVE_PREPRINT.md)* (v0.1 draft). A 6-bit code holds the *entire* per-parameter training state — no FP master weight, no Adam moments. Composed with reversible activations + int8/bf16 compute, a 1.21B-parameter model trains on a single T4 in 2.25 GiB peak, where the dense+Adam equivalent cannot allocate its 18 GiB of state.
+> **📝 Preprint:** *[Training Without Master Weights: a 6-bit Finite-State Synapse with Optimizer-in-State](paper/MEMORY_NATIVE_PREPRINT.md)* (draft). A six-bit code holds a ternary coefficient and its update accumulator, with no FP master copy or Adam moments for that coefficient. Scales, RMS statistics, metadata, optional caches, and the ordinary FP model tail add storage. A historical 2000-step 1.21B-coefficient run reports 2.25 GiB peak on one T4; its primary raw log is currently missing from the public repository. This is a fit/execution report, not evidence of converged quality parity.
 
 Finite-state **counter synapses** + **reversible activations** for memory-efficient training,
 in **pure PyTorch** — no custom engine, runs on stock CPU/CUDA. Pure-Python package:
 `pip install -e .` and train.
 
-> **GPU-validated** (Tesla T4 / T4×2): [`results/KERNEL.md`](results/KERNEL.md) (fused update
-> ×45.9 / step ×1.26) · [`results/SCALE_1B.md`](results/SCALE_1B.md) (1.21B params on one T4 at
-> 2.25 GiB; dense+Adam OOMs at 18 GiB) · [`results/POOLS.md`](results/POOLS.md) (all four memory
+> **Selected GPU evidence** (Tesla T4 / T4×2): [`results/KERNEL.md`](results/KERNEL.md) (fused update
+> ×45.9 / tested layer step ×1.26) · [`results/SCALE_1B.md`](results/SCALE_1B.md) (historical
+> 1.21B-coefficient fit report; primary log missing) · [`results/POOLS.md`](results/POOLS.md) (memory
 > pools) · [`results/SHOOTOUT.md`](results/SHOOTOUT.md) (vs AdamW / 8-bit Adam / GaLore / LoMo).
 
-> **Validated value proposition (real runs on a Tesla T4 — [`results/SHOOTOUT.md`](results/SHOOTOUT.md)):**
-> the lowest training-memory of every contestant (AdamW, 8-bit Adam, GaLore, LoMo) at
-> competitive-to-better quality, for ~2× slower steps — and the advantage **grows with scale**.
-> At d=768 counter+int4 beats AdamW and 8-bit Adam on memory *and* quality at once (peak 1.32×
+> **Small-model comparison (Tesla T4 — [`results/SHOOTOUT.md`](results/SHOOTOUT.md)):**
+> the tested counter configurations had the lowest training peak among AdamW, 8-bit Adam,
+> GaLore, and LoMo, with similar or lower short-run loss and roughly 1.7–2.1× slower steps
+> after the untiled-update change. The memory gap widened across the two tested widths.
+> At d=768 counter+int4 has lower peak and validation loss in the recorded short run (peak 1.32×
 > below AdamW / 1.62× below 8-bit Adam; val −4.7% vs AdamW; speed gap narrowing). The method
-> wins because it cuts both the optimizer pool (zero state) and activations (int4), while the
+> saves memory by embedding the coefficient update accumulator in the weight code and
+> reducing saved activations (int4), while the
 > memory-efficient *optimizers* only shrink optimizer state — a small slice of the
 > activation-bound peak.
 
-> **🍎 MLX / Apple-silicon port:** the method now runs on MLX (Metal on macOS; CPU backend
-> anywhere) — same 6-bit state, same packed 0.75 B/weight layout, same deterministic hash-SR
-> update, validated bit-for-bit against this torch implementation. Counter models cross
-> torch↔MLX losslessly, so you can PTQ/train on CUDA and fine-tune on a MacBook's unified
-> memory. See [`docs/MLX_PORT.md`](docs/MLX_PORT.md), package
+> **🍎 MLX port:** covered layer operations and state transfers are validated against PyTorch
+> on Linux `mlx[cpu]`, including group-scale and Bonsai format helpers. Packed codes use
+> 0.75 B/coefficient before scales/statistics. The custom Metal kernel, GPU throughput,
+> peak unified memory, and complete model fine-tuning on a Mac still need real hardware
+> validation. See [`docs/MLX_PORT.md`](docs/MLX_PORT.md), package
 > [`src/memory_native_mlx/`](src/memory_native_mlx/), demo [`scripts/mlx_demo.py`](scripts/mlx_demo.py).
 
 ## Solver ladder on a 1.5B donor
 
 Strict ternary warm PPL at `alpha=0`, Qwen2.5-1.5B donor. Every row is a
-zero-training PTQ conversion except the last. Scope, carried from the evidence
+zero-training PTQ conversion. Scope, carried from the evidence
 file itself: calibration 524k tokens; the corpus is rebuilt from the public HF
 sources (shares en40/ru30/code12/math8/science5/instruct5), NOT the historical
 150M val slices — **absolute PPLs are comparable only within this table**; the
-classic arm is the internal baseline (its EN 77.9 lands next to the historical
-74.6, confirming the refactored solve path reproduces the production solver).
+classic arm is the internal baseline. Similarity to historical numbers from other
+validation slices does not establish regression parity.
 
 | solver config | EN PPL | mean log-PPL, 6 domains |
 |---|---:|---:|
@@ -44,7 +46,15 @@ classic arm is the internal baseline (its EN 77.9 lands next to the historical
 | + `calibration=asym`, strength 0.15 | 46.75 | 3.156 |
 | + salient 2%, 2 asym passes — **deploy default** | 35.59 | 2.899 |
 | + salient 3% (quality option, ~3.1–3.6 bpw) | 31.68 | 2.795 |
-| deploy default + 6000-step KD recovery (trained) | **30.06** (RU 22.39) | 2.678 |
+
+The bpw estimates concern a visible-weight inference representation; actual counter
+training stores six-bit codes plus scales/statistics, salient metadata and the FP tail.
+
+The subsequent s2i2 recovery report records EN **30.06**, RU **22.39**, and mean log-PPL
+**2.6779** after 6000 steps on a newly built 150M-token corpus. That uses a different
+validation slice from the PTQ table; its checkpoint and full raw metrics were not
+preserved publicly. Treat it as a historical report, not a same-slice comparison or
+an independently downloadable result.
 
 Full tables, the ASYM_STRENGTH sweep (smooth, unimodal, minimum at 0.15) and the
 run protocol: [`results/solver_v3_salient_scope_asym_gate_colab.md`](results/solver_v3_salient_scope_asym_gate_colab.md).
@@ -57,7 +67,8 @@ are in [`results/recovery_15b_main.md`](results/recovery_15b_main.md).
 |---|---|
 | [`PROJECT_STATUS.md`](PROJECT_STATUS.md) | What is verified, experimental, or still open |
 | [`REPRODUCIBILITY.md`](REPRODUCIBILITY.md) | Reproduce CPU, CUDA, scale, and recovery witnesses |
-| [`results/README.md`](results/README.md) | Evidence index and raw run artifacts |
+| [`results/README.md`](results/README.md) | Evidence index and measured result boundaries |
+| [`results/ARTIFACT_MANIFEST.md`](results/ARTIFACT_MANIFEST.md) | Public artifacts, external dependencies, and missing raw evidence |
 | [`paper/MEMORY_NATIVE_PREPRINT.md`](paper/MEMORY_NATIVE_PREPRINT.md) | Method, assumptions, and open scientific questions |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | Contribution and review workflow |
 | [`SECURITY.md`](SECURITY.md) | Private vulnerability reporting and support scope |
@@ -68,11 +79,11 @@ used to explore Vulkan deployment and compact-state execution on legacy GPUs. Re
 repository are not treated as proof for the other unless the corresponding witness is linked
 explicitly.
 
-The method attacks all four memory pools of training at once:
+The method targets persistent training state and activation memory:
 
 | Pool | Lever | What it is |
 |---|---|---|
-| Parameters + optimizer + gradients | `CompactCounterLinear` / `RMSCounterLinear` | a ternary weight whose optimizer state lives inside a per-synapse finite-state automaton; the update is fused into backward — no FP master weight, no Adam moments, no full gradient buffer |
+| Parameters + optimizer + gradients | `CompactCounterLinear` / `RMSCounterLinear` | a ternary coefficient and update accumulator in one code, plus scale/RMS buffers; update runs in backward, removing separate coefficient master copies, Adam moments, and retained coefficient gradients. The default correlation still forms a transient dense gradient; strict and group-local paths avoid it |
 | Activations | `ReversibleCouplingBlock` | activations are recomputed in backward from the output instead of stored — depth-independent activation memory |
 
 ## Install
@@ -151,7 +162,8 @@ optimizer cost) — matching the larger-scale numbers in [`results/SUMMARY.md`](
 - **Realized now (pure PyTorch, verified on CPU):** the *learning dynamics*, the
   *optimizer-state* saving (no FP master weight, no Adam moments), and — with
   `PackedRMSCounterLinear` (`kind="counter_packed"`) — **genuinely packed 0.75 byte/weight
-  persistent state** (4 codes / 3 bytes, bit-identical to the engine's packing; round-trip
+  coefficient-code storage** (4 codes / 3 bytes; scales/statistics and other model buffers
+  are additional, bit-identical to the engine's packing; round-trip
   and identical-dynamics tested). `memory_report` / `memory-native-memgate` quantify it (real
   `torch.cuda.max_memory_allocated` on CUDA, byte accounting on CPU).
 - **Verified on GPU (Tesla T4):** the Triton forward kernel (`triton_counter.py`,
@@ -167,9 +179,10 @@ optimizer cost) — matching the larger-scale numbers in [`results/SUMMARY.md`](
   RMS+stochastic-rounding update into one launch (deterministic hash-SR, bit-quantified against a
   CPU reference), **×45.9 on the update / ×1.26 on the step**, wired into
   `PackedRMSCounterLinear`. See [`results/KERNEL.md`](results/KERNEL.md).
-- **Scale — demonstrated (T4):** the full method (counter + reversible) trains a **1.21B-param**
-  model on a single 14.6 GiB T4 at **2.25 GiB peak**, where dense+Adam needs 18 GiB of state
-  and OOMs before step 0. See [`results/SCALE_1B.md`](results/SCALE_1B.md).
+- **Scale — historically reported (T4):** a 2000-step counter + reversible run with
+  **1.21B counter coefficients** reports **2.25 GiB peak** on one 14.6 GiB T4 and
+  a dense+FP32 Adam allocation failure. The linked primary raw log is absent; converged
+  quality parity remains open. See [`results/SCALE_1B.md`](results/SCALE_1B.md).
 - **Strict update-from-IO — implemented and T4-validated:** both the row-scale
   `update_from_io.triton_counter_update_from_io` path and the group-scale solver-v3 path can form
   the update directly from `(state, scale, v, x, grad_out)` without materializing a dense
@@ -177,9 +190,22 @@ optimizer cost) — matching the larger-scale numbers in [`results/SUMMARY.md`](
   hand-written correlation is dramatically slower than cuBLAS at real token counts: the row-scale
   witness was ~860× slower, while the group-scale Qwen-shape path took 30–46 seconds per layer at
   `M=4096`. The practical default therefore remains cuBLAS correlation plus the fused update,
-  optionally row-tiled to bound transient memory. See
+  optionally row-tiled to bound transient memory. A group-local fused alternative,
+  with decimation, has separate T4 update-kernel and short recovery witnesses;
+  its 1.7–3.0× kernel improvement is not an end-to-end training speedup. See
   [`results/ACCELERATION.md`](results/ACCELERATION.md) and
-  [`results/group_kernel_opt_stage01.md`](results/group_kernel_opt_stage01.md).
+  [`results/GPU_GATE_T4_GROUPLOCAL.md`](results/GPU_GATE_T4_GROUPLOCAL.md).
+
+**Recovery quality remains open:** the corrected Qwen 1.5B v3f2 run reports EN PPL
+34.41 versus donor 11.6 and about 70.4% mean accuracy retention across five tasks.
+The 12B cached-KD recipe degraded a useful solver-only warm start (EN 46.4) to
+EN 46,608. These results do not establish donor-quality preservation or a general
+large-model fine-tuning solution. See the [evidence index](results/README.md).
+
+Training without FP master copies has prior work, including
+[ECO](https://arxiv.org/abs/2601.22101). The research contribution explored here is the
+specific compact finite-state coefficient/update representation and its memory trade-offs.
+Matched long-run comparisons, including QLoRA for donor fine-tuning, remain needed.
 
 ### Roadmap
 1. **Practical low-memory correlation** — retain the verified strict from-IO kernel as the
@@ -238,16 +264,21 @@ tests/              pytest: encode/decode, learning, reversible grad-check, pack
 
 ## Archived Qwen3.8 27B conversion recipe
 
-The older production-oriented Strict KD v3 Colab recipe is preserved in [`notebooks/MN_Qwen38_27B_StrictKD_V3_RTXPRO6000_H100.ipynb`](notebooks/MN_Qwen38_27B_StrictKD_V3_RTXPRO6000_H100.ipynb). It documents the H100/RTX PRO 6000 path, text-only Qwen3.8 handling, strict alpha=0 KD, teacher-cache validation, GPU preflight, and gate-approved artifact selection. The validated run evidence already committed in `results/` remains the source of truth for published results; this notebook is the reproducible conversion/KD recipe rather than a new metric claim.
+The older Strict KD v3 recipe is preserved in [`notebooks/MN_Qwen38_27B_StrictKD_V3_RTXPRO6000_H100.ipynb`](notebooks/MN_Qwen38_27B_StrictKD_V3_RTXPRO6000_H100.ipynb). This is an archived workflow that requires an externally supplied runner ZIP absent from the public repository, not a self-contained reproducible runner or a new metric claim.
+
+For new public runs, [`notebooks/cached_kd_public.ipynb`](notebooks/cached_kd_public.ipynb)
+calls the committed conversion, teacher-cache and cached-KD scripts with an explicitly
+supplied donor and corpus. See [`REPRODUCIBILITY.md`](REPRODUCIBILITY.md) for data,
+hardware and historical-artifact limits.
 
 ## How this was built
 
 Built entirely by AI (Claude) under sustained human direction, over months, by someone
-with no formal CS/math background. Working protocol: every claim needs an executable
-witness — tests, frozen pre-run forecasts, raw logs committed next to results, negative
-results reported first-class. The repo, not the author, answers technical questions.
-Status: **frozen** (July 2026) — out of money and hardware, not out of ideas.
-Everything reproduces from a cold clone.
+with no formal CS/math background. Working protocol: claims should have executable
+witnesses, explicit forecasts, and raw logs next to results; negative results are retained.
+The project is active research. CPU gates run from a fresh clone, while historical GPU
+reports have varying artifact completeness and some workflows need external data or
+runner bundles. See [`REPRODUCIBILITY.md`](REPRODUCIBILITY.md) for the known gaps.
 
 ## License
 
