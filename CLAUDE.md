@@ -201,6 +201,105 @@ optim + activation pools the method zeroes.
    Restore witness + PPL/KL gate vs fp: NOT yet run (first restore attempt died
    silently; restored model needs ~11–12 GiB resident).
 
+16. **Group-local update + one-launch fused kernel (CPU-gated, GPU gates pending) —
+   results/GROUP_LOCAL_UPDATE.md.** `stats_scope="group"` on `PackedGroupScaleCounterLinear`
+   puts EVERY update statistic on the storage geometry (v `[out, n_groups]`; RMS denom and
+   clip over the 128-group instead of the row). That removes the FUSION_PLAN-lever-#1
+   blocker by construction: the tick of [o,p] depends only on its group's grad slice, so
+   `triton_group_counter_update_fused` computes the correlation with `tl.dot` tiles held
+   in REGISTERS over all of M and runs the full automaton (stats→v→clip→scale→SR→repack)
+   in the epilogue — one launch, no [out,in] grad_w, no fp32 casts, no scratch. CPU
+   witnesses green (tests/test_grouplocal_update.py): locality (perturb one gw element →
+   only its group changes; row scope provably couples the row), degeneracy (group==K is
+   BIT-identical to row math — g² must reduce via `view(...).square().mean(-1)`;
+   scatter_add drifts an ULP and that class of drift tips SR), teacher recovery at
+   clip=1.0, salient frozen, checkpoint round-trip (row↔group refuse to cross-load —
+   different optimizer, on purpose). GPU GATES RUN (2026-07-30, Kaggle T4 —
+   results/GPU_GATE_T4_GROUPLOCAL.md): quanta parity ESSENTIALLY EXACT (7e-08…9e-07 code
+   mismatch, scale ≤6e-08), CUDA suites green, peak memory the lowest of all update
+   paths (152-435 MiB vs dense 244-570). Speed after the x_perm+BLOCK_M=64 pass:
+   0.4-0.8× dense (was 0.03-0.2× with in-kernel gather — H3 pinned at kernel scale;
+   fp16-vs-bf16 closed NEGATIVE — the residual ~2× is the G-fold go re-read + serial M
+   loop, i.e. Stage-2 restructure). Deploy arithmetic already works through decimation
+   (grid over 1/4 groups → ~4× → faster than dense at lower memory, plus the KD-pregate
+   quality edge); the grid restriction LANDED and MEASURED (v7): fused+dec4 =
+   **1.7-3.0× FASTER than dense** at lower peak memory, dec-parity exact vs the masked
+   reference. FULL-MODEL KD GATE RUN (0.5B, 24 blocks, T4, 300 steps —
+   results/GROUPLOCAL_KD_FULLMODEL_GATE.md): run 1 at a single lr REVERSED the 2-block
+   pre-gate (row 134 vs group 189 ppl) — an lr artifact: group's finer denominator
+   halves its optimal lr. Run 2 lr-matched: **group@1e-3 ppl 112.4 beats row's best
+   134.1 (−16%); dec4@2e-3 ties row's best at 1/4 update FLOPs; dec4 lr×4 is the
+   documented hot-lr failure (264.8).** Deploy candidate: group scope + fused + lr at
+   HALF the row recipe + decimation=4 as the speed option; final promotion gate = the
+   s2i2-start mixed-corpus cosine run at 1.5B with the lr grid re-centered. Row scope
+   stays the default until that run.
+
+17. **Group-local follow-through (2026-07-30, all CPU): decimation lever + KD pre-gate WIN
+   + restore machinery proven + standardized eval.** (a) `active_groups` on the
+   group-local reference: decimation is the full math restricted to a subset (inactive
+   groups BIT-untouched, active groups BIT-equal to the full update — pinned by test;
+   only well-defined under group scope). Witness (results/DECIMATION_WITNESS.md): dec4 +
+   lr×4 beats EVERY full arm on every seed (1.6–5.4× lower final mse) at 0.25× update
+   FLOPs — full-lr×4 crosses fast then bounces into the noise ball, dec4 settles ~5×
+   lower (staggered noise injection at the same integrated signal). (b) KD pre-gate on
+   REAL donor blocks (results/GROUPLOCAL_KD_PREGATE.md): Qwen2.5-0.5B blocks 0-1,
+   identical PTQ start, frozen fp slice, 120 KD steps — **group scope wins at every
+   checkpoint, final 8.54 vs 10.22 held-out MSE (−29.7% vs −15.9% from warm)**; the
+   fused-kernel enabler is a quality WIN at this scale, not a trade-off. (c)
+   `scripts/restore_witness.py` (results/RESTORE_WITNESS.md): restore WITHOUT the donor
+   ever fully resident (meta skeleton + shard materialization + probe-path computed
+   buffers + re-tie; streamed fp reference for PPL/KL; faulthandler+RSS) — proven
+   end-to-end on a real streamed 0.5B conversion (24/24 blocks, 0.14 GiB conversion
+   peak, 2.89 GiB restore peak, 0 meta left); targets the pending 12B gate of item 15
+   (12B projection ~12-13 GiB vs ~44 GiB naive). (d) `scripts/eval_wikitext_ppl.py`:
+   GPTQ-protocol WikiText-2 PPL for fp/streamed/ckpt models — the external-comparability
+   harness (custom val slices cannot sit next to published GPTQ/AWQ/AQLM tables).
+   `ptq_warm_start` now passes `stats_scope` through to packed layers (was silently
+   dropped by the counter_kw filter).
+
+18. **PRODUCTION GATE 1.5B DONE (Kaggle 2xT4, results/PROD_GATE_15B.md) — recipe
+   SWITCHED to group+dec4.** Three arms, identical v3-layer start (warm 3.2992,
+   solver-determinism witnessed at 1.5B), same 12M mixed pilot corpus (bit-exact bins),
+   production loop (homotopy, feature-KD, fp AdamW tail, cosine), 1500 steps B2x512:
+   row@0.002 → 2.7120; group@0.001 → 2.7262; **dec4@0.002 → 2.7107 (ties row, best
+   code/science, at 1/4 update FLOPs)**. Plain group did NOT beat row at the production
+   loop (the 0.5B −16% win is regime-sensitive: one lr point, homotopy interaction) —
+   per the pre-registered rule row keeps the CLASS defaults; the PRODUCTION RECIPE is
+   now `STATS_SCOPE=group DECIMATION=4` + fused kernel + unchanged row lr schedule
+   (quality parity + 1.7-3.0x faster update at lower memory). dec4 homotopy phase is
+   turbulent (3.30→3.49 by step 600) before the cosine collapse — consider starting
+   decimation after the homotopy hold. Also productionized: `SALIENT_REFIT=align`
+   (solver post-pass, held-out-gated, off by default). Debug ledger pinned in the gate
+   doc: B4 OOMs a 16 GiB T4 at the first KD step (fp32 logits) → B2 +
+   expandable_segments; kernel_sources of an ERROR version do not mount; FOUR kw-filter
+   sites (2x ptq.py, 2x runtime.py) must pass stats_scope/decimation — all fixed.
+   Inference-export arithmetic (bare ternary, no counter residual): body bits ≈ 1.6-2.0
+   + 0.125 scales + 0.64 salient@2% → a 284B DeepSeek-V4-Flash-class MoE ≈ 81 GiB
+   deploy pack vs 529 GiB bf16; export utility (state→t, drop c, repack) not yet
+   written.
+
+19. **gemma-12B cached-KD on 2xT4 (results/GEMMA12B_CACHED_KD.md): infrastructure
+   PROVEN, recipe FAILED the gate.** New and witnessed at 12B: 2-GPU model-parallel
+   split (layers n/2.. → cuda:1, embed/norm/head+tie on cuda:0, pre-hook movers,
+   Triton launches now device-pinned — the multi-GPU fix), reentrant grad-ckpt
+   compatible with the eager-only guard (no-grad first pass = plain path; recompute
+   builds the Function once), FREEZE_EMBED (AdamW moments for the tied 1.0B embedding
+   = 8.5 GiB — a T4 killer), slim best-only ckpt (full 12B state_dict 13-15 GiB blows
+   Kaggle's 20 GiB output cap; drop frozen fp + salient/perm/v, stage via /kaggle/tmp).
+   WHY 2 GPUs are load-bearing: 12B counter buffers are ~11.7 GiB RESIDENT (state 8.2
+   + salient 1.3 + salient perm int64 1.7 + scales/v 0.5) + frozen embed 2.0 → v3/v4
+   OOMed in the first forward at ~14.2/14.3 GiB. Cost: 31-34 s/step (no ckpt) / 46-53
+   (ckpt), eval ~19 min per 12k tok x 6 domains. QUALITY: **warm R1 solver-only 12B =
+   metric 3.2585** (en 46.4/ru 53.7/code 6.8 — same class as the 1.5B prod-gate warm
+   3.2992: the conversion chain stands at 12B). Cached-KD training DEGRADED it
+   monotonically (250: 5.60, 500: 5.59, 750 strict: 11.59); signature = kd falls to
+   ~3-8 while alpha anneals then jumps to ~22-25 at alpha=0 → c absorbed the objective,
+   t drifted. The 1.5B dec4-turbulence-then-collapse precedent does NOT transfer at
+   this depth/compression. Next arms (need Saturday quota): lr 0.001/0.0005, earlier+
+   longer anneal (hold 0.1/end 0.6), dec1 control, 0.5B-at-24-blocks cached-loop
+   sanity. Best 12B artifact remains the WARM conversion state
+   (`mn-gemma12b-counter-state` v2).
+
 20. **PRODUCTION RECOVERY 3k prepared (v4, 2026-08-26).** Baseline recipe:
     `production/qwen38_27b_recovery_3k.yaml` — Qwen3.8-27B strict KD, 3000 steps,
     micro-batch 2 x seq 512, dec=1, alpha=0, counter LR 1.25e-4 -> 1e-5, scale LR

@@ -29,6 +29,7 @@ def build_ptq_counter_kwargs(
     mode: str, *, lr: float, lr_scale: float, local_grad_clip: float,
     residual_alpha: float, cache_mode: str, kernel_mode: str,
     strict_update: bool, flip_sample_size: int,
+    stats_scope: str = "row", decimation: int = 1,
 ) -> dict:
     common = {
         "lr": float(lr), "lr_scale": float(lr_scale),
@@ -38,6 +39,7 @@ def build_ptq_counter_kwargs(
         common.update(
             residual_alpha=float(residual_alpha), kernel_mode=kernel_mode,
             strict_update=bool(strict_update), flip_sample_size=int(flip_sample_size),
+            stats_scope=stats_scope, decimation=int(decimation),
         )
     else:
         common["cache_mode"] = cache_mode
@@ -165,6 +167,7 @@ def restore_counter_structure(
             allowed = {
                 "lr", "lr_scale", "rms_beta", "rms_eps", "local_grad_clip",
                 "residual_alpha", "kernel_mode", "strict_update", "flip_sample_size",
+                "stats_scope", "decimation",
             }
             kw = {key: value for key, value in counter_kw.items() if key in allowed}
             if packed:
@@ -203,6 +206,7 @@ def restore_counter_structure(
         allowed = {
             "lr", "lr_scale", "rms_beta", "rms_eps", "local_grad_clip",
             "residual_alpha", "kernel_mode", "strict_update", "flip_sample_size",
+            "stats_scope", "decimation",
         }
         kw = {key: value for key, value in counter_kw.items() if key in allowed}
         if packed:

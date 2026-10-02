@@ -52,6 +52,12 @@ PTQ_MODE = os.environ.get("PTQ_MODE", "gptq_group")
 COUNTER_KIND = os.environ.get("COUNTER_KIND", "counter_packed")
 GROUP_KERNEL_MODE = os.environ.get("GROUP_KERNEL_MODE", "auto")
 STRICT_UPDATE = env_bool("STRICT_UPDATE", True)
+# STATS_SCOPE=group puts the RMS denom/clip on the 128-group (the fused-kernel format;
+# results/GROUPLOCAL_KD_FULLMODEL_GATE.md). NOTE its lr optimum sits at HALF the row
+# recipe -- re-center COUNTER_LR_START/END when flipping. DECIMATION=S updates 1/S of
+# the groups per step round-robin (group scope only; lr compensation ~x2 at depth).
+STATS_SCOPE = os.environ.get("STATS_SCOPE", "row")
+DECIMATION = int(os.environ.get("DECIMATION", "1"))
 FLIP_SAMPLE_SIZE = int(os.environ.get("FLIP_SAMPLE_SIZE", "4096"))
 REFINE_ITERS = int(os.environ.get("REFINE_ITERS", "2"))
 # Defaults = the measured production config (v3-full: itf + align + salient 1% + in-sweep,
@@ -66,6 +72,11 @@ SALIENT_FIRST = float(os.environ.get("SALIENT_FIRST", "0.01"))
 # (same total bpw, hard rows take more slots). Gate new runs before flipping the default.
 SALIENT_SCOPE = os.environ.get("SALIENT_SCOPE", "row")
 IN_SWEEP_REFIT = env_bool("IN_SWEEP_REFIT", True)
+# SALIENT_REFIT=align re-solves the salient VALUES as the exact LSQ corrector of the
+# residual layer error after the sweep (copies are suboptimal; held-out −7% q_proj at
+# 65k calib, never lost -- results/SALIENT_REFIT_WITNESS.md). Off by default until a
+# deploy-scale warm gate.
+SALIENT_REFIT = os.environ.get("SALIENT_REFIT", "none")
 # CALIBRATION=asym switches to the GPTAQ-style cascade objective ||X_q Q - X_fp W||^2
 # (donor/asym.py): sequential per-chunk solve against quantized inputs. Costs a resident
 # fp copy of the model + 2*ceil(n_layers/ASYM_CHUNK_LAYERS) calibration passes.
@@ -81,6 +92,9 @@ ASYM_FP_DEVICE = os.environ.get("ASYM_FP_DEVICE", "") or None
 # HESSIAN_WEIGHTING=end_loss collects GuidedQuant-style loss-weighted Hessians
 # (one backward per calibration batch, weights untouched). fp calibration only.
 HESSIAN_WEIGHTING = os.environ.get("HESSIAN_WEIGHTING", "none")
+# Chunked-H VRAM budget. The 24 GiB default assumes A100/G4-class cards; the full 1.5B
+# H set is ~9.85 GiB, which OOMs a 16 GiB T4 next to the resident student -- set ~4-6.
+HESSIAN_GPU_BUDGET_GIB = float(os.environ.get("HESSIAN_GPU_BUDGET_GIB", "24.0"))
 # TEACHER_DEVICE=cuda:1 splits the KD pair across two GPUs (Kaggle 2xT4): the fp
 # teacher lives on its own card, only its logits (and optional hidden states) hop to
 # the student device each step. Empty = same device as the student.
@@ -271,6 +285,8 @@ counter_kwargs = build_ptq_counter_kwargs(
     kernel_mode=GROUP_KERNEL_MODE,
     strict_update=STRICT_UPDATE,
     flip_sample_size=FLIP_SAMPLE_SIZE,
+    stats_scope=STATS_SCOPE,
+    decimation=DECIMATION,
 )
 
 start_step = 0
@@ -282,10 +298,12 @@ if resume_payload is None:
         grid=GRID, itf_iters=ITF_ITERS, salient_first=SALIENT_FIRST,
         salient_scope=SALIENT_SCOPE,
         in_sweep_refit=IN_SWEEP_REFIT,
+        salient_refit=SALIENT_REFIT,
         calibration=CALIBRATION, asym_chunk_layers=ASYM_CHUNK_LAYERS,
         asym_strength=ASYM_STRENGTH, asym_passes=ASYM_PASSES,
         asym_fp_device=ASYM_FP_DEVICE,
         hessian_weighting=HESSIAN_WEIGHTING,
+        hessian_gpu_budget_gib=HESSIAN_GPU_BUDGET_GIB,
         extra_skip=EXTRA_SKIP, **counter_kwargs,
     )
     print("swap:", report, flush=True)
