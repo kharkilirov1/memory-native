@@ -185,7 +185,7 @@ def restore_counter_structure(
             if packed:
                 counter: nn.Module = PackedGroupScaleCounterLinear(
                     linear.in_features, linear.out_features, group=group, C=C,
-                    perm=saved_perm, **kw,
+                    perm=saved_perm, state=saved_state, **kw,
                 )
             else:
                 for key in ("kernel_mode", "strict_update", "flip_sample_size"):
@@ -223,7 +223,8 @@ def restore_counter_structure(
         kw = {key: value for key, value in counter_kw.items() if key in allowed}
         if packed:
             return PackedGroupScaleCounterLinear(
-                in_features, out_features, group=group, C=C, perm=saved_perm, **kw
+                in_features, out_features, group=group, C=C, perm=saved_perm,
+                state=saved_state, **kw
             )
         for key in ("kernel_mode", "strict_update", "flip_sample_size"):
             kw.pop(key, None)

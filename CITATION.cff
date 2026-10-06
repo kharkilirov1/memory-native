@@ -8,8 +8,10 @@ abstract: >-
   the method trains a 1.21B-parameter model on a single T4 in 2.25 GiB peak, where the dense+Adam
   equivalent cannot allocate its 18 GiB of state. Convergence parity at scale is the open question.
 authors:
+  - name: "AI agents (Claude Code, Anthropic; Codex, OpenAI; DeepSeek; OpenCode)"
   - family-names: "Kharki"
     email: "kharkilirov@gmail.com"
+    note: "Project sponsor — provided direction, resources, and quality gates. Did not write code, math, or experiments."
 keywords:
   - quantization-aware-training
   - ternary-networks
@@ -27,7 +29,9 @@ preferred-citation:
   type: unpublished
   title: "Training Without Master Weights: a 6-bit Finite-State Synapse with Optimizer-in-State"
   authors:
+    - name: "AI agents (Claude Code, Anthropic; Codex, OpenAI; DeepSeek; OpenCode)"
     - family-names: "Kharki"
+      note: "Project sponsor — provided direction, resources, quality gates. Did not write code, math, or experiments."
   year: 2026
   notes: "Preprint draft v0.1; see paper/MEMORY_NATIVE_PREPRINT.md in this repository."
 repository-code: "https://github.com/kharkilirov1/memory-native"

@@ -32,9 +32,9 @@ recognise still fail loudly rather than converting a subset.
 """
 from __future__ import annotations
 
+import copy
 import gc
 import hashlib
-import inspect
 import json
 import os
 import struct
@@ -46,6 +46,13 @@ from torch import nn
 
 from ..convert import CounterLinearWithBias
 from ..convert import SwapReport
+from .provenance import (
+    atomic_torch_save,
+    atomic_write_json,
+    canonical_json,
+    checkpoint_fingerprint,
+    file_fingerprint,
+)
 from .ptq import (
     _assert_no_unhandled_moe,
     _group_counter_from_state,
@@ -56,13 +63,6 @@ from .ptq import (
     _swap_stacked_moe,
     _target_paths,
     solve_group_state,
-)
-from .provenance import (
-    atomic_torch_save,
-    atomic_write_json,
-    canonical_json,
-    checkpoint_fingerprint,
-    file_fingerprint,
 )
 
 __all__ = ["StreamingReport", "convert_streaming", "load_streamed_state"]
@@ -286,12 +286,33 @@ class _WeightSource:
         dtype = self._DTYPES.get(info.get("dtype"))
         if dtype is None:
             return None
+        if os.environ.get("MN_MMAP_BIG") == "1":
+            # commit-starved host (winerror 1455: the pagefile cannot grow):
+            # copy-on-write file mapping -- reads are served by the shard file
+            # (zero commit charge), any write lands on a private page instead of
+            # faulting on a read-only mapping, and the file itself is never
+            # touched. Reinterpreted to the real dtype without any copy.
+            import numpy as np
+
+            flat = np.memmap(file, dtype=np.uint8, mode="c",
+                             offset=8 + header_size + start, shape=(stop - start,))
+            return (torch.from_numpy(flat).view(dtype).reshape(info["shape"]))
         with open(file, "rb") as handle:
             handle.seek(8 + header_size + start)
-            raw = bytearray(handle.read(stop - start))
-        if len(raw) != stop - start:
+            # single presized buffer + readinto: handle.read() would allocate the
+            # bytes AND then copy into a bytearray (2x transient on 2.5 GB tensors)
+            raw = bytearray(stop - start)
+            view = memoryview(raw)
+            pos = 0
+            while pos < stop - start:
+                got = handle.readinto(view[pos:pos + (1 << 29)])
+                if not got:
+                    break
+                pos += got
+            del view
+        if pos != stop - start:
             raise RuntimeError(
-                f"{name}: short read, {len(raw)} of {stop - start} bytes"
+                f"{name}: short read, {pos} of {stop - start} bytes"
             )
         return torch.frombuffer(raw, dtype=dtype).reshape(info["shape"])
 
@@ -458,15 +479,86 @@ def _shallow_config(config):
         # _build_probe re-checks that nothing actually depends on it.
         if getattr(holder, "vocab_size", 0) > PROBE_VOCAB:
             holder.vocab_size = PROBE_VOCAB
+    # A multimodal config's vision tower is dead weight on a REAL-device probe
+    # (qwen3_5: 27 layers x 1152 ≈ 1.6 GB for buffers nobody reads), and no
+    # computed value the probe exists for depends on tower depth -- same
+    # argument as the text depth cut above.
+    vision = getattr(probe, "vision_config", None)
+    if vision is not None and getattr(vision, "depth", None):
+        vision.depth = 2
     return probe
 
 
-def _build_probe(config, device):
-    """One-layer, small-vocab real instance: the single source of every computed value."""
+def _build_skeleton(config):
+    """Meta-device skeleton, preferring the checkpoint's own declared class.
+
+    ``AutoModelForCausalLM`` maps some multimodal configs to the TEXT-ONLY class
+    (qwen3_5: ``Qwen3_5Config`` -> ``Qwen3_5ForCausalLM``), which moves the
+    decoder to ``model`` while the checkpoint still keys it as
+    ``model.language_model.*`` -- ``_materialize`` would then fail on the very
+    first tensor. Building the class named in ``config.architectures`` keeps the
+    module tree and the checkpoint prefix identical (the same invariant the
+    gemma-4 VLM already satisfied through its own auto-mapping). The text-only
+    class stays the fallback: it is what every text-only donor builds anyway.
+    """
+    from transformers import AutoModelForCausalLM, PreTrainedModel
+
+    arch = (getattr(config, "architectures", None) or [None])[0]
+    if arch:
+        import transformers
+
+        cls = getattr(transformers, arch, None)
+        if isinstance(cls, type) and issubclass(cls, PreTrainedModel):
+            try:
+                return cls(config)
+            except TypeError:
+                pass                   # class wants a different constructor
+    return AutoModelForCausalLM.from_config(config)
+
+
+def _skeleton_for_checkpoint(src, config):
+    """Meta skeleton whose decoder prefix matches the checkpoint -- or raise.
+
+    ``AutoModelForCausalLM`` maps some multimodal configs to the text-only
+    class (qwen3_5: decoder at ``model`` while the checkpoint keys it
+    ``model.language_model.*``), which would make ``_materialize`` fail on the
+    first tensor. The checkpoint's declared architectures are tried first, the
+    multimodal auto-class second; the embed-key probe against the real
+    checkpoint decides, and a persistent mismatch is a loud error instead of a
+    KeyError from deep inside the reader.
+    """
+    with torch.device("meta"):
+        skeleton = _build_skeleton(config)
+        inner, stack = _resolve_decoder(skeleton)
+        if not src.has(f"{stack}.embed_tokens.weight"):
+            from transformers import AutoModelForImageTextToText
+
+            skeleton = AutoModelForImageTextToText.from_config(config)
+            inner, stack = _resolve_decoder(skeleton)
+    if not src.has(f"{stack}.embed_tokens.weight"):
+        raise RuntimeError(
+            f"decoder resolved to {stack!r} but the checkpoint carries no "
+            f"{stack}.embed_tokens.weight; the skeleton class "
+            f"{type(skeleton).__name__} does not match how this checkpoint "
+            "was saved"
+        )
+    return skeleton, inner, stack
+
+
+def _build_probe(config, device, cls=None):
+    """One-layer, small-vocab real instance: the single source of every computed value.
+
+    ``cls`` builds the probe with the SAME top-level class as the conversion
+    skeleton (a VLM config probed as the text-only class names modules
+    ``model.*`` while the checkpoint and skeleton say ``model.language_model.*``
+    -- computed-buffer lookups by full path would miss).
+    """
     from transformers import AutoModelForCausalLM
 
+    shallow = _shallow_config(config)
     with torch.device(device):
-        probe = AutoModelForCausalLM.from_config(_shallow_config(config))
+        probe = (cls(shallow) if cls is not None
+                 else AutoModelForCausalLM.from_config(shallow))
     # The shrink is only safe while no computed buffer is sized by the vocabulary.
     # A buffer carrying the probe's vocab in its shape would be exactly that, and
     # would be silently wrong for the real donor -- refuse instead.
@@ -562,6 +654,8 @@ def convert_streaming(
     extra_skip=None,
     resume: bool = True,
     progress: bool = True,
+    asym_strength: float = 0.0,
+    asym_passes: int = 1,
     **solve_kw,
 ) -> StreamingReport:
     """Convert ``model_path`` block by block, writing counter state into ``out_dir``.
@@ -571,9 +665,14 @@ def convert_streaming(
     through a block at once, which is the knob that bounds peak memory together
     with the per-block Hessians.
 
-    Resume verifies donor bytes, calibration ids/batch boundaries, conversion
-    options, and every committed block's hash. Legacy manifests can be loaded
-    for inference with a warning, but cannot establish a safe resume identity.
+    ``asym_strength > 0`` enables the GPTAQ-style asymmetric objective per block
+    (H_q from the converted-prefix stream, G paired against the untouched-donor
+    stream, residual-form target w~ tempered by strength) -- the streaming mirror
+    of ``donor/asym.py``. ``asym_passes`` re-collects on the pass-1 quantized net
+    and re-solves from the original weights (pass-N states land in
+    ``out_dir_pN``, then replace ``out_dir``); later blocks' q stream always
+    replays the FROZEN pass-1 states, matching the in-memory iterated asym.
+    Dense donors only (MoE + asym raises).
     """
     from transformers import AutoConfig, AutoModelForCausalLM
     import transformers
@@ -601,7 +700,8 @@ def convert_streaming(
     extra_skip = list(extra_skip or [])
     # Bind defaults as well as supplied options so omitting a solver option is
     # equivalent to spelling out its current default.
-    solver_call = inspect.signature(solve_group_state).bind(
+    import inspect as _inspect
+    solver_call = _inspect.signature(solve_group_state).bind(
         None, None, group=group, C=C, **solve_kw)
     solver_call.apply_defaults()
     solver_options = {k: v for k, v in solver_call.arguments.items() if k not in {"w", "H"}}
@@ -611,6 +711,7 @@ def convert_streaming(
         "extra_skip": sorted(extra_skip), "solver": solver_options,
         "counter": counter_kw, "torch_version": str(torch.__version__),
         "transformers_version": transformers.__version__,
+        "asym_strength": float(asym_strength), "asym_passes": int(asym_passes),
     }
     # Reject non-JSON / non-finite knobs before producing any checkpoint files.
     canonical_json(conversion_options)
@@ -630,20 +731,19 @@ def convert_streaming(
     if vocab_size is not None and any(
             b.min().item() < 0 or b.max().item() >= vocab_size for b in id_batches):
         raise ValueError(f"calibration token ids must be within [0, {vocab_size})")
-    with torch.device("meta"):
-        skeleton = AutoModelForCausalLM.from_config(config)
-    inner, stack = _resolve_decoder(skeleton)
+    skeleton, inner, stack = _skeleton_for_checkpoint(src, config)
     blocks = inner.layers
     report.blocks_total = len(blocks)
     if previous is not None and (
             previous["blocks_total"] != report.blocks_total or previous.get("stack") != stack):
         raise ValueError("streamed resume decoder layout mismatch")
-    done = set(previous["blocks_done"] if previous is not None else [])
+    done: set[int] = set(previous["blocks_done"] if previous is not None else [])
     report.blocks_resumed = len(done)
     manifest = {
         "schema_version": MANIFEST_VERSION, "blocks_done": sorted(done),
         "blocks_total": report.blocks_total, "model_path": model_path,
         "group": group, "C": C, "kind": kind, "stack": stack,
+        "asym_strength": float(asym_strength), "asym_passes": int(asym_passes),
         "source_fingerprint": source_fingerprint,
         "calibration_fingerprint": calibration, "conversion_options": conversion_options,
         "block_files": dict(previous.get("block_files", {})) if previous else {},
@@ -653,7 +753,7 @@ def convert_streaming(
 
     # --- computed buffers come from one real one-layer probe, never from the
     # checkpoint (they are non-persistent by construction and are not in it) ---
-    probe = _build_probe(config, device)
+    probe = _build_probe(config, device, cls=type(skeleton))
     probe_inner, _ = _resolve_decoder(probe)
     computed_embed = _computed_buffers(probe_inner.embed_tokens)
     computed_block = _computed_buffers(probe_inner.layers[0])
@@ -692,144 +792,256 @@ def convert_streaming(
     del compact_weight
     inner.embed_tokens.to("meta")
 
+    # The fp stream starts IDENTICAL to the q stream (same embeddings); it only
+    # diverges once converted blocks advance the q side. Aliasing the tensors is
+    # safe: buffers are replaced, never mutated in place.
+    buffer_fp = list(buffer)
+    # Iterated-asym passes restart both streams from the embeddings; keep the
+    # initial activation tensors alive for that (references only -- the buffers
+    # themselves are rebound, never mutated).
+    buffer0 = list(buffer) if int(asym_passes) > 1 else None
+
     peak = _tensor_bytes(*buffer)
-    for index, block in enumerate(blocks):
-        if index in done:
-            # A finished block still has to RUN: block i+1 calibrates on its output,
-            # so skipping it outright would feed the next block unconverted
-            # activations and silently change the result of a resumed run.
+
+    if asym_strength > 0 and not cascade:
+        raise ValueError("asym requires cascade=True (the q stream is the cascade)")
+
+    # Iterated passes re-materialize blocks that still carry the counter modules
+    # swapped in by the previous pass (their non-persistent buffers are not in any
+    # checkpoint and _materialize must fail loudly on those) -- keep a pristine
+    # meta snapshot of the layer list to reset the tree at each pass start.
+    pristine_layers = (copy.deepcopy(inner.layers) if int(asym_passes) > 1 else None)
+
+    for pass_no in range(1, max(1, int(asym_passes)) + 1):
+        if pass_no > 1:
+            inner.layers = copy.deepcopy(pristine_layers)
+            blocks = inner.layers
+        solve_dir = out_dir if pass_no == 1 else f"{out_dir}_p{pass_no}"
+        if pass_no > 1:
+            # The q stream of every later pass replays the FROZEN pass-1 states --
+            # the streaming equivalent of in-memory iterated asym re-collecting on
+            # the fully quantized net (never on the in-progress pass-N prefix).
+            frozen = json.load(open(manifest_path, encoding="utf-8"))
+            if set(frozen.get("blocks_done", [])) != set(range(len(blocks))):
+                raise RuntimeError(
+                    f"asym pass {pass_no} requires pass 1 complete in {out_dir}")
+            os.makedirs(solve_dir, exist_ok=True)
+            solve_manifest = os.path.join(solve_dir, MANIFEST)
+            done = set()
+            if resume and os.path.exists(solve_manifest):
+                with open(solve_manifest, encoding="utf-8") as handle:
+                    pass_previous = json.load(handle)
+                done = set(_validated_blocks(pass_previous, solve_dir,
+                                             require_verified=True))
+            buffer = list(buffer0)
+            buffer_fp = list(buffer0)
+        save_manifest_path = os.path.join(solve_dir, MANIFEST)
+        # Pass-local manifest: same verified provenance as pass 1, but its own
+        # committed-block set and integrity records (each pass writes its own dir).
+        pass_manifest = dict(manifest)
+        pass_manifest["asym_pass"] = pass_no
+        pass_manifest["blocks_done"] = sorted(done)
+        pass_manifest["block_files"] = {
+            str(i): rec for i, rec in manifest.get("block_files", {}).items()
+        } if pass_no == 1 else {}
+
+        for index, block in enumerate(blocks):
+            if index in done:
+                # A finished block still has to RUN: block i+1 calibrates on its output,
+                # so skipping it outright would feed the next block unconverted
+                # activations and silently change the result of a resumed run.
+                _materialize(block, f"{stack}.layers.{index}", src, device, dtype,
+                             computed=computed_block)
+                if asym_strength > 0:
+                    buffer_fp = _run_block(block, buffer_fp, rotary, device, micro_batch,
+                                           collect=True)
+                # Which stream the next block must calibrate on:
+                #   cascade=True  -> the CONVERTED block (error compounds into the stats)
+                #   cascade=False -> the original fp block, exactly as the in-memory path
+                #   pass_no > 1   -> always the FROZEN pass-1 converted counters
+                # Reloading unconditionally would silently turn a cascade=False resume
+                # into a cascaded run and change the converted state.
+                if cascade or pass_no > 1:
+                    _reload_block_counters(block, index, out_dir,
+                                           kind=kind, group=group, C=C,
+                                           counter_kw=counter_kw, stack=stack)
+                buffer = _run_block(block, buffer, rotary, device, micro_batch,
+                                    collect=True)
+                _release_block(block)
+                gc.collect()
+                if progress:
+                    print(f"[stream] block {index}: already converted, replayed "
+                          f"{'converted' if (cascade or pass_no > 1) else 'fp'} block",
+                          flush=True)
+                continue
+
             _materialize(block, f"{stack}.layers.{index}", src, device, dtype,
                          computed=computed_block)
-            # Classic calibration must replay the original fp block, whereas
-            # cascade calibration needs the saved converted one.
-            if cascade:
-                _reload_block_counters(block, index, out_dir, kind=kind, group=group, C=C,
-                                       counter_kw=counter_kw, stack=stack)
-            buffer = _run_block(block, buffer, rotary, device, micro_batch, collect=True)
-            block.to("meta")
+            stacked = _stacked_moe_targets(block)
+            legacy = _legacy_expert_targets(block)
+            # keep the fail-loudly property of the in-memory path: a MoE layout this
+            # driver cannot convert must raise, never silently convert attention only.
+            _assert_no_unhandled_moe(block, stacked, legacy)
+            if asym_strength > 0 and (stacked or legacy):
+                raise NotImplementedError(
+                    "streaming asym supports dense donors only (MoE pairing needs "
+                    "teacher-forced routing; see donor/asym.py)")
+            targets = _block_targets(block, extra_skip or [])
+
+            # --- statistics for this block's targets ---
+            if asym_strength > 0:
+                # (H_q, G) from the batch-synchronized two-stream pass; the fp
+                # stream advances here while the fp weights are still resident.
+                stats, buffer_fp = _collect_asym_block(
+                    block, buffer, buffer_fp, rotary, device, micro_batch, targets)
+                hessians = {path: pair[0] for path, pair in stats.items()}
+                grads = {path: pair[1] for path, pair in stats.items()}
+                fp_out = None
+                peak = max(peak, _tensor_bytes(*buffer, *buffer_fp,
+                                               *hessians.values(), *grads.values(),
+                                               *[p for p in block.parameters()]))
+            else:
+                hessians: dict[str, torch.Tensor] = {}
+                grads = {}
+                hooks = []
+
+                def make_hook(path, in_features):
+                    def hook(_mod, inputs):
+                        x = inputs[0].detach().reshape(-1, in_features).to(torch.float32)
+                        h = hessians.get(path)
+                        if h is None:
+                            h = torch.zeros(in_features, in_features,
+                                            dtype=torch.float32, device=x.device)
+                            hessians[path] = h
+                        h.addmm_(x.t(), x)
+                    return hook
+
+                for path in targets:
+                    lin = block.get_submodule(path)
+                    hooks.append(lin.register_forward_pre_hook(
+                        make_hook(path, lin.in_features)))
+                for target in stacked:
+                    hooks.append(target.module.register_forward_pre_hook(
+                        _make_stacked_moe_hook(target, hessians)))
+                fp_out = _run_block(block, buffer, rotary, device, micro_batch,
+                                    collect=not cascade)
+                for hook in hooks:
+                    hook.remove()
+                peak = max(peak, _tensor_bytes(*buffer, *hessians.values(),
+                                               *[p for p in block.parameters()]))
+
+            # --- solve + swap, one target at a time ---
+            from .asym import asym_target_weights
+            state_out: dict[str, torch.Tensor] = {}
+            for path in targets:
+                lin = block.get_submodule(path)
+                H = hessians.get(path)
+                if H is None:                      # never called (dead branch): data-free solve
+                    H = torch.eye(lin.in_features, dtype=torch.float32,
+                                  device=lin.weight.device)
+                    w_target = lin.weight.data.float()
+                elif asym_strength > 0:
+                    # Residual-form cascade correction, tempered by strength; the
+                    # fp weights here ARE w0 (streaming never mutates them).
+                    w_target = asym_target_weights(
+                        lin.weight.data.float(), H, grads[path],
+                        strength=asym_strength)
+                else:
+                    w_target = lin.weight.data.float()
+                state, _ = solve_group_state(w_target, H, group=group, C=C,
+                                             **solve_kw)
+                counter = _group_counter_from_state(
+                    state, in_features=lin.in_features, out_features=lin.out_features,
+                    group=group, C=C, kind=kind, counter_kw=counter_kw,
+                )
+                parent, child = _parent_and_name(block, path)
+                bias = getattr(lin, "bias", None)
+                if bias is not None:
+                    counter = CounterLinearWithBias(counter, bias.detach().clone())
+                setattr(parent, child, counter.to(device))
+                report.coeffs += lin.in_features * lin.out_features
+                report.targets.append(f"{stack}.layers.{index}.{path}")
+                for key, value in counter.state_dict().items():
+                    state_out[f"{stack}.layers.{index}.{path}.{key}"] = value.cpu()
+                hessians.pop(path, None)
+                grads.pop(path, None)
+
+            # --- stacked MoE experts: solve each slice, then swap through ptq's builder ---
+            if stacked:
+                moe_states: dict[str, list[tuple]] = {}
+                moe_report = SwapReport()
+                for target in stacked:
+                    per_expert = []
+                    for expert in range(target.num_experts):
+                        slices = []
+                        for path, weight in (
+                            (target.gate_up_path(expert), target.module.gate_up_proj[expert]),
+                            (target.down_path(expert), target.module.down_proj[expert]),
+                        ):
+                            H = hessians.get(path)
+                            if H is None:      # expert saw no tokens: data-free solve
+                                H = torch.eye(weight.shape[1], dtype=torch.float32,
+                                              device=weight.device)
+                            state, _ = solve_group_state(weight.data.float(), H,
+                                                         group=group, C=C, **solve_kw)
+                            slices.append(state)
+                            hessians.pop(path, None)
+                        per_expert.append(tuple(slices))
+                        report.coeffs += (target.module.gate_up_proj[expert].numel()
+                                          + target.module.down_proj[expert].numel())
+                        report.targets.append(
+                            f"{stack}.layers.{index}.{target.expert_path(expert)}")
+                    moe_states[target.path] = per_expert
+                _swap_stacked_moe(block, stacked, moe_states, moe_report, is_group=True,
+                                  kind=kind, group=group, C=C, counter_kw=counter_kw)
+                for key, value in block.state_dict().items():
+                    if "experts" in key:
+                        state_out[f"{stack}.layers.{index}.{key}"] = value.cpu()
+
+            filename = f"block_{index:04d}.pt"
+            block_path = os.path.join(solve_dir, filename)
+            atomic_torch_save(block_path, state_out)
+
+            # --- next block's q activations ---
+            # cascade: advance through the CONVERTED block so block i+1 calibrates
+            # on quantized outputs. Pass 1: the just-swapped counters ARE the frozen
+            # states. Later passes: reload the FROZEN pass-1 counters -- pass N's
+            # q stream must replay the pass-1 net, not its own in-progress output
+            # (in-memory iterated-asym semantics).
+            if pass_no > 1:
+                _reload_block_counters(block, index, out_dir, kind=kind, group=group,
+                                       C=C, counter_kw=counter_kw, stack=stack)
+            buffer = (_run_block(block, buffer, rotary, device, micro_batch, collect=True)
+                      if cascade else fp_out)
+
+            done.add(index)
+            pass_manifest["blocks_done"] = sorted(done)
+            pass_manifest["block_files"][str(index)] = {
+                "file": filename, **file_fingerprint(block_path)}
+            atomic_write_json(save_manifest_path, pass_manifest)
+            if pass_no == 1:
+                manifest = pass_manifest
+            report.blocks_converted += 1
+
+            _release_block(block)
             gc.collect()
             if progress:
-                print(f"[stream] block {index}: already converted, replayed "
-                      f"{'converted' if cascade else 'fp'} block",
-                      flush=True)
-            continue
+                print(f"[stream] pass {pass_no} block {index}: {len(targets)} targets, "
+                      f"peak {peak / 2**30:.2f} GiB", flush=True)
 
-        _materialize(block, f"{stack}.layers.{index}", src, device, dtype,
-                     computed=computed_block)
-        stacked = _stacked_moe_targets(block)
-        legacy = _legacy_expert_targets(block)
-        # keep the fail-loudly property of the in-memory path: a MoE layout this
-        # driver cannot convert must raise, never silently convert attention only.
-        _assert_no_unhandled_moe(block, stacked, legacy)
-        targets = _block_targets(block, extra_skip or [])
+    # --- endgame: the LAST pass's states are the artifact; swap them into
+    # out_dir and drop the superseded intermediate dirs. ---
+    final_pass = max(1, int(asym_passes))
+    if final_pass > 1:
+        import shutil
 
-        # --- pass 1: Hessians for this block's targets ---
-        hessians: dict[str, torch.Tensor] = {}
-        hooks = []
-
-        def make_hook(path, in_features):
-            def hook(_mod, inputs):
-                x = inputs[0].detach().reshape(-1, in_features).to(torch.float32)
-                h = hessians.get(path)
-                if h is None:
-                    h = torch.zeros(in_features, in_features, dtype=torch.float32,
-                                    device=x.device)
-                    hessians[path] = h
-                h.addmm_(x.t(), x)
-            return hook
-
-        for path in targets:
-            lin = block.get_submodule(path)
-            hooks.append(lin.register_forward_pre_hook(make_hook(path, lin.in_features)))
-        for target in stacked:
-            hooks.append(target.module.register_forward_pre_hook(
-                _make_stacked_moe_hook(target, hessians)))
-        fp_out = _run_block(block, buffer, rotary, device, micro_batch,
-                            collect=not cascade)
-        for hook in hooks:
-            hook.remove()
-
-        peak = max(peak, _tensor_bytes(*buffer, *hessians.values(),
-                                       *[p for p in block.parameters()]))
-
-        # --- solve + swap, one target at a time ---
-        state_out: dict[str, torch.Tensor] = {}
-        for path in targets:
-            lin = block.get_submodule(path)
-            H = hessians.get(path)
-            if H is None:                      # never called (dead branch): data-free solve
-                H = torch.eye(lin.in_features, dtype=torch.float32, device=lin.weight.device)
-            state, _ = solve_group_state(lin.weight.data.float(), H, group=group, C=C,
-                                         **solve_kw)
-            counter = _group_counter_from_state(
-                state, in_features=lin.in_features, out_features=lin.out_features,
-                group=group, C=C, kind=kind, counter_kw=counter_kw,
-            )
-            parent, child = _parent_and_name(block, path)
-            bias = getattr(lin, "bias", None)
-            if bias is not None:
-                counter = CounterLinearWithBias(counter, bias.detach().clone())
-            setattr(parent, child, counter.to(device))
-            report.coeffs += lin.in_features * lin.out_features
-            report.targets.append(f"{stack}.layers.{index}.{path}")
-            for key, value in counter.state_dict().items():
-                state_out[f"{stack}.layers.{index}.{path}.{key}"] = value.cpu()
-            hessians.pop(path, None)
-
-        # --- stacked MoE experts: solve each slice, then swap through ptq's builder ---
-        if stacked:
-            moe_states: dict[str, list[tuple]] = {}
-            moe_report = SwapReport()
-            for target in stacked:
-                per_expert = []
-                for expert in range(target.num_experts):
-                    slices = []
-                    for path, weight in (
-                        (target.gate_up_path(expert), target.module.gate_up_proj[expert]),
-                        (target.down_path(expert), target.module.down_proj[expert]),
-                    ):
-                        H = hessians.get(path)
-                        if H is None:      # expert saw no tokens: data-free solve
-                            H = torch.eye(weight.shape[1], dtype=torch.float32,
-                                          device=weight.device)
-                        state, _ = solve_group_state(weight.data.float(), H,
-                                                     group=group, C=C, **solve_kw)
-                        slices.append(state)
-                        hessians.pop(path, None)
-                    per_expert.append(tuple(slices))
-                    report.coeffs += (target.module.gate_up_proj[expert].numel()
-                                      + target.module.down_proj[expert].numel())
-                    report.targets.append(
-                        f"{stack}.layers.{index}.{target.expert_path(expert)}")
-                moe_states[target.path] = per_expert
-            _swap_stacked_moe(block, stacked, moe_states, moe_report, is_group=True,
-                              kind=kind, group=group, C=C, counter_kw=counter_kw)
-            for key, value in block.state_dict().items():
-                if "experts" in key:
-                    state_out[f"{stack}.layers.{index}.{key}"] = value.cpu()
-
-        # --- next block's activations ---
-        # cascade: re-run the CONVERTED block so block i+1 calibrates on quantized
-        # outputs (error compounds into the statistics, like the asym cascade).
-        # classic: reuse the fp outputs captured during the Hessian pass -- same
-        # semantics as the in-memory path, and one pass cheaper.
-        buffer = (_run_block(block, buffer, rotary, device, micro_batch, collect=True)
-                  if cascade else fp_out)
-
-        filename = f"block_{index:04d}.pt"
-        block_path = os.path.join(out_dir, filename)
-        atomic_torch_save(block_path, state_out)
-        manifest["block_files"][str(index)] = {"file": filename, **file_fingerprint(block_path)}
-        done.add(index)
-        manifest["blocks_done"] = sorted(done)
-        atomic_write_json(manifest_path, manifest)
-        report.blocks_converted += 1
-
-        block.to("meta")
-        gc.collect()
-        if progress:
-            print(f"[stream] block {index}: {len(targets)} targets, "
-                  f"peak {peak / 2**30:.2f} GiB", flush=True)
+        keep = f"{out_dir}_p{final_pass}"
+        frozen_dir = f"{out_dir}_final_frozen"
+        os.rename(out_dir, frozen_dir)
+        os.rename(keep, out_dir)
+        shutil.rmtree(frozen_dir, ignore_errors=True)
+        for p in range(2, final_pass):
+            shutil.rmtree(f"{out_dir}_p{p}", ignore_errors=True)
 
     src.close()
     report.peak_bytes = peak
@@ -863,13 +1075,32 @@ def _make_stacked_moe_hook(target, hessians: dict):
     return hook
 
 
+def _release_block(block) -> None:
+    """Move a finished block to meta AND drop its private tensor attributes.
+
+    ``Module.to('meta')`` moves registered params/buffers only; the packed
+    counter layer caches salient geometry in PLAIN attributes
+    (``_salient_perm_flat``, ``_salient_sparse_cache``), which stay resident
+    block after block on a deep run (measured ~0.7 GiB commit growth per block
+    on the 27B: these caches + heap churn). A block is never re-run after this
+    point -- resume rebuilds it from disk, and the layer's load post-hook
+    re-derives the salient runtime on reload.
+    """
+    block.to("meta")
+    for module in block.modules():
+        for name, value in list(vars(module).items()):
+            if isinstance(value, torch.Tensor):
+                setattr(module, name, None)
+
+
 def _reload_block_counters(block, index: int, out_dir: str, *, kind, group, C,
                            counter_kw, stack: str = "model") -> None:
     """Rebuild an already-converted block's counter layers from its saved file."""
     from ..recovery.runtime import restore_counter_structure
 
     prefix = f"{stack}.layers.{index}."
-    saved = _load_block_state(os.path.join(out_dir, f"block_{index:04d}.pt"), index, stack)
+    saved = _load_block_state(os.path.join(out_dir, f"block_{index:04d}.pt"),
+                              index, stack)
     stripped = {k[len(prefix):]: v for k, v in saved.items() if k.startswith(prefix)}
     restore_counter_structure(block, stripped, kind=kind, group=group, C=C, **counter_kw)
     missing, unexpected = block.load_state_dict(stripped, strict=False)
@@ -964,6 +1195,89 @@ def _block_kwargs(block) -> dict:
     return {"shared_kv_states": {}} if "shared_kv_states" in params else {}
 
 
+def _collect_asym_block(block, buffer_q, buffer_fp, rotary, device, micro_batch,
+                        targets):
+    """Batch-synchronized (H_q, G) collection for one block's targets + the
+    advanced fp buffer -- the streaming mirror of ``asym.collect_asym_stats``.
+
+    Ordering is the reference's: each micro-chunk runs the FP piece FIRST (its
+    target inputs are captured), then the Q piece through the same fp block
+    consumes the pairing, accumulating H_q += X_q^T X_q and G += X_q^T X_fp.
+    The q stream here enters from the CONVERTED prefix (buffer_q), exactly the
+    two-tower semantics; the fp stream (buffer_fp) is the untouched-donor
+    activations, advanced for the next block while its fp weights are still
+    resident -- the fp tower never needs to exist as a model.
+    """
+    rotary_kw = _rotary_kwargs(rotary, block)
+    block_kw = _block_kwargs(block)
+    stats: dict[str, list[torch.Tensor]] = {}
+    cap: dict[str, torch.Tensor] = {}
+    mode = {"q": False}
+    hooks = []
+
+    def fp_hook(path, fin):
+        def hook(_m, inputs):
+            if mode["q"]:
+                return
+            cap[path] = inputs[0].detach().reshape(-1, fin).to(torch.float32)
+        return hook
+
+    def q_hook(path, fin):
+        def hook(_m, inputs):
+            if not mode["q"]:
+                return
+            xq = inputs[0].detach().reshape(-1, fin).to(torch.float32)
+            xf = cap.pop(path)
+            if xf.shape != xq.shape:
+                raise RuntimeError(
+                    f"fp/q stream shape mismatch at {path}: {tuple(xf.shape)} "
+                    f"vs {tuple(xq.shape)}")
+            pair = stats.get(path)
+            if pair is None:
+                pair = [torch.zeros(fin, fin, dtype=torch.float32, device=xq.device),
+                        torch.zeros(fin, fin, dtype=torch.float32, device=xq.device)]
+                stats[path] = pair
+            pair[0].addmm_(xq.t(), xq)
+            pair[1].addmm_(xq.t(), xf)
+        return hook
+
+    for path in targets:
+        lin = block.get_submodule(path)
+        hooks.append(lin.register_forward_pre_hook(fp_hook(path, lin.in_features)))
+        hooks.append(lin.register_forward_pre_hook(q_hook(path, lin.in_features)))
+    out_fp: list[torch.Tensor] = []
+    try:
+        for bq, bf in zip(buffer_q, buffer_fp):
+            q_pieces = (bq.split(micro_batch, dim=0) if micro_batch and micro_batch > 0
+                        else (bq,))
+            f_pieces = (bf.split(micro_batch, dim=0) if micro_batch and micro_batch > 0
+                        else (bf,))
+            produced = []
+            for fpiece, qpiece in zip(f_pieces, q_pieces):
+                hidden = fpiece.to(device)
+                positions = torch.arange(hidden.shape[1], device=device).unsqueeze(0)
+                pos_emb = rotary(hidden, positions, **rotary_kw)
+                result = block(hidden, position_embeddings=pos_emb, **block_kw)
+                result = result[0] if isinstance(result, tuple) else result
+                produced.append(result.to("cpu"))
+                del hidden, result
+
+                mode["q"] = True
+                hidden = qpiece.to(device)
+                positions = torch.arange(hidden.shape[1], device=device).unsqueeze(0)
+                pos_emb = rotary(hidden, positions, **rotary_kw)
+                block(hidden, position_embeddings=pos_emb, **block_kw)
+                mode["q"] = False
+                del hidden
+            out_fp.append(torch.cat(produced, dim=0) if len(produced) > 1 else produced[0])
+    finally:
+        for hook in hooks:
+            hook.remove()
+    if cap:
+        raise RuntimeError(f"unconsumed fp captures: {sorted(cap)}")
+    return stats, out_fp
+
+
 def _run_block(block, buffer, rotary, device, micro_batch, collect):
     """Push the activation buffer through one block; optionally keep the output.
 
@@ -1017,7 +1331,8 @@ def load_streamed_state(out_dir: str, *, require_complete: bool = True
                       "provenance or block hashes; regenerate it before recovery/resume.",
                       UserWarning, stacklevel=2)
     merged: dict[str, torch.Tensor] = {}
+    stack = manifest.get("stack", "model")
     for index in done:
         merged.update(_load_block_state(os.path.join(out_dir, f"block_{index:04d}.pt"),
-                                        index, manifest.get("stack", "model")))
+                                        index, stack))
     return merged

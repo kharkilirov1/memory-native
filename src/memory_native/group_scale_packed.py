@@ -101,6 +101,7 @@ class PackedGroupScaleCounterLinear(nn.Module):
         decimation: int = 1,
         init_gain: float = 1.0,
         flip_sample_size: int = 4096,
+        state: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
         del init_gain  # PTQ imports the state; kept for factory compatibility.
@@ -143,8 +144,38 @@ class PackedGroupScaleCounterLinear(nn.Module):
         self._outstanding_forward = False
         self._sr_step = 0
 
-        zeros = torch.zeros((self.out_features, self.in_features), dtype=torch.int16)
-        self.register_buffer("state", pack_codes(encode_state(zeros, zeros, self.C)))
+        # Zero state packs to a CONSTANT 3-byte pattern (encode_state is
+        # elementwise, so a zero [out, in] yields one repeated code; packing 4
+        # identical codes yields one repeated byte triple). Materializing the
+        # dense [out, in] zeros + int32 pack intermediates cost ~0.9 GiB of
+        # transients per wide layer at RESTORE time (317 layers over a 20 GiB
+        # state tripped an allocator access violation) -- for a buffer whose
+        # every byte is known in advance. Bit-exact with the dense path.
+        #
+        # ``state=`` goes further: a restore that already HOLDS the solver's
+        # packed tensor registers it BY REFERENCE -- no zero fill at all, and
+        # no double residency of the 20+ GiB state dict while modules are
+        # being built (construct-then-load_state_dict would copy it; a zero
+        # fill here would add a second full-size allocation on top of the
+        # dict, which is what killed the 27B restore).
+        if self.in_features % 4:
+            raise ValueError(
+                f"in_features={self.in_features} not divisible by 4: 6-bit "
+                "packing needs 4 codes per 3 bytes"
+            )
+        if state is not None:
+            if tuple(state.shape) != (self.out_features, (self.in_features // 4) * 3):
+                raise ValueError(
+                    f"preset state shape {tuple(state.shape)} != packed "
+                    f"{(self.out_features, (self.in_features // 4) * 3)}"
+                )
+            self.register_buffer("state", state)
+        else:
+            _zero = torch.zeros(1, 4, dtype=torch.int16)
+            _pattern = pack_codes(encode_state(_zero, _zero, self.C))  # [1, 3]
+            self.register_buffer(
+                "state", _pattern.repeat(self.out_features, self.in_features // 4)
+            )
         self.register_buffer(
             "scale",
             torch.full((self.out_features, self.n_groups), 1e-2, dtype=torch.float32),

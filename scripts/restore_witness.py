@@ -55,6 +55,7 @@ PROMPT = os.environ.get("PROMPT", "The capital of France is")
 DTYPE = {"fp32": torch.float32, "bf16": torch.bfloat16}[os.environ.get("DTYPE", "fp32")]
 CACHE = os.environ.get("CACHE", "")
 LOGIT_CHUNK = int(os.environ.get("LOGIT_CHUNK", "128"))
+DEVICE = os.environ.get("DEVICE", "cpu")
 
 
 def rss_gib() -> float:
@@ -93,21 +94,19 @@ def eval_ids(tokenizer) -> torch.Tensor:
 def phase1_fp_reference(windows: torch.Tensor, cache_path: str) -> None:
     from memory_native.donor.streaming import (
         _WeightSource, _build_probe, _computed_buffers, _materialize,
-        _resolve_decoder, _run_block,
+        _resolve_decoder, _run_block, _skeleton_for_checkpoint,
     )
-    from transformers import AutoConfig, AutoModelForCausalLM
+    from transformers import AutoConfig
 
     log("phase 1: fp reference, block-streamed from shards")
     src = _WeightSource(MODEL)
     config = AutoConfig.from_pretrained(MODEL)
-    with torch.device("meta"):
-        skeleton = AutoModelForCausalLM.from_config(config)
-    inner, stack = _resolve_decoder(skeleton)
-    probe = _build_probe(config, "cpu")
+    skeleton, inner, stack = _skeleton_for_checkpoint(src, config)
+    probe = _build_probe(config, "cpu", cls=type(skeleton))
     probe_inner, _ = _resolve_decoder(probe)
     computed_embed = _computed_buffers(probe_inner.embed_tokens)
     computed_block = _computed_buffers(probe_inner.layers[0])
-    rotary = probe_inner.rotary_emb
+    rotary = probe_inner.rotary_emb.to(DEVICE) if DEVICE != "cpu" else probe_inner.rotary_emb
 
     _materialize(inner.embed_tokens, f"{stack}.embed_tokens", src, "cpu", DTYPE,
                  computed=computed_embed)
@@ -117,9 +116,9 @@ def phase1_fp_reference(windows: torch.Tensor, cache_path: str) -> None:
     n_blocks = len(inner.layers)
     for i in range(n_blocks):
         block = inner.layers[i]
-        _materialize(block, f"{stack}.layers.{i}", src, "cpu", DTYPE,
+        _materialize(block, f"{stack}.layers.{i}", src, DEVICE, DTYPE,
                      computed=computed_block)
-        buffer = _run_block(block, buffer, rotary, "cpu", 1, collect=True)
+        buffer = _run_block(block, buffer, rotary, DEVICE, 1, collect=True)
         block.to("meta")
         gc.collect()
         if i % 4 == 0 or i == n_blocks - 1:
@@ -169,10 +168,11 @@ def phase1_fp_reference(windows: torch.Tensor, cache_path: str) -> None:
 @torch.no_grad()
 def phase2_restore() -> nn.Module:
     from memory_native.donor.streaming import (
-        _WeightSource, _build_probe, _resolve_decoder, load_streamed_state,
+        _WeightSource, _build_probe, _resolve_decoder, _skeleton_for_checkpoint,
+        load_streamed_state,
     )
     from memory_native.recovery.runtime import restore_counter_structure
-    from transformers import AutoConfig, AutoModelForCausalLM
+    from transformers import AutoConfig
 
     log("phase 2: restore counter model (donor never fully resident)")
     if STATE_DIR:
@@ -183,9 +183,46 @@ def phase2_restore() -> nn.Module:
     log(f"  state loaded: {len(state)} tensors, "
         f"{sum(t.numel() * t.element_size() for t in state.values()) / 2**30:.2f} GiB")
 
+    # Slim KD checkpoint (best.pt) overlay: it keeps only the tensors the KD run
+    # touched (scales + trainable fp); salient/perm/v and frozen fp must come from
+    # the base streamed state. mmap keeps the overlay out of RAM (base state is
+    # already ~20 GiB resident; a plain load of both would need ~38).
+    overlay = os.environ.get("CKPT_OVERLAY", "")
+    if overlay:
+        payload = torch.load(overlay, map_location="cpu", weights_only=True, mmap=True)
+        ostate = payload["student"] if "student" in payload else payload
+        ostate = dict(ostate)
+
+        def _remap(mapping: dict) -> dict:
+            return {mapping.get(k, k): v for k, v in ostate.items()}
+
+        explicit = os.environ.get("CKPT_KEY_MAP", "")
+        mapping = {}
+        for pair in filter(None, explicit.split(",")):
+            old, new = pair.split("->", 1)
+            mapping = {k: new + k[len(old):] for k in ostate if k.startswith(old)}
+        ostate = _remap(mapping)
+        n_overlap = sum(1 for k in ostate if k in state)
+        if n_overlap == 0:
+            # auto: the slim ckpt may use the text-only stack prefix (model.*) while
+            # the donor-VLM skeleton names the decoder model.language_model.*
+            if any(k.startswith("model.language_model.") for k in ostate):
+                pass  # already aligned; real mismatch, let the overlap check fail
+            else:
+                ostate = _remap({k: "model.language_model." + k for k in ostate})
+                n_overlap = sum(1 for k in ostate if k in state)
+        if n_overlap != len(ostate):
+            raise SystemExit(
+                f"overlay/base mismatch: {n_overlap}/{len(ostate)} overlay keys found in base state")
+        for k, v in ostate.items():
+            state[k] = v
+        log(f"  overlay {os.path.basename(overlay)} (step={payload.get('step')}): "
+            f"replaced {n_overlap} tensors")
+
     config = AutoConfig.from_pretrained(MODEL)
-    with torch.device("meta"):
-        model = AutoModelForCausalLM.from_config(config)
+    src = _WeightSource(MODEL)
+    model, inner, stack = _skeleton_for_checkpoint(src, config)
+    probe = _build_probe(config, "cpu", cls=type(model))
     # Partially-converted donors (gemma-4 unified: vision/audio towers are NOT converted
     # by the decoder-only streaming pass): any linear the state does not cover stays fp
     # and is materialized straight from the shards below. Full paths as skip tokens —
@@ -204,25 +241,54 @@ def phase2_restore() -> nn.Module:
         extra_skip=uncovered,
     )
     log(f"  rebuilt {len(report.swapped)} counter linears ({report.coeffs:,} coeffs)")
-    missing, unexpected = model.load_state_dict(state, strict=False)
-    log(f"  load_state_dict: missing={len(missing)} unexpected={len(unexpected)}")
-    if unexpected:
-        raise SystemExit(f"unexpected keys in state (first 5): {unexpected[:5]}")
+
+    # Memory-lean load: load_state_dict COPIES every buffer, so the 20+ GiB
+    # state dict and the modules it feeds would be resident twice (the 27B
+    # restore dies on that arithmetic). The counter tensors in `state` are
+    # exactly what the fresh modules' buffers must hold, so swap them in BY
+    # REFERENCE; the salient runtime caches are re-derived per layer (the
+    # load_state_dict post-hook normally does this on the copy path).
+    n_assign, unexpected_keys = 0, []
+    persistent = set(model.state_dict())  # excludes non-persistent runtime buffers
+    assigned = set()
+    for name, tensor in list(state.items()):
+        parent_path, _, attr = name.rpartition(".")
+        try:
+            module = model.get_submodule(parent_path) if parent_path else model
+        except AttributeError:
+            unexpected_keys.append(name)
+            continue
+        if not isinstance(getattr(module, attr, None), torch.Tensor):
+            unexpected_keys.append(name)
+            continue
+        setattr(module, attr, tensor)
+        assigned.add(name)
+        n_assign += 1
+    for module in model.modules():
+        rebuild = getattr(module, "_rebuild_salient_runtime", None)
+        if rebuild is not None:
+            rebuild()
+    missing_buf = sorted(persistent - assigned)
+    log(f"  reference-loaded {n_assign} tensors; missing={len(missing_buf)} "
+        f"unexpected={len(unexpected_keys)}")
+    if unexpected_keys:
+        raise SystemExit(f"unexpected keys in state (first 5): {unexpected_keys[:5]}")
 
     # Materialize every remaining meta tensor straight from the donor shards; anything the
     # shards do not carry is a COMPUTED tensor and comes from the config probe by full
     # path (depth was the only dimension the probe cut, so `layers.N` maps to `layers.0`).
     import re
 
-    src = _WeightSource(MODEL)
-    probe = _build_probe(config, "cpu")
+    gc.collect()
     probe_tensors = {n: t for n, t in list(probe.named_buffers()) + list(probe.named_parameters())}
-    _, stack = _resolve_decoder(model)
 
     n_param, n_buf, n_computed, n_tied = 0, 0, 0, 0
     for name, tensor in list(model.named_parameters()) + list(model.named_buffers()):
         if not tensor.is_meta:
             continue
+        if tensor.is_floating_point() and tensor.numel() * tensor.element_size() > (1 << 29):
+            log(f"    materializing {name} [{list(tensor.shape)}] "
+                f"{tensor.numel() * tensor.element_size() / 2**30:.2f} GiB")
         leaf = name.rsplit(".", 1)[-1]
         parent = model.get_submodule(name.rsplit(".", 1)[0]) if "." in name else model
         if src.has(name):
@@ -257,13 +323,17 @@ def phase2_restore() -> nn.Module:
     log(f"  materialized from shards: {n_param} params, {n_buf} buffers "
         f"({n_computed} computed, {n_tied} tied)")
     model.eval()
+    if DEVICE != "cpu":
+        model.to(DEVICE)
+        log(f"  model moved to {DEVICE}")
     return model
 
 
 @torch.no_grad()
 def phase3_witness(model: nn.Module, tokenizer, cache_path: str) -> None:
     log("phase 3: finiteness + top-5 + PPL/KL vs fp cache")
-    ids = tokenizer(PROMPT, return_tensors="pt").input_ids
+    dev = next(model.parameters()).device
+    ids = tokenizer(PROMPT, return_tensors="pt").input_ids.to(dev)
     out = model(ids).logits
     if not torch.isfinite(out).all():
         raise SystemExit("NON-FINITE logits on the probe prompt")
@@ -281,17 +351,17 @@ def phase3_witness(model: nn.Module, tokenizer, cache_path: str) -> None:
     kl_sum, kl_n = 0.0, 0
     kl_pos = {int(p): j for j, p in enumerate(kl_index)}
     for w in range(windows.shape[0]):
-        logits = model(windows[w:w + 1]).logits[0]
+        logits = model(windows[w:w + 1].to(dev)).logits[0]
         logp = F.log_softmax(logits.float(), dim=-1)
         base = w * seqlen
-        tgt = windows[w]
+        tgt = windows[w].to(dev)
         nll[base:base + seqlen - 1] = -logp[:-1].gather(
-            1, tgt[1:].unsqueeze(1)).squeeze(1)
+            1, tgt[1:].unsqueeze(1)).squeeze(1).cpu()
         nll[base + seqlen - 1] = float("nan")
         for r in range(seqlen):
             j = kl_pos.get(base + r)
             if j is not None:
-                p_fp = F.log_softmax(fp_kl_logits[j].float(), dim=-1)
+                p_fp = F.log_softmax(fp_kl_logits[j].float().to(dev), dim=-1)
                 kl_sum += F.kl_div(logp[r], p_fp, log_target=True,
                                    reduction="sum").item()
                 kl_n += 1

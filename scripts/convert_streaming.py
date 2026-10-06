@@ -48,6 +48,8 @@ SALIENT_FIRST = float(os.environ.get("SALIENT_FIRST", "0.02"))
 SALIENT_SCOPE = os.environ.get("SALIENT_SCOPE", "layer")
 IN_SWEEP_REFIT = _env_bool("IN_SWEEP_REFIT", True)
 CASCADE = _env_bool("CASCADE", True)
+ASYM_STRENGTH = float(os.environ.get("ASYM_STRENGTH", "0"))
+ASYM_PASSES = int(os.environ.get("ASYM_PASSES", "1"))
 DEVICE = os.environ.get("DEVICE", "cuda" if torch.cuda.is_available() else "cpu")
 DTYPE = {"fp32": torch.float32, "fp16": torch.float16,
          "bf16": torch.bfloat16}[os.environ.get("DTYPE", "fp32")]
@@ -100,6 +102,7 @@ def main() -> int:
         dtype=DTYPE, device=DEVICE, micro_batch=MICRO_BATCH, cascade=CASCADE,
         resume=RESUME, grid=GRID, salient_first=SALIENT_FIRST,
         salient_scope=SALIENT_SCOPE, in_sweep_refit=IN_SWEEP_REFIT,
+        asym_strength=ASYM_STRENGTH, asym_passes=ASYM_PASSES,
     )
     state = load_streamed_state(OUT_DIR)
     # Match ".state", never "counter.state": only bias-carrying linears nest under
