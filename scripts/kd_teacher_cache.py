@@ -71,11 +71,11 @@ def main() -> None:
     from recovery_session import DomainMix
     from memory_native.donor.streaming import (
         _WeightSource, _assert_window_covers, _build_probe, _computed_buffers, _materialize,
-        _resolve_decoder, _run_block,
+        _resolve_decoder, _run_block, _skeleton_for_checkpoint,
     )
     from kd_cache_contract import SCHEMA_VERSION, data_identity, model_identity, sha256_file
     from memory_native.donor.tokenization import verify_corpus_tokenizer
-    from transformers import AutoConfig, AutoModelForCausalLM
+    from transformers import AutoConfig
 
     if not MODEL or not DATA_DIR or not OUT:
         raise ValueError("MODEL, DATA_DIR and OUT are required")
@@ -96,16 +96,14 @@ def main() -> None:
     src = _WeightSource(MODEL)
     config = AutoConfig.from_pretrained(MODEL)
     _assert_window_covers(config, [ids])
-    with torch.device("meta"):
-        skeleton = AutoModelForCausalLM.from_config(config)
+    skeleton, inner, stack = _skeleton_for_checkpoint(src, config)
     skeleton.eval()  # from_config does not give from_pretrained's eval guarantee
-    inner, stack = _resolve_decoder(skeleton)
     if NUM_BLOCKS:
         import torch.nn as nn
         if NUM_BLOCKS > len(inner.layers):
             raise ValueError("NUM_BLOCKS exceeds donor depth")
         inner.layers = nn.ModuleList(list(inner.layers)[:NUM_BLOCKS])
-    probe = _build_probe(config, "cpu")
+    probe = _build_probe(config, "cpu", cls=type(skeleton))
     probe_inner, _ = _resolve_decoder(probe)
     computed_embed = _computed_buffers(probe_inner.embed_tokens)
     computed_block = _computed_buffers(probe_inner.layers[0])

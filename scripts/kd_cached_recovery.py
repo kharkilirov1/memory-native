@@ -98,6 +98,7 @@ CKPT_TMP = os.environ.get("CKPT_TMP", "")
 EVAL_AT_START = os.environ.get("EVAL_AT_START", "1") == "1"
 MIN_IMPROVEMENT = float(os.environ.get("MIN_IMPROVEMENT", "0"))
 LOGSUMEXP_CHUNK = int(os.environ.get("LOGSUMEXP_CHUNK", "8192"))
+SAVE_BEST = os.environ.get("SAVE_BEST", "1") == "1"
 
 
 def log(msg: str) -> None:
@@ -305,10 +306,11 @@ def save_best_checkpoint(payload: dict, out_dir, staging_dir="") -> None:
 def restore_student(*, format=None, model_path=None, state_dir=None, num_blocks=None,
                     stats_scope=None, decimation=None):
     from memory_native.donor.streaming import (
-        _WeightSource, _build_probe, _resolve_decoder, load_streamed_state,
+        _WeightSource, _build_probe, _resolve_decoder, _skeleton_for_checkpoint,
+        load_streamed_state,
     )
     from memory_native.recovery.runtime import restore_counter_structure
-    from transformers import AutoConfig, AutoModelForCausalLM
+    from transformers import AutoConfig
     import re
 
     model_path = MODEL if model_path is None else model_path
@@ -317,12 +319,20 @@ def restore_student(*, format=None, model_path=None, state_dir=None, num_blocks=
     stats_scope = STATS_SCOPE if stats_scope is None else stats_scope
     decimation = DECIMATION if decimation is None else decimation
     if format is None:
-        with open(Path(state_dir) / "manifest.json", encoding="utf-8") as handle:
+        manifest_file = Path(state_dir) / "manifest.json"
+        if not manifest_file.is_file():
+            raise SystemExit(
+                f"no manifest at {manifest_file}: pass an explicit format= for a "
+                "single-file (.pt) state directory")
+        with open(manifest_file, encoding="utf-8") as handle:
             format = json.load(handle)
-    state = load_streamed_state(state_dir, require_complete=(num_blocks == 0))
+    if str(state_dir).endswith(".pt"):
+        state = torch.load(state_dir, map_location="cpu", weights_only=True)
+    else:
+        state = load_streamed_state(state_dir, require_complete=(num_blocks == 0))
     config = AutoConfig.from_pretrained(model_path)
-    with torch.device("meta"):
-        model = AutoModelForCausalLM.from_config(config)
+    src = _WeightSource(model_path)
+    model, inner, _ = _skeleton_for_checkpoint(src, config)
     if num_blocks:
         inner, _ = _resolve_decoder(model)
         inner.layers = nn.ModuleList(list(inner.layers)[:num_blocks])
@@ -369,7 +379,7 @@ def restore_student(*, format=None, model_path=None, state_dir=None, num_blocks=
         raise SystemExit(f"unexpected keys: {unexpected[:5]}")
 
     src = _WeightSource(model_path)
-    probe = _build_probe(config, "cpu")
+    probe = _build_probe(config, "cpu", cls=type(model))
     # Only buffers can be reconstructed from config. A missing donor parameter
     # must never silently become a randomly initialized probe parameter.
     probe_tensors = dict(probe.named_buffers())
@@ -377,15 +387,17 @@ def restore_student(*, format=None, model_path=None, state_dir=None, num_blocks=
     head = model.get_output_embeddings()
     head_path = next((name for name, module in model.named_modules() if module is head), None)
     tied_head = bool(getattr(getattr(config, "text_config", config), "tie_word_embeddings", False))
+    mat_dtype = {"fp32": torch.float32, "bf16": torch.bfloat16}[
+        os.environ.get("DTYPE", "fp32")]
     for name, tensor in list(model.named_parameters()) + list(model.named_buffers()):
         if not tensor.is_meta:
             continue
         leaf = name.rsplit(".", 1)[-1]
         parent = model.get_submodule(name.rsplit(".", 1)[0]) if "." in name else model
         if src.has(name):
-            value = src.get(name, torch.float32 if tensor.is_floating_point() else None)
+            value = src.get(name, mat_dtype if tensor.is_floating_point() else None)
         elif tied_head and name == f"{head_path}.weight" and src.has(f"{stack}.embed_tokens.weight"):
-            value = src.get(f"{stack}.embed_tokens.weight", torch.float32)
+            value = src.get(f"{stack}.embed_tokens.weight", mat_dtype)
         else:
             if isinstance(getattr(parent, leaf, None), nn.Parameter):
                 raise ValueError(f"donor checkpoint is missing required parameter {name}")
@@ -643,11 +655,17 @@ def main() -> None:
                             **{k: float(v) for k, v in res.items()}})
             _write_json(Path(CKPT_DIR) / "metrics.json", history)
             if improves:
-                save_best_checkpoint(slim_payload(step + 1, metric), CKPT_DIR, CKPT_TMP)
+                # Selection bookkeeping is in-memory and always updated, so the
+                # final report names the right step even when SAVE_BEST gates the
+                # disk write (e.g. a host whose output cap cannot hold the ckpt).
                 selection.accept(step + 1, metric)
-                write_selection(CKPT_DIR, selection, model=MODEL, state_dir=STATE_DIR, format=checkpoint_format,
-                                provenance=provenance)
-                log(f"new best metric={metric:.4f} (slim ckpt)")
+                if SAVE_BEST:
+                    save_best_checkpoint(slim_payload(step + 1, metric), CKPT_DIR, CKPT_TMP)
+                    write_selection(CKPT_DIR, selection, model=MODEL, state_dir=STATE_DIR, format=checkpoint_format,
+                                    provenance=provenance)
+                    log(f"new best metric={metric:.4f} (slim ckpt)")
+                else:
+                    log(f"new best metric={metric:.4f} (SAVE_BEST=0, no ckpt write)")
     source = f"KD step {selection.best_step}" if selection.best_step else "original warm conversion"
     log(f"done: selected {source}, strict metric={selection.best_metric:.4f}; "
         f"warm={selection.warm_metric:.4f}, accepted_kd={selection.best_step > 0}")

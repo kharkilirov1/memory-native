@@ -51,7 +51,10 @@ def _prep_hinv(H: torch.Tensor, W: torch.Tensor, percdamp: float):
         H[dead, dead] = 1.0
         W[:, dead] = 0.0
     damp = percdamp * torch.mean(torch.diagonal(H))
-    H += torch.eye(H.shape[0], device=H.device, dtype=H.dtype) * damp
+    # eye is built on CPU and moved: torch-directml's aten::eye fallback returns an
+    # EMPTY tensor on the DML device (silent garbage), so device=H.device is not
+    # safe for accelerators even though the op is trivial on CPU.
+    H += torch.eye(H.shape[0], dtype=H.dtype).to(H.device) * damp
     Hinv = torch.cholesky_inverse(torch.linalg.cholesky(H))
     return torch.linalg.cholesky(Hinv, upper=True), H
 
@@ -509,10 +512,13 @@ def gptq_group_ternary(
         sal = W.abs() * torch.diagonal(Hwork).sqrt().clamp_min(1e-12).unsqueeze(0)
         if salient_scope == "layer":
             k = max(1, int(round(salient_first * sal.numel())))
-            thr = sal.reshape(-1).kthvalue(sal.numel() - k + 1).values
+            # kthvalue on CPU: the DML backend's fallback for it returns an empty
+            # tensor, which silently empties the salient mask. CPU + move is exact
+            # and cheap (one fp32 readback of sal).
+            thr = sal.reshape(-1).cpu().kthvalue(sal.numel() - k + 1).values.to(sal.device)
         elif salient_scope == "row":
             k = max(1, int(round(salient_first * cols)))
-            thr = sal.kthvalue(cols - k + 1, dim=1, keepdim=True).values
+            thr = sal.cpu().kthvalue(cols - k + 1, dim=1, keepdim=True).values.to(sal.device)
         else:
             raise ValueError(f"salient_scope must be 'row' or 'layer', got {salient_scope!r}")
         smask = sal >= thr
@@ -574,7 +580,7 @@ def _refit_salient_values(w: torch.Tensor, Q: torch.Tensor, H: torch.Tensor,
     Returns the updated (Q, salient_val)."""
     out, cols = w.shape
     damp = percdamp * H.diag().mean()
-    Hd = (H + damp * torch.eye(cols, device=H.device, dtype=H.dtype)).double()
+    Hd = (H + damp * torch.eye(cols, dtype=H.dtype).to(H.device)).double()
     Qr = Q.clone()
     rows = salient_idx.long() // cols
     js = salient_idx.long() % cols
