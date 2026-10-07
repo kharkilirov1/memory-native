@@ -70,4 +70,9 @@ def test_direct6_to_visible2_matches_ternary_oracle(C):
     b1 = (codes[...,1] >> 2) | ((codes[...,2] & 15) << 4)
     b2 = (codes[...,2] >> 4) | (codes[...,3] << 2)
     packed6 = torch.stack((b0,b1,b2),dim=-1).reshape(6,-1).to(torch.uint8)
-    assert torch.equal(derive_visible2_from_packed6(packed6,C),pack_visible2(t))
+    assert torch.equal(derive_visible2_from_packed6(packed6,C,chunk_groups=7),pack_visible2(t))
+
+
+def test_derive_invalid_chunk():
+    with pytest.raises(ValueError):
+        derive_visible2_from_packed6(torch.zeros(3,dtype=torch.uint8),11,chunk_groups=0)
