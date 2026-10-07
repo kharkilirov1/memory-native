@@ -18,6 +18,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from memory_native.donor.ptq import ptq_warm_start
 from memory_native.group_scale_packed import PackedGroupScaleCounterLinear
 from memory_native.recovery.distill import kd_divergence
+from memory_native.recovery.strict_exposure import strict_exposure_alpha
 from memory_native.recovery.runtime import (
     atomic_torch_save,
     build_ptq_counter_kwargs,
@@ -107,6 +108,7 @@ COUNTER_LR_END = float(os.environ.get("COUNTER_LR_END", "0.0001"))
 FP_LR_START = float(os.environ.get("FP_LR_START", "0.0001"))
 FP_LR_END = float(os.environ.get("FP_LR_END", "0.00001"))
 HOMOTOPY_ALPHA_START = float(os.environ.get("HOMOTOPY_ALPHA_START", "1.0"))
+STRICT_EXPOSURE_EVERY = int(os.environ.get("STRICT_EXPOSURE_EVERY", "0"))  # off by default; ablation only
 HOMOTOPY_HOLD = float(os.environ.get("HOMOTOPY_HOLD", "0.20"))
 HOMOTOPY_END = float(os.environ.get("HOMOTOPY_END", "0.90"))
 FEATURE_KD_ALPHA = float(os.environ.get("FEATURE_KD_ALPHA", "0.05"))
@@ -137,6 +139,12 @@ def homotopy_alpha(progress: float) -> float:
         return 0.0
     q = (progress - HOMOTOPY_HOLD) / max(HOMOTOPY_END - HOMOTOPY_HOLD, 1e-12)
     return cosine(HOMOTOPY_ALPHA_START, 0.0, q)
+
+
+if not math.isfinite(HOMOTOPY_ALPHA_START) or not 0 <= HOMOTOPY_ALPHA_START <= 1:
+    raise ValueError("HOMOTOPY_ALPHA_START must be finite in [0, 1]")
+if STRICT_EXPOSURE_EVERY < 0:
+    raise ValueError("STRICT_EXPOSURE_EVERY must be nonnegative")
 
 
 def set_counter_controls(model, lr: float, alpha: float) -> int:
@@ -190,6 +198,8 @@ def checkpoint_payload(
         "fp_lr": float(fp_lr),
         "train_alpha": float(train_alpha),
         "inference_alpha": 0.0,
+        "strict_exposure_every": STRICT_EXPOSURE_EVERY,
+        "homotopy_alpha_start": HOMOTOPY_ALPHA_START,
         "format": {
             "model": MODEL, "ptq_mode": PTQ_MODE, "counter_kind": COUNTER_KIND,
             "group": GROUP, "C": C, "kernel_mode": GROUP_KERNEL_MODE,
@@ -423,7 +433,8 @@ t_last = time.perf_counter()
 for step in range(start_step, STEPS):
     progress = step / max(STEPS - 1, 1)
     counter_lr = cosine(COUNTER_LR_START, COUNTER_LR_END, progress)
-    alpha = homotopy_alpha(progress)
+    base_alpha = homotopy_alpha(progress)
+    alpha = strict_exposure_alpha(base_alpha, step, STRICT_EXPOSURE_EVERY)
     n_counter = set_counter_controls(student, counter_lr, alpha)
     fp_lr = cosine(FP_LR_START, FP_LR_END, progress)
     if opt is not None:
@@ -473,14 +484,14 @@ for step in range(start_step, STEPS):
         print(
             f"step {step+1:5d}/{STEPS} loss={float(loss.detach()):.3f} "
             f"kd={float(logit_kd.detach()):.3f} feat={float(feat_kd.detach()):.3f} "
-            f"counter_lr={counter_lr:.6g} alpha={alpha:.3f} "
+            f"counter_lr={counter_lr:.6g} alpha={alpha:.3f} base_alpha={base_alpha:.3f} "
             f"flip_alt={telemetry['flip_rate_alt']:.4f} "
             f"edge={telemetry['counter_edge_sample']:.4f} sr={max_sr} {dt:.2f}s/step",
             flush=True,
         )
 
     if (step + 1) % EVAL_EVERY == 0 or step + 1 == STEPS:
-        strict_result, homotopy_result = evaluate_pair(student, tokenizer, val, dev, alpha)
+        strict_result, homotopy_result = evaluate_pair(student, tokenizer, val, dev, base_alpha)
         strict_metric = metric_from_ppl(strict_result)
         if telemetry is None:
             telemetry = observe_counter_telemetry(packed_group_layers)
@@ -489,7 +500,7 @@ for step in range(start_step, STEPS):
             {
                 "phase": "eval", "strict_metric": strict_metric,
                 "counter_lr": counter_lr, "fp_lr": fp_lr,
-                "train_alpha": alpha, "inference_alpha": 0.0,
+                "train_alpha": alpha, "base_alpha": base_alpha, "inference_alpha": 0.0,
                 "counter_layers": n_counter, **telemetry,
                 **strict_result,
                 **prefix_metrics("strict", strict_result),
