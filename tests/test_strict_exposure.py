@@ -21,3 +21,25 @@ def test_already_strict_stays_strict():
 def test_invalid(alpha,step,every):
     with pytest.raises(ValueError):
         strict_exposure_alpha(alpha,step,every)
+
+
+def test_cpu_counter_receives_one_update_per_step_with_exposure():
+    import torch
+    from memory_native.group_scale_packed import PackedGroupScaleCounterLinear
+
+    torch.manual_seed(12)
+    layer = PackedGroupScaleCounterLinear(
+        16, 8, group=8, C=11, kernel_mode="torch",
+        stats_scope="group", decimation=1, local_grad_clip=1.0,
+    ).train()
+    x = torch.randn(3, 16)
+    for step in range(8):
+        expected_alpha = strict_exposure_alpha(.8, step, 4)
+        layer.set_residual_alpha(expected_alpha)
+        # One forward/backward only. No deferred dual-graph update is attempted.
+        loss = layer(x.clone().requires_grad_(True)).square().mean()
+        loss.backward()
+        assert layer._sr_step == step + 1
+        assert int(layer.sr_step) == step + 1
+        assert layer._outstanding_forward is False
+        assert layer.residual_alpha == expected_alpha
