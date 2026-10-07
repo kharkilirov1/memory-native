@@ -83,24 +83,33 @@ def visible2_matmul_reference(x: torch.Tensor, packed: torch.Tensor,
 
 
 
-def derive_visible2_from_packed6(packed6: torch.Tensor, C: int) -> torch.Tensor:
-    """Convert canonical 6-bit state directly to 2-bit visible state.
+def derive_visible2_from_packed6(packed6: torch.Tensor, C: int,
+                                  *, chunk_groups: int = 1 << 16) -> torch.Tensor:
+    """Streaming conversion of canonical packed6 -> visible2 without dense W or t.
 
-    Four 6-bit codes occupy three bytes. Transform each triple into a single
-    byte containing four visible ternary codes, without building dense W or t.
-    Counter residual c is discarded: exact for strict alpha=0 readout only.
+    Each packed6 triple encodes four counter (t,c) coefficients. Convert one
+    triple to a visible2 byte by discarding c, using a bounded scratch chunk.
+    The CPU/PyTorch implementation is a correctness/export reference, not a
+    high-throughput CUDA kernel. Output is exact only for strict alpha=0.
     """
     if packed6.ndim < 1 or packed6.dtype != torch.uint8 or packed6.shape[-1] % 3:
         raise ValueError("packed6 must be uint8 with three-byte groups")
     if not isinstance(C, int) or not 1 <= C <= 11:
         raise ValueError("C must be between 1 and 11")
-    p = packed6.reshape(*packed6.shape[:-1], -1, 3).to(torch.int32)
-    b0, b1, b2 = p[..., 0], p[..., 1], p[..., 2]
+    if not isinstance(chunk_groups, int) or chunk_groups < 1:
+        raise ValueError("chunk_groups must be a positive integer")
+    src = packed6.contiguous().reshape(-1,3)
+    result = torch.empty(src.shape[0],dtype=torch.uint8,device=packed6.device)
     lv = 2*C-1
-    a0 = (b0 & 63) // lv
-    a1 = (((b0 >> 6) | (b1 << 2)) & 63) // lv
-    a2 = (((b1 >> 4) | (b2 << 4)) & 63) // lv
-    a3 = ((b2 >> 2) & 63) // lv
-    if torch.any((a0 > 2) | (a1 > 2) | (a2 > 2) | (a3 > 2)):
-        raise ValueError("packed6 contains an invalid code")
-    return (a0 | (a1 << 2) | (a2 << 4) | (a3 << 6)).to(torch.uint8).contiguous()
+    for start in range(0, src.shape[0], chunk_groups):
+        end = min(start + chunk_groups, src.shape[0])
+        p = src[start:end].to(torch.int32)
+        b0,b1,b2 = p[:,0], p[:,1], p[:,2]
+        a0 = (b0 & 63) // lv
+        a1 = (((b0 >> 6) | (b1 << 2)) & 63) // lv
+        a2 = (((b1 >> 4) | (b2 << 4)) & 63) // lv
+        a3 = ((b2 >> 2) & 63) // lv
+        if torch.any((a0 > 2) | (a1 > 2) | (a2 > 2) | (a3 > 2)):
+            raise ValueError("packed6 contains an invalid code")
+        result[start:end] = (a0 | (a1 << 2) | (a2 << 4) | (a3 << 6)).to(torch.uint8)
+    return result.reshape(*packed6.shape[:-1],packed6.shape[-1]//3)
