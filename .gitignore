@@ -11,3 +11,6 @@ __pycache__/
 # downloaded data
 tinyshakespeare.txt
 data/
+# pytest tmp_path roots created under the workspace on Windows
+pytest-of-*/
+.nul
