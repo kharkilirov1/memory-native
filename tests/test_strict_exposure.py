@@ -43,3 +43,14 @@ def test_cpu_counter_receives_one_update_per_step_with_exposure():
         assert int(layer.sr_step) == step + 1
         assert layer._outstanding_forward is False
         assert layer.residual_alpha == expected_alpha
+
+
+def test_zero_homotopy_loss_does_not_imply_good_strict_loss():
+    # Analytical counterexample: c can explain teacher without any visible t.
+    C = 11
+    t, c, s = 0.0, 10.0, 1.0
+    target = 10.0 / 11.0
+    soft_output = s * (t + c / C)
+    strict_output = s * t
+    assert (soft_output - target)**2 == 0.0
+    assert (strict_output - target)**2 > 0.82
