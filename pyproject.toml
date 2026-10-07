@@ -11,7 +11,8 @@ requires-python = ">=3.9"
 license = { text = "MIT" }
 authors = [
     { name = "AI agents (Claude Code, Anthropic; Codex, OpenAI; DeepSeek; OpenCode)" },
-    { name = "Kharki", role = "project sponsor — direction, resources, quality gates" },
+    # Project sponsor: Kharki (direction, resources, quality gates).
+    { name = "Kharki" },
 ]
 keywords = ["pytorch", "quantization", "ternary", "memory-efficient-training", "optimizer", "reversible"]
 dependencies = ["torch>=2.1", "numpy>=1.21"]
