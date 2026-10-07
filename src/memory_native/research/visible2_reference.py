@@ -80,3 +80,27 @@ def visible2_matmul_reference(x: torch.Tensor, packed: torch.Tensor,
         hi = min(K, lo + group_size)
         y += (xp[:, lo:hi] @ t[:, lo:hi].float().T) * scale[:, g].float().unsqueeze(0)
     return y
+
+
+
+def derive_visible2_from_packed6(packed6: torch.Tensor, C: int) -> torch.Tensor:
+    """Convert canonical 6-bit state directly to 2-bit visible state.
+
+    Four 6-bit codes occupy three bytes. Transform each triple into a single
+    byte containing four visible ternary codes, without building dense W or t.
+    Counter residual c is discarded: exact for strict alpha=0 readout only.
+    """
+    if packed6.ndim < 1 or packed6.dtype != torch.uint8 or packed6.shape[-1] % 3:
+        raise ValueError("packed6 must be uint8 with three-byte groups")
+    if not isinstance(C, int) or not 1 <= C <= 11:
+        raise ValueError("C must be between 1 and 11")
+    p = packed6.reshape(*packed6.shape[:-1], -1, 3).to(torch.int32)
+    b0, b1, b2 = p[..., 0], p[..., 1], p[..., 2]
+    lv = 2*C-1
+    a0 = (b0 & 63) // lv
+    a1 = (((b0 >> 6) | (b1 << 2)) & 63) // lv
+    a2 = (((b1 >> 4) | (b2 << 4)) & 63) // lv
+    a3 = ((b2 >> 2) & 63) // lv
+    if torch.any((a0 > 2) | (a1 > 2) | (a2 > 2) | (a3 > 2)):
+        raise ValueError("packed6 contains an invalid code")
+    return (a0 | (a1 << 2) | (a2 << 4) | (a3 << 6)).to(torch.uint8).contiguous()
