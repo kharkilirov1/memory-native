@@ -55,3 +55,19 @@ def test_invalid_code_or_out_of_range_rejected():
 def test_bytes_budget():
     t=torch.randint(-1,2,(128,512),dtype=torch.int8)
     assert pack_visible2(t).numel() == t.numel()//4
+
+
+from memory_native.research.visible2_reference import derive_visible2_from_packed6
+
+
+@pytest.mark.parametrize("C", [1,2,4,7,11])
+def test_direct6_to_visible2_matches_ternary_oracle(C):
+    gen = torch.Generator().manual_seed(C + 99)
+    t = torch.randint(-1,2,(6,128),dtype=torch.int16,generator=gen)
+    c = torch.randint(-(C-1),C,(6,128),dtype=torch.int16,generator=gen)
+    codes = ((t+1)*(2*C-1)+(c+C-1)).to(torch.int32).reshape(6,-1,4)
+    b0 = codes[...,0] | ((codes[...,1] & 3) << 6)
+    b1 = (codes[...,1] >> 2) | ((codes[...,2] & 15) << 4)
+    b2 = (codes[...,2] >> 4) | (codes[...,3] << 2)
+    packed6 = torch.stack((b0,b1,b2),dim=-1).reshape(6,-1).to(torch.uint8)
+    assert torch.equal(derive_visible2_from_packed6(packed6,C),pack_visible2(t))
