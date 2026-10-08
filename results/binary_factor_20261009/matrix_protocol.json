@@ -1,0 +1,25 @@
+{
+  "created_utc": "2026-10-08T21:22:11.132124+00:00",
+  "arms": [
+    {"mode": "native", "method": "svd", "lr": 0.005, "scale_lr": 0.003},
+    {"mode": "native", "method": "guarded", "lr": 0.005, "scale_lr": 0.003},
+    {"mode": "qat_adam", "method": "svd", "lr": 0.02, "scale_lr": 0.003},
+    {"mode": "qat_adam", "method": "guarded", "lr": 0.02, "scale_lr": 0.003},
+    {"mode": "qat_rms", "method": "svd", "lr": 0.02, "scale_lr": 0.003},
+    {"mode": "qat_rms", "method": "guarded", "lr": 0.02, "scale_lr": 0.003},
+    {"mode": "frozen", "method": "svd", "lr": 0.0, "scale_lr": 0.003},
+    {"mode": "frozen", "method": "guarded", "lr": 0.0, "scale_lr": 0.003}
+  ],
+  "tuning_seeds": [0, 1, 2],
+  "confirmation_seeds": [20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31],
+  "lr_selection": "mean validation over BOTH initializers; same LR across initializers",
+  "steps": 600,
+  "metrics": "FINAL relative MSE on new independent held-out Gaussian rows; no test-based selection",
+  "family": "spectral",
+  "transfer_family": "binary with same controls/seeds",
+  "not_littlebit_reproduction": true,
+  "source_sha256": {
+    "src/memory_native/research/binary_factor.py": "a9b6a974739e311785b81dd54cc4190c9eced57767837175325ba0fe5daa8491",
+    "scripts/binary_factor_witness.py": "f1ca6435076b628c84bcf012c9c9871f1cec3b7bf6a587dc2971835b6220b8e4"
+  }
+}
