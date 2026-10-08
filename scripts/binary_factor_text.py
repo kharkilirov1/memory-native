@@ -22,7 +22,7 @@ class Block(nn.Module):
         def heads(z):return z.reshape(b,t,self.heads,d//self.heads).transpose(1,2)
         a=F.scaled_dot_product_attention(heads(q),heads(k),heads(v),is_causal=True)
         x=x+self.proj(a.transpose(1,2).reshape(b,t,d))
-        return x+self.fc2(F.gelu(self.ln2(x))))
+        return x+self.fc2(F.gelu(self.fc(self.ln2(x))))
 
 class ByteGPT(nn.Module):
     def __init__(self,d=64,context=64):
