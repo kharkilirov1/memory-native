@@ -22,6 +22,7 @@ and executable code to decide what is supported today.
 | Path | Read next |
 |---|---|
 | Counter layers | [`counter.py`](../src/memory_native/counter.py), [`packed.py`](../src/memory_native/packed.py) |
+| Experimental counter stability | [RMS startup, cumulative rebase and named rounding streams](counter_stability.md) |
 | Reversible execution | [`reversible.py`](../src/memory_native/reversible.py), [single-pass witness](../results/REVERSIBLE_SINGLE_PASS.md) |
 | Donor conversion and calibration | [Consolidated solver guide](solver_v3_consolidated.md) |
 | Conversion/cache/recovery workflow | [Public notebook](../notebooks/cached_kd_public.ipynb) |

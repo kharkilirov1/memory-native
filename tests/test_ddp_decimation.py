@@ -22,7 +22,7 @@ import torch
 
 def _worker(rank, world, sync_file, tmp_state, mode):
     import torch.distributed as dist
-    from memory_native import PackedRMSCounterLinear
+    from memory_native import PackedRMSCounterLinear, configure_rounding_streams
 
     dist.init_process_group("gloo", rank=rank, world_size=world,
                             init_method=f"file://{sync_file}")
@@ -31,6 +31,13 @@ def _worker(rank, world, sync_file, tmp_state, mode):
         lay = PackedRMSCounterLinear(16, 12, C=11, lr=0.03, lr_scale=1e-3,
                                      rms_mode="proxy").train()
         steps, teacher = 60, None
+    elif mode == "named_stream":
+        lay = PackedRMSCounterLinear(
+            16, 12, C=11, lr=0.01, lr_scale=1e-3, tile_rows=4,
+            rms_mode="proxy", rms_bias_correction=True, scale_rebase="threshold",
+        ).train()
+        configure_rounding_streams(lay, seed=72)
+        steps, teacher = 30, None
     else:  # decimation, with a fixed teacher so the layer stabilizes and the period actually grows
         lay = PackedRMSCounterLinear(16, 12, C=11, lr=0.02, lr_scale=1e-3,
                                      decimate_updates=True).train()
@@ -39,15 +46,21 @@ def _worker(rank, world, sync_file, tmp_state, mode):
     g = torch.Generator().manual_seed(100 + rank)  # per-rank-DIFFERENT data
     max_period = 1
     for _ in range(steps):
+        if mode == "named_stream":
+            torch.rand(17 + rank * 43)  # deliberately desynchronize global RNGs
         x = torch.randn(8, 16, generator=g)
         y = (x @ teacher.t()) if teacher is not None else torch.randn(8, 12, generator=g)
         (lay(x) - y).pow(2).mean().backward()
         max_period = max(max_period, lay._dec_period)
     if rank == 0:
-        torch.save(lay.state.clone(), tmp_state)
+        torch.save(lay.state_dict() if mode == "named_stream" else lay.state.clone(), tmp_state)
     dist.barrier()
     ref = torch.load(tmp_state)
-    assert torch.equal(lay.state, ref), f"rank {rank} state diverged from rank 0 (mode={mode})"
+    if mode == "named_stream":
+        for key, value in lay.state_dict().items():
+            assert torch.equal(value, ref[key]), f"rank {rank} diverged at {key}"
+    else:
+        assert torch.equal(lay.state, ref), f"rank {rank} state diverged from rank 0 (mode={mode})"
     if mode == "decimation":
         assert max_period > 1, "decimation never engaged -> test is vacuous"
     dist.barrier()
@@ -84,3 +97,8 @@ def test_ddp_proxy_rms_states_stay_bit_identical(tmp_path):
 def test_ddp_decimation_engages_and_stays_bit_identical(tmp_path):
     """Decimation period grows (>1) yet ranks stay in lockstep and bit-identical."""
     _run("decimation", tmp_path)
+
+
+def test_ddp_named_stream_ignores_rank_local_rng_activity(tmp_path):
+    """Corrected/proxy/tiled updates agree even when ranks use different global RNG streams."""
+    _run("named_stream", tmp_path)

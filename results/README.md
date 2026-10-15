@@ -29,6 +29,8 @@ whole-step VRAM savings are smaller and include activations and temporary buffer
 
 ## Current CPU implementation witnesses
 
+- [Counter stability controls](COUNTER_STABILITY.md): equation checks, checkpoint/stream
+  regression tests and a five-seed synthetic donor ablation, including its quality regression.
 - [Single-pass reversible backward](REVERSIBLE_SINGLE_PASS.md): gradient/update regression
   tests, branch-call counts and a local CPU timing comparison with commit `851c91e`.
   This does not revalidate historical CUDA timings for the changed backward.
