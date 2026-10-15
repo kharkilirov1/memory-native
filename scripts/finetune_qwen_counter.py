@@ -44,14 +44,14 @@ LOCAL_GRAD_CLIP = 1.0               # per-counter-layer row-grad clip
 GRAD_CLIP = 1.0                     # fp-param global grad-norm clip before each AdamW step
 THRESHOLD_RATIO = 0.5               # TWN keep-threshold: 0.5 gave the least-bad warm-start here
 SEED = 0
-# --- perf knobs (verified on CPU: sdpa+cache = 1.79x/step; see results/perf_audit_cpu.md) ---
+# --- perf knobs (verified on CPU: sdpa+cache = 1.79x/step; see research/results/perf_audit_cpu.md) ---
 ATTN_IMPL = "sdpa"                  # sdpa calls each projection once -> counter guard holds
 TEACHER_TOPK = 128                  # cache teacher top-k logits; epoch 2+ skips the teacher
                                     # forward entirely (0 = off, exact full-vocab KD every step)
 KIND = None                         # auto: counter_packed on CUDA (6-bit storage + fused Triton
                                     # update; local_grad_clip now rides INSIDE the kernel --
                                     # T4-verified: parity 0 mismatches, recovery healthy, ~1.05x
-                                    # step; results/cuda_witness_t4.md), counter_rms on CPU
+                                    # step; research/results/cuda_witness_t4.md), counter_rms on CPU
                                     # (packed pays pack/unpack on the torch path).
 
 

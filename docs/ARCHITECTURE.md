@@ -79,7 +79,7 @@ magnitudes; that change from the NumPy prototype was not adopted.
 
 Covered tests compare nonlinear input/parameter gradients with stored-activation autograd,
 check frozen parameters, count branch calls, and compare packed-counter updates. See
-[the witness](../results/REVERSIBLE_SINGLE_PASS.md). Higher-order differentiation is not
+[the witness](../research/results/REVERSIBLE_SINGLE_PASS.md). Higher-order differentiation is not
 supported. The changed recompute order can change RNG consumption for quantized saved
 activations; historical stochastic training trajectories are not promised to be identical.
 
@@ -105,5 +105,5 @@ do not imply a six-bit-per-coefficient training peak or proportional wall-time s
   does not discover these buffer updates through parameter gradients.
 - Keep hardware-specific results scoped to their recorded shape, runtime and device.
 
-[Project status](../PROJECT_STATUS.md) · [Reproduce](../REPRODUCIBILITY.md) ·
-[Results](../results/README.md)
+[Project status](status.md) · [Reproduce](reproducibility.md) ·
+[Results](../research/results/README.md)

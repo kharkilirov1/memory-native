@@ -34,6 +34,6 @@ preferred-citation:
     - family-names: "Kharki"
       note: "Project sponsor — provided direction, resources, quality gates. Did not write code, math, or experiments."
   year: 2026
-  notes: "Preprint draft v0.1; see paper/MEMORY_NATIVE_PREPRINT.md in this repository."
+  notes: "Preprint draft v0.1; see research/paper/MEMORY_NATIVE_PREPRINT.md in this repository."
 repository-code: "https://github.com/kharkilirov1/memory-native"
 url: "https://github.com/kharkilirov1/memory-native"
