@@ -11,10 +11,16 @@ requires-python = ">=3.9"
 license = { text = "MIT" }
 authors = [
     { name = "AI agents (Claude Code, Anthropic; Codex, OpenAI; DeepSeek; OpenCode)" },
-    { name = "Kharki", role = "project sponsor — direction, resources, quality gates" },
+    { name = "Kharki" },
 ]
 keywords = ["pytorch", "quantization", "ternary", "memory-efficient-training", "optimizer", "reversible"]
 dependencies = ["torch>=2.1", "numpy>=1.21"]
+
+[project.urls]
+Repository = "https://github.com/kharkilirov1/memory-native"
+Documentation = "https://github.com/kharkilirov1/memory-native/tree/main/docs"
+Issues = "https://github.com/kharkilirov1/memory-native/issues"
+Evidence = "https://github.com/kharkilirov1/memory-native/tree/main/results"
 
 [project.optional-dependencies]
 research = ["matplotlib>=3.8"]

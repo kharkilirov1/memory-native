@@ -2,11 +2,12 @@ cff-version: 1.2.0
 message: "If you use this software or build on the memory-native method, please cite it as below."
 title: "memory-native: Training Without Master Weights — a 6-bit Finite-State Synapse with Optimizer-in-State"
 abstract: >-
-  A finite-state counter synapse in which the entire per-parameter training state is a single
-  6-bit code (visible ternary weight + bounded stochastic-rounding accumulator), updated in-place
-  by exact backpropagated gradients. Composed with reversible activations and int8/bf16 compute,
-  the method trains a 1.21B-parameter model on a single T4 in 2.25 GiB peak, where the dense+Adam
-  equivalent cannot allocate its 18 GiB of state. Convergence parity at scale is the open question.
+  A research implementation of finite-state counter synapses and reversible activations.
+  Each packed coefficient code uses six bits for a visible ternary value and a bounded
+  update accumulator. Scales, RMS statistics, floating-point model components and working
+  memory are additional. Selected CPU and CUDA witnesses explore memory and quality
+  trade-offs. A historical 1.21B-coefficient T4 fit report lacks its primary raw log;
+  converged quality parity at scale remains open.
 authors:
   - name: "AI agents (Claude Code, Anthropic; Codex, OpenAI; DeepSeek; OpenCode)"
   - family-names: "Kharki"
