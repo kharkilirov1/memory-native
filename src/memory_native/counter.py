@@ -25,6 +25,8 @@ import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 
+from .rounding import RoundingStreamMixin
+
 __all__ = [
     "C_DEFAULT",
     "encode_state",
@@ -347,7 +349,7 @@ class _FusedCounterLinearFn(torch.autograd.Function):
         return grad_x2.reshape_as(x), None, None
 
 
-class CompactCounterLinear(nn.Module):
+class CompactCounterLinear(RoundingStreamMixin, nn.Module):
     """Ternary linear layer trained as a finite-state synaptic automaton.
 
     Persistent per-weight state in this implementation is 1 byte (uint8); the logical
@@ -376,6 +378,7 @@ class CompactCounterLinear(nn.Module):
         compile_update: bool = False,
     ) -> None:
         super().__init__()
+        self._init_rounding_stream()
         if 3 * (2 * C - 1) > 256:
             raise ValueError("C is too large for uint8 state encoding (need 3*(2C-1) <= 256)")
         self.in_features = int(in_features)
@@ -611,7 +614,7 @@ class CompactCounterLinear(nn.Module):
         # c stores a pending update in units of s/C; rebase it when the row scale changes.
         c_rebased = c_i.float() * (s_i / s_new)
         ticks = (-self._eff_lr() * update_signal) * (self.C / s_new)
-        cc = stochastic_round(c_rebased + ticks)
+        cc = self._round_counter(c_rebased + ticks, lo)
 
         new_t, remainder = _carry_resolve(cc, t_i.float(), self.C)
 
@@ -668,6 +671,7 @@ class CompactCounterLinear(nn.Module):
         s, t, c = weight_to_counter_state(weight, self.C, threshold_ratio)
         self._write_rows(0, self.out_features, t, c)
         self.scale.copy_(s.to(self.scale.dtype))
+        self._rounding_step = 0
 
     def load_counter_state(self, scale: torch.Tensor, t: torch.Tensor,
                            c: torch.Tensor) -> None:
@@ -683,6 +687,7 @@ class CompactCounterLinear(nn.Module):
                          t.to(device=dev, dtype=torch.int16),
                          c.to(device=dev, dtype=torch.int16))
         self.scale.copy_(scale.reshape(self.out_features, 1).to(dev, self.scale.dtype))
+        self._rounding_step = 0
 
     @classmethod
     def from_dense(cls, weight: torch.Tensor, *, C: int = C_DEFAULT,
@@ -712,11 +717,17 @@ class RMSCounterLinear(CompactCounterLinear):
 
     def __init__(self, *args, rms_beta: float = 0.9, rms_eps: float = 1e-3,
                  use_rms: bool = True, rms_mode: str = "exact",
-                 scale_rebase: str = "eager", **kw) -> None:
+                 scale_rebase: str = "eager", rms_bias_correction: bool = False,
+                 rebase_threshold: float | None = None, **kw) -> None:
         super().__init__(*args, **kw)
+        if not 0 <= rms_beta < 1 or not math.isfinite(rms_eps) or rms_eps <= 0:
+            raise ValueError("RMS requires 0 <= rms_beta < 1 and finite rms_eps > 0")
+        if rms_bias_correction and (not use_rms or rms_mode == "lagged"):
+            raise ValueError("rms_bias_correction requires exact/proxy RMS (no lagged cold start)")
         self.rms_beta = float(rms_beta)
         self.rms_eps = float(rms_eps)
         self.use_rms = bool(use_rms)
+        self.rms_bias_correction = bool(rms_bias_correction)
         # rms_mode: "exact" uses the freshly-updated v for the denominator (the tick depends on a
         #   row-stat of THIS step's grad -> two passes); "lagged" uses last step's v so the tick
         #   needs no row-stat of the current grad -> one pass (the strict update-from-IO kernel).
@@ -726,11 +737,19 @@ class RMSCounterLinear(CompactCounterLinear):
         # "proxy": post-LayerNorm E[r_o^2|D] ~ ||D_o||^2, so the RMS denominator comes from cheap
         #   grad_out row-norms (x a scalar activation-energy) instead of the full ||G_o||^2 stat.
         assert rms_mode in ("exact", "lagged", "proxy")
-        assert scale_rebase in ("eager", "lazy")
+        if scale_rebase not in ("eager", "lazy", "threshold"):
+            raise ValueError("scale_rebase must be eager, lazy or threshold")
         self.rms_mode = rms_mode
         self.scale_rebase = scale_rebase
+        self.rebase_threshold = 0.5 / self.C if rebase_threshold is None else float(rebase_threshold)
+        if not math.isfinite(self.rebase_threshold) or not 0 <= self.rebase_threshold < 1:
+            raise ValueError("rebase_threshold must be finite and in [0, 1)")
         self.register_buffer("v", torch.zeros((self.out_features, 1), dtype=torch.float32))
         self.register_buffer("s_base", self.scale.clone())  # scale the counter is calibrated to
+        if self.rms_bias_correction:
+            # Per-row counts stay correct for tiled/external updates and skipped backward steps.
+            # Only the opt-in mode pays 8 bytes/row; old default checkpoints are unchanged.
+            self.register_buffer("rms_updates", torch.zeros((self.out_features, 1), dtype=torch.int64))
 
     @torch.no_grad()
     def load_dense_weight(self, weight: torch.Tensor, threshold_ratio: float = 0.7) -> None:
@@ -739,6 +758,8 @@ class RMSCounterLinear(CompactCounterLinear):
         super().load_dense_weight(weight, threshold_ratio=threshold_ratio)
         self.v.zero_()
         self.s_base.copy_(self.scale)
+        if self.rms_bias_correction:
+            self.rms_updates.zero_()
 
     def load_counter_state(self, scale: torch.Tensor, t: torch.Tensor,
                            c: torch.Tensor) -> None:
@@ -746,6 +767,8 @@ class RMSCounterLinear(CompactCounterLinear):
         super().load_counter_state(scale, t, c)
         self.v.zero_()
         self.s_base.copy_(self.scale)
+        if self.rms_bias_correction:
+            self.rms_updates.zero_()
 
     @torch.no_grad()
     def _update_tile(self, lo, hi, grad_w, t_i, c_i, s_i, proxy_gsq=None) -> None:
@@ -753,6 +776,7 @@ class RMSCounterLinear(CompactCounterLinear):
         # the deterministic chain lives in _rms_eager_pre_sr so opt-in torch.compile can fuse
         # its ~15 elementwise passes into one; SR stays outside (RNG stream untouched).
         if (self.pulse_mode == "direct" and self.scale_rebase == "eager"
+                and not self.rms_bias_correction
                 and not (self.use_rms and self.rms_mode == "lagged")):
             g_sq = None
             if self.use_rms:
@@ -764,7 +788,7 @@ class RMSCounterLinear(CompactCounterLinear):
                 self.use_rms, self.rms_eps, self.rms_beta, self.local_grad_clip,
                 self._eff_lr(), self.lr_scale, self.C, math.sqrt(self.in_features),
             )
-            cc = stochastic_round(pre)
+            cc = self._round_counter(pre, lo)
             return self._finish_update(lo, hi, cc, t_i, c_i, s_new)
 
         # Rare configurations (lagged RMS, lazy rebase, ternary pulse): original inline chain.
@@ -778,7 +802,15 @@ class RMSCounterLinear(CompactCounterLinear):
                 self.v[lo:hi].mul_(self.rms_beta).add_(g_sq, alpha=1.0 - self.rms_beta)
             else:
                 self.v[lo:hi].mul_(self.rms_beta).add_(g_sq, alpha=1.0 - self.rms_beta)
-                denom = self.v[lo:hi].sqrt().clamp_min(self.rms_eps)          # freshly-updated v
+                v_hat = self.v[lo:hi]
+                if self.rms_bias_correction:
+                    self.rms_updates[lo:hi].add_(1)
+                    # expm1 avoids cancellation when beta is close to one; no dense buffer.
+                    correction = (torch.ones_like(v_hat) if self.rms_beta == 0 else
+                                  -torch.expm1(self.rms_updates[lo:hi].to(v_hat.dtype)
+                                              * math.log(self.rms_beta)))
+                    v_hat = v_hat / correction
+                denom = v_hat.sqrt().clamp_min(self.rms_eps)
             grad_eff = grad_w / denom
         else:
             grad_eff = grad_w
@@ -794,17 +826,30 @@ class RMSCounterLinear(CompactCounterLinear):
         update_signal = (
             grad_eff if self.pulse_mode == "direct" else ternary_gradient_unbiased(grad_eff)
         )
+        if self.scale_rebase == "threshold":
+            # Keep c in s_base units between rebases, including its new gradient ticks.
+            # Rebase before a possible SR carry so a ternary jump uses the CURRENT scale.
+            base = self.s_base[lo:hi]
+            pending = c_i.float() - self._eff_lr() * update_signal * (self.C / base)
+            drift = (base / s_new - 1).abs()
+            carry_possible = (pending.abs() > self.C - 1).any(dim=1, keepdim=True)
+            rebase = (drift > self.rebase_threshold) | carry_possible
+            units = torch.where(rebase, s_new, base)
+            pre = c_i.float() * (base / units) - self._eff_lr() * update_signal * (self.C / units)
+            cc = self._round_counter(pre, lo)
+            base.copy_(units)
+            return self._finish_update(lo, hi, cc, t_i, c_i, s_new)
         if self.scale_rebase == "lazy":
             # counter is calibrated to s_base; bring it to the current scale s_i, tick in s_i units
             # (no dependence on s_new), and record that the stored counter is now calibrated to s_i.
-            c_cur = stochastic_round(c_i.float() * (self.s_base[lo:hi] / s_i))
+            c_cur = self._round_counter(c_i.float() * (self.s_base[lo:hi] / s_i), lo)
             ticks = (-self._eff_lr() * update_signal) * (self.C / s_i)
-            cc = stochastic_round(c_cur + ticks)
+            cc = self._round_counter(c_cur + ticks, lo)
             self.s_base[lo:hi].copy_(s_i)
             return self._finish_update(lo, hi, cc, t_i, c_i, s_new)
         c_rebased = c_i.float() * (s_i / s_new)
         ticks = (-self._eff_lr() * update_signal) * (self.C / s_new)
-        cc = stochastic_round(c_rebased + ticks)
+        cc = self._round_counter(c_rebased + ticks, lo)
         self._finish_update(lo, hi, cc, t_i, c_i, s_new)
 
     @torch.no_grad()
