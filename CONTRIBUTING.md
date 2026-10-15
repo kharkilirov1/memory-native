@@ -6,7 +6,10 @@ Thanks for being interested. This is a research project — an open preprint dra
 
 > **Does the counter synapse reach convergence parity at 7B+ scale on real corpora?**
 
-At d=512 it edges out AdamW. At 1.21B it fits and trains on a single T4. But scale-and-data convergence is marked `OPEN` in the preprint, and that is the single most valuable thing a contributor could help settle — with compute, with a sharper analysis, or with a falsifying run.
+Short small-model runs show memory savings with configuration-dependent quality and throughput.
+The historical 1.21B T4 fit/execution report lacks its primary raw log. Scale-and-data
+convergence remains `OPEN`: the [evidence index](results/README.md) gives the boundaries.
+Controlled reproductions and falsifying runs are valuable contributions.
 
 The mechanistic hypothesis (in `docs/ARTICLE.md` and queued as a follow-up): the bounded counter loses gradient pressure when weights saturate against the boundary, and that saturation rate may grow with model width. That is measurable directly on existing witnesses — no new training required.
 
@@ -49,8 +52,12 @@ python -m pytest -q             # hardware-specific tests skip when unavailable
 
 - Python ≥ 3.9
 - `torch>=2.1` and `numpy>=1.21`
-- Optional: CUDA GPU for the GPU-only tests (the 12 skipped ones)
+- Optional: CUDA GPU for hardware-specific tests; the skip count depends on the environment
 - Optional: `triton` for the fused kernels (falls back to torch path if absent)
+
+Start with `python examples/quickstart.py` for a small offline example. For the full CPU
+gate, including donor/campaign dependencies, follow [REPRODUCIBILITY.md](REPRODUCIBILITY.md).
+The [documentation index](docs/README.md) maps the current implementation and research history.
 
 ## Before you open a PR
 
@@ -61,7 +68,7 @@ python -m pytest -q             # hardware-specific tests skip when unavailable
 
 ## Commit and PR style
 
-- Commit messages: `type(scope): subject` — e.g. `feat(counter): add C=22 variant`, `fix(triton): correct grad_x stride`, `docs(preprint): clarify saturation hypothesis`.
+- Commit messages: `type(scope): subject` — e.g. `perf(reversible): reuse local backward graphs`, `fix(triton): correct grad_x stride`, `docs(preprint): clarify saturation hypothesis`.
 - PR description: what changed, why, what was tested, what is left open.
 
 ## Discussion and conduct

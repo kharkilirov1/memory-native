@@ -27,6 +27,12 @@ and later run's throughput into one configuration measurement. Six-bit coefficie
 storage is 0.75 B/coefficient plus scales/RMS statistics, metadata and the FP tail;
 whole-step VRAM savings are smaller and include activations and temporary buffers.
 
+## Current CPU implementation witnesses
+
+- [Single-pass reversible backward](REVERSIBLE_SINGLE_PASS.md): gradient/update regression
+  tests, branch-call counts and a local CPU timing comparison with commit `851c91e`.
+  This does not revalidate historical CUDA timings for the changed backward.
+
 ## Core and hardware witnesses
 
 | Topic | Evidence | Scope |

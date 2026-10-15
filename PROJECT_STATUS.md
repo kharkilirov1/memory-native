@@ -18,7 +18,8 @@ and falsifiable.
 | Packed coefficient codes at 0.75 byte/weight | Verified on CPU; additional state excluded | Packed round-trip and dynamics tests; scales, RMS statistics, metadata and FP tail add memory |
 | PyTorch training integration | Verified on CPU/CUDA | CLI gates and `results/VERIFICATION_RESULTS.md` |
 | Triton packed forward and fused update | Verified on Tesla T4 | `results/KERNEL.md`, `results/GPU_KERNEL_VERIFICATION.md` |
-| Reversible activation memory | Verified on Tesla T4 for tested depths | `results/POOLS.md` |
+| Reversible activation memory | Historical Tesla T4 witness for tested depths; new backward has CPU regression coverage | `results/POOLS.md`; new CUDA timing remains open |
+| Single-pass reversible backward | CPU gradient/update checks and branch-call witness | `tests/test_reversible_single_pass.py`, `results/REVERSIBLE_SINGLE_PASS.md`; one branch recompute per backward, no universal speed claim |
 | 1.21B-coefficient allocation/2000-step training | Historical T4 report; primary raw log missing | `results/SCALE_1B.md`; cannot independently audit the original run from this checkout |
 | CUDA data-parallel state synchronization | Verified on 2x T4 for the recorded run | `scripts/fineweb_1b_2xt4.py` and linked results |
 | MLX layer/state compatibility, group scales and Bonsai helpers | Verified for covered operations on Linux CPU | `docs/MLX_PORT.md` and MLX tests; full donor model import/training is not covered |
