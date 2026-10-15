@@ -20,7 +20,7 @@ dependencies = ["torch>=2.1", "numpy>=1.21"]
 Repository = "https://github.com/kharkilirov1/memory-native"
 Documentation = "https://github.com/kharkilirov1/memory-native/tree/main/docs"
 Issues = "https://github.com/kharkilirov1/memory-native/issues"
-Evidence = "https://github.com/kharkilirov1/memory-native/tree/main/results"
+Evidence = "https://github.com/kharkilirov1/memory-native/tree/main/research/results"
 
 [project.optional-dependencies]
 research = ["matplotlib>=3.8"]

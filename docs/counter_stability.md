@@ -4,7 +4,7 @@
 
 These controls are opt-in. They correct specific numerical mechanisms; they do not
 establish better language-model quality or faster training. See the
-[CPU ablation](../results/COUNTER_STABILITY.md) for positive and negative results.
+[CPU ablation](../research/results/COUNTER_STABILITY.md) for positive and negative results.
 
 ```python
 import torch
