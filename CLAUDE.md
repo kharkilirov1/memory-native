@@ -7,7 +7,8 @@ The historical session ledger is preserved in [research/notes/DEVELOPMENT_LOG.md
 ## Current evidence boundaries
 
 - The public checkout contains the PyTorch CUDA/group-local recovery work and MLX
-  group-scale/Bonsai helpers. Branch-era references below are historical.
+  group-scale/Bonsai helpers. Branch-era campaign references in the historical log are
+  historical; use [research/layout-map.json](research/layout-map.json) for old paths.
 - Six bits encode a counter coefficient and accumulator (`C=1..11` for packed layers),
   not all training state. Count FP scales/RMS statistics, salient/perm metadata,
   caches, ordinary FP tail + its optimizer, activations and transient `grad_w` too.
@@ -54,6 +55,16 @@ The historical session ledger is preserved in [research/notes/DEVELOPMENT_LOG.md
 - torch.compile of the update chain: `dynamic=False` only (dynamic emits slower code);
   SR stays eager to preserve the RNG stream.
 
+## Where the code lives
+
+- `src/memory_native/counter.py` — counter layers; `_carry_resolve` is the single source of
+  truth for carry/saturation (`packed.py`, `group_scale_packed.py` import it).
+- `packed.py` / `fused_update.py` — 6-bit storage and the Triton update kernels;
+  `group_scale_packed.py` + `group_scale_kernels.py` — group-128 act-ordered format.
+- `donor/` — HF donor swap, the v3 PTQ solver, streaming conversion, asymmetric cascade;
+  `recovery/` — KD recovery finetune and resumable runners.
+- `glm.py`, `moe_ffn.py`, `reversible.py`, `budget.py` — receiver architecture, MoE,
+  reversible blocks and the memory model. `rounding.py` — opt-in named rounding streams.
 
 ## Repository conventions
 

@@ -1,4 +1,4 @@
-"""Bit-exact / parity gates for the kernel-fusion levers (results/FUSION_PLAN.md).
+"""Bit-exact / parity gates for the kernel-fusion levers (research/results/FUSION_PLAN.md).
 
 These pin the CPU-checkable invariants the fused CUDA/Triton kernels will mirror:
 

@@ -122,7 +122,7 @@ class PackedGroupScaleCounterLinear(RoundingStreamMixin, nn.Module):
         if decimation > 1:
             # Only well-defined under group-local statistics (nothing crosses a group
             # boundary); round-robin g % S == step % S. Compensate lr by ~S at the caller
-            # (measured recipe: dec4 + lr*4, results/DECIMATION_WITNESS.md).
+            # (measured recipe: dec4 + lr*4, research/results/DECIMATION_WITNESS.md).
             if stats_scope != "group":
                 raise ValueError("decimation requires stats_scope='group'")
             if in_features % group:
