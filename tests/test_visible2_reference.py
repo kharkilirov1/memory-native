@@ -76,3 +76,18 @@ def test_direct6_to_visible2_matches_ternary_oracle(C):
 def test_derive_invalid_chunk():
     with pytest.raises(ValueError):
         derive_visible2_from_packed6(torch.zeros(3,dtype=torch.uint8),11,chunk_groups=0)
+
+
+@pytest.mark.parametrize("C", [1,2,4,7,11])
+def test_direct6_to_visible2_matches_repository_encoder(C):
+    """Bind the converter to the canonical encoder, not only to a local reimplementation."""
+    from memory_native.counter import encode_state
+    from memory_native.packed import pack_codes
+
+    gen = torch.Generator().manual_seed(C)
+    t = torch.randint(-1,2,(5,32),dtype=torch.int16,generator=gen)
+    c = torch.randint(-(C-1),C,(5,32),dtype=torch.int16,generator=gen)
+    packed6 = pack_codes(encode_state(t,c,C))
+    converted = derive_visible2_from_packed6(packed6,C,chunk_groups=7)
+    assert torch.equal(converted,pack_visible2(t))
+    assert torch.equal(unpack_visible2(converted).to(torch.int16),t)
