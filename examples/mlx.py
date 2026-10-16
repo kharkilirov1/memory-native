@@ -7,8 +7,8 @@ coupling blocks: no FP master weights, no Adam moments, 0.75 byte/weight persist
 ordinary trainable parameters (mlx AdamW). The counter layers train THEMSELVES inside the
 VJP of one nn.value_and_grad call per step.
 
-    python scripts/mlx_demo.py                 # synthetic corpus, ~1 min on an M-series GPU
-    DATA_PATH=tinyshakespeare.txt python scripts/mlx_demo.py
+    python examples/mlx.py                     # synthetic corpus, ~1 min on an M-series GPU
+    DATA_PATH=tinyshakespeare.txt python examples/mlx.py
 
 On Apple silicon the packed layers route their update through the fused Metal kernel
 automatically; elsewhere (e.g. Linux mlx[cpu]) they use the identical pure-MLX math.

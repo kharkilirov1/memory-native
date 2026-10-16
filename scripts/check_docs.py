@@ -29,7 +29,7 @@ def main() -> int:
     pages += sorted((root / "research").glob("*/README.md"))
     errors = []
     for page in pages:
-        text = re.sub(r"```.*?```", "", page.read_text(), flags=re.S)
+        text = re.sub(r"```.*?```", "", page.read_text(encoding="utf-8"), flags=re.S)
         urls = re.findall(r"\]\(([^\s)]+)\)", text)
         html = HTMLLinks()
         html.feed(text)
