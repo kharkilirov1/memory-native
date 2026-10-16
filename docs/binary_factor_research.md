@@ -133,6 +133,19 @@ the published runner was corrected to the tested source, final text-runner blob
 Runner bookkeeping/data-precast changes do not change the learning rule. Timed-out
 runs were restarted with identical seeds, not counted as additional evidence.
 
+Hash scope in the committed protocols. `matrix_protocol.json` and `text_protocol.json`
+record the sources used for their pre-confirmation runs. Their core-module entry
+(`a9b6a974739e311785b81dd54cc4190c9eced57767837175325ba0fe5daa8491`) is the committed
+`binary_factor.py` and verifies against this checkout. Their runner entries are
+pre-publication local revisions and match no revision published here:
+`scripts/binary_factor_witness.py` `f1ca6435076b628c84bcf012c9c9871f1cec3b7bf6a587dc2971835b6220b8e4`
+(tip `260074bac27d6cf418747665a216d0fe1a00259c119dead8bea005e0605321b7`) and
+`scripts/binary_factor_text.py` `ab4db6a8c29393f1d2b1c9cdfc9328f111da6491397a641eefefa62444b1b4ca`
+(tip `938012d8cf76d17f7caf360da99ec6be94282bdb1cb6b068de2c5ce350606897`). Treat those
+two values as as-run provenance, not as checkout-verifiable digests; the publication
+edits were runner bookkeeping/CLI plus the FFN-expression fix above. The protocols are
+kept byte-unchanged as evidence.
+
 The archive retains all raw JSON, protocols, teacher and native seed-40 checkpoint.
 Loading the native checkpoint exactly reproduces CE 2.1285827104002237. A unit
 test independently verifies counter+scaleAdam continuation. This is a small byte
