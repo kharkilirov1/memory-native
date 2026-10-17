@@ -9,6 +9,7 @@ from .counter import decode_state, encode_state
 from .rounding import RoundingStreamMixin
 from .group_scale_kernels import (
     HAS_TRITON,
+    _broadcast_groups,
     group_counter_update_from_io_hashsr,
     group_counter_update_grouplocal_from_io_hashsr,
     group_update_scratch_bytes,
@@ -336,11 +337,13 @@ class PackedGroupScaleCounterLinear(RoundingStreamMixin, nn.Module):
     def visible_weight(self, dtype: torch.dtype | None = None) -> torch.Tensor:
         """Dense reference weight in original input order (debug/CPU only)."""
         t, c = self._decode_perm()
-        positions = torch.arange(self.in_features, device=self.state.device)
-        group_idx = torch.div(positions, self.group, rounding_mode="floor")
-        w_perm = self.scale[:, group_idx] * (
-            t.float() + self.residual_alpha * c.float() / self.C
-        )
+        # alpha=0 is the strict ternary readout: the counter is invisible, so skip the two
+        # full [out, in] residual temporaries (bit-exact — adding 0.0 to t changes nothing).
+        if self.residual_alpha:
+            value = t.float() + self.residual_alpha * c.float() / self.C
+        else:
+            value = t.float()
+        w_perm = _broadcast_groups(self.scale, self.group, self.in_features) * value
         w = torch.empty_like(w_perm)
         w[:, self.perm.long()] = w_perm
         if self._has_salient():
