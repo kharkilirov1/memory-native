@@ -1,0 +1,34 @@
+{
+ "measured_commit": "ab39b3f3b13fc663f58730e25eaf214f6ec17570",
+ "device": "NVIDIA A100-SXM4-40GB",
+ "dense_baseline_checks": {
+  "meaning": "AdamW must receive real gradients, change parameter values, and populate optimizer state",
+  "1024x1024": {"grad_present": true, "weights_changed": true, "adam_state_nonempty": true},
+  "2048x2048": {"grad_present": true, "weights_changed": true, "adam_state_nonempty": true},
+  "4096x4096": {"grad_present": true, "weights_changed": true, "adam_state_nonempty": true}
+ },
+ "counter_update_checks": {
+  "meaning": "update_events must grow by exactly out*in once per step (catches the double-update and the missed-update failure modes of the in-backward updater), and the packed state must change",
+  "rows": [
+   {"shape": 1024, "decimation": 1, "cache_bytes": 1073741824, "update_events_per_step": 1048576, "expected": 1048576, "exactly_one_update": true, "second_step_one_update": true, "state_changed": true},
+   {"shape": 1024, "decimation": 4, "cache_bytes": 1073741824, "update_events_per_step": 1048576, "expected": 1048576, "exactly_one_update": true, "second_step_one_update": true, "state_changed": true},
+   {"shape": 1024, "decimation": 8, "cache_bytes": 1073741824, "update_events_per_step": 1048576, "expected": 1048576, "exactly_one_update": true, "second_step_one_update": true, "state_changed": true},
+   {"shape": 1024, "decimation": 1, "cache_bytes": 0, "update_events_per_step": 1048576, "expected": 1048576, "exactly_one_update": true, "second_step_one_update": true, "state_changed": true},
+   {"shape": 2048, "decimation": 1, "cache_bytes": 1073741824, "update_events_per_step": 4194304, "expected": 4194304, "exactly_one_update": true, "second_step_one_update": true, "state_changed": true},
+   {"shape": 2048, "decimation": 4, "cache_bytes": 1073741824, "update_events_per_step": 4194304, "expected": 4194304, "exactly_one_update": true, "second_step_one_update": true, "state_changed": true},
+   {"shape": 2048, "decimation": 8, "cache_bytes": 1073741824, "update_events_per_step": 4194304, "expected": 4194304, "exactly_one_update": true, "second_step_one_update": true, "state_changed": true},
+   {"shape": 2048, "decimation": 1, "cache_bytes": 0, "update_events_per_step": 4194304, "expected": 4194304, "exactly_one_update": true, "second_step_one_update": true, "state_changed": true},
+   {"shape": 4096, "decimation": 1, "cache_bytes": 1073741824, "update_events_per_step": 16777216, "expected": 16777216, "exactly_one_update": true, "second_step_one_update": true, "state_changed": true},
+   {"shape": 4096, "decimation": 4, "cache_bytes": 1073741824, "update_events_per_step": 16777216, "expected": 16777216, "exactly_one_update": true, "second_step_one_update": true, "state_changed": true},
+   {"shape": 4096, "decimation": 8, "cache_bytes": 1073741824, "update_events_per_step": 16777216, "expected": 16777216, "exactly_one_update": true, "second_step_one_update": true, "state_changed": true},
+   {"shape": 4096, "decimation": 1, "cache_bytes": 0, "update_events_per_step": 16777216, "expected": 16777216, "exactly_one_update": true, "second_step_one_update": true, "state_changed": true}
+  ]
+ },
+ "lut_correctness": {
+  "meaning": "LUT path must equal the exact fp32 dense product within fp32 summation order",
+  "cpu_tests": "reference agreement with dense product and with lut_gemm reference (4 passed locally and on the A100)",
+  "cuda_tests": "index build / LUT build / composed matmul at M=1,2,8,33,64 / amortized==total (12 passed on A100)",
+  "max_rel_err_vs_dense_fp32": {"M=1": 2.33e-07, "M=2": 2.5e-07, "M=8": 4.11e-07, "M=32": 4.02e-07, "M=64": 5.3e-07, "M=128": 4.57e-07, "M=256": 6.1e-07, "M=512": 2.18e-06},
+  "unsupported": ["residual_alpha > 0 (homotopy)", "salient channel", "training gradients"]
+ }
+}
