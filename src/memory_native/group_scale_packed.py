@@ -164,6 +164,8 @@ class PackedGroupScaleCounterLinear(RoundingStreamMixin, nn.Module):
         self._sr_step = 0
         self._weight_cache = None
         self._dense_cache = None
+        self._decim_cache = {}
+        self._seed_buf = None
         self._weight_cache_bytes = int(weight_cache_bytes)
 
         # Zero state packs to a CONSTANT 3-byte pattern (encode_state is
@@ -558,9 +560,20 @@ class PackedGroupScaleCounterLinear(RoundingStreamMixin, nn.Module):
             HAS_TRITON and x2.is_cuda and _is_power_of_two(self.group) and self.group >= 16
         )
         active = None
+        active_cols = None
         if self.decimation > 1:
-            gids = torch.arange(self.n_groups, device=self.state.device)
-            active = (gids % self.decimation) == (self._sr_step % self.decimation)
+            phase = self._sr_step % self.decimation
+            cached = self._decim_cache.get(phase)
+            if cached is None or cached[0] != self.perm._version:
+                from .group_scale_kernels import _decim_index
+                gids = torch.arange(self.n_groups, device=self.state.device)
+                mask = (gids % self.decimation) == phase
+                group_ids = mask.nonzero().squeeze(1)
+                cols, _gt = _decim_index(self.perm.to(torch.long), group_ids,
+                                         self.group, self.in_features, self.state.device)
+                cached = (self.perm._version, group_ids, cols, mask)
+                self._decim_cache[phase] = cached
+            _, group_ids, active_cols, active = cached
         upd_kw = dict(
             group=self.group, C=self.C, lr=self.lr, lr_scale=self.lr_scale,
             rms_beta=self.rms_beta, rms_eps=self.rms_eps, seed=seed,
@@ -575,6 +588,9 @@ class PackedGroupScaleCounterLinear(RoundingStreamMixin, nn.Module):
                         (self.out_features, self.in_features),
                         device=self.state.device, dtype=torch.float32)
                 dense_out = self._dense_cache
+            if active_cols is not None:
+                upd_kw["active_groups"] = active_cols if False else active
+                upd_kw["active_cols"] = active_cols
             triton_group_counter_update_fused(
                 self.state, self.scale, self.v, x2, go2, self.perm,
                 dense_out=dense_out, **upd_kw)

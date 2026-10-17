@@ -1014,7 +1014,7 @@ def triton_group_counter_update_from_io(
     grad_scale = torch.empty_like(scale, dtype=torch.float32)
     gsq = torch.empty_like(scale, dtype=torch.float32)
     denom = torch.empty((N,), device=scale.device, dtype=torch.float32)
-    seed_t = torch.tensor([int(seed) & 0xFFFFFFFF], dtype=torch.int64, device=x2.device)
+    seed_t = _seed_tensor(seed, x2.device)
 
     block_k = triton.next_power_of_2(group)
     _group_stats_from_io_kernel[(N, G)](
@@ -1114,6 +1114,20 @@ def _decim_index(perm_long: torch.Tensor, group_ids: torch.Tensor, group: int, K
     return perm_long[cols].contiguous(), group_ids.to(torch.int32).contiguous()
 
 
+_SEED_BUFFERS: dict = {}
+
+
+def _seed_tensor(seed: int, device) -> torch.Tensor:
+    """Reuse one int64 seed buffer per device (no allocator churn / H2D alloc per step)."""
+    key = device.index if getattr(device, "index", None) is not None else -1
+    buf = _SEED_BUFFERS.get(key)
+    if buf is None:
+        buf = torch.empty(1, dtype=torch.int64, device=device)
+        _SEED_BUFFERS[key] = buf
+    buf.fill_(int(seed) & 0xFFFFFFFF)
+    return buf
+
+
 def triton_group_counter_update_fused(
     state_packed_perm: torch.Tensor,
     scale: torch.Tensor,
@@ -1133,6 +1147,7 @@ def triton_group_counter_update_fused(
     lagged: bool = False,
     clip: float = 0.0,
     active_groups: torch.Tensor | None = None,
+    active_cols: torch.Tensor | None = None,
     dense_out: torch.Tensor | None = None,
 ) -> None:
     """One-launch fused GROUP-LOCAL update: tensor-core correlation + counter epilogue.
@@ -1173,9 +1188,9 @@ def triton_group_counter_update_fused(
         raise ValueError(f"group-local v must be [out, n_groups]={N, G}, got {tuple(v.shape)}")
     if K % 4 or G != (K + group - 1) // group or perm.numel() != K:
         raise ValueError("invalid group layout")
-    seed_t = torch.tensor([int(seed) & 0xFFFFFFFF], dtype=torch.int64, device=x2.device)
+    seed_t = _seed_tensor(seed, x2.device)
     bf16, fp16 = _dtype_flags(x2)
-    perm_long = perm.to(dtype=torch.long)
+    perm_long = None if active_cols is not None else perm.to(dtype=torch.long)
     # One coalesced act-order copy of x ([M, K] or [M, K_active], input dtype -- far
     # below the dense path's fp32 grad_w+casts): the kernel then streams contiguous
     # group columns instead of gathering through perm per tile (H3 pathology, T4 gate).
@@ -1189,7 +1204,11 @@ def triton_group_counter_update_fused(
         if group_ids.numel() == 0:
             return
         group_ids = group_ids.to(device=x2.device)
-        cols, groups_t = _decim_index(perm_long, group_ids, group, K, perm.device)
+        if active_cols is None:
+            cols, groups_t = _decim_index(perm_long, group_ids, group, K, perm.device)
+        else:
+            cols = active_cols
+            groups_t = group_ids.to(torch.int32).contiguous()
         x_perm = x2.index_select(1, cols)
         grid = (triton.cdiv(N, 32), int(group_ids.numel()))
         decimated = True
