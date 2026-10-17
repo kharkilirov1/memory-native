@@ -173,3 +173,31 @@ Reading: for the layer shapes and batches a 12B-class model uses, one counter st
 overhead in the update path (host work, launch, the decimation index build), not the
 kernel's arithmetic. That is the next target; until it is fixed the objective is met for
 large shapes only.
+
+
+## Round 5: host overhead removed from the update path
+
+The ~0.6 ms floor was mostly host work, not the kernel: profiling the stages at
+1024^2/B=512/dec4 showed mask build 0.021, `perm.to(long)` 0.011, decimation index build
+0.088, `index_select` 0.017, seed tensor 0.025, and a direct kernel call at 0.22 ms while
+the wrapper total was 0.58. Three fixes:
+
+- decimation column indices are built once per phase and cached on the layer (keyed on the
+  perm version counter, so `set_permutation` invalidates them);
+- the wrapper accepts those precomputed `active_cols` and skips `_decim_index`/`nonzero`;
+- the SR seed uses one reused int64 device buffer instead of a fresh `torch.tensor` per step.
+
+| shape | batch | dec | dense full | counter full | before | after |
+|---|---:|---:|---:|---:|---:|---:|
+| 4096x4096 | 512 | 8 | 3.047 ms | **2.544 ms** | 2.742 (0.90x) | **0.83x** |
+| 2048x2048 | 256 | 4 | 0.576 | 0.842 | 1.065 (1.81x) | **1.46x** |
+| 1024x1024 | 512 | 4 | 0.597 | 0.834 | 1.035 (1.75x) | **1.40x** |
+| 1536x1536 | 64 | 1 | 0.582 | 0.726 | 0.768 (1.29x) | 1.25x |
+
+The updater itself now beats AdamW at 2048^2 too (0.385 vs 0.408) and by 2.5x at
+4096^2/dec8 (0.483 vs 1.208). Remaining gap on small layers is ~0.24 ms of autograd/dispatch
+around the custom Function plus the small-shape kernel (0.22 ms, only 64 programs at
+1024^2/dec4 — the grid is thin). Next: raise parallelism for small shapes (split the M
+axis or tune BLOCK_N/M), and compare a small-layer fallback path.
+
+Tests: 23 CUDA+CPU packed tests pass.
