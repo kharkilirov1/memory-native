@@ -1,9 +1,12 @@
-# State accounting: 6 bits is 0.75 B/param, the layer is 0.9-1.1, a step is ~23
+# State accounting: 6 bits is 0.75 B/param, the layer is 0.9-1.0, a step is ~23
 
 Measured 2026-10-17 on the 20-core CPU box (Windows, 31.9 GiB RAM, no CUDA),
 PyTorch 2.12.1+cpu. Everything below is printed by
 [`scripts/state_accounting.py`](../../scripts/state_accounting.py); the process-peak
 numbers come from the platform working-set probe in the same script.
+(The `_salient_perm_flat` mirror was int64 in the first measurement pass; the
+dtype now follows the coefficient count, which is why the resident figure here
+is 1.002 and not the 1.082 recorded earlier that day.)
 
 ```bash
 python scripts/state_accounting.py --step
@@ -29,7 +32,7 @@ the counting.
 | `perm` | (1536,) | int32 | 6.0 KiB | checkpoint — act-order permutation |
 | `salient_idx` | (47185,) | int32 | 184.3 KiB | checkpoint — 0.080 B/param |
 | `salient_val` | (47185,) | float16 | 92.2 KiB | checkpoint — 0.040 B/param |
-| `_salient_perm_flat` | (47185,) | **int64** | 368.6 KiB | **runtime only** — 0.160 B/param |
+| `_salient_perm_flat` | (47185,) | int32 | 184.3 KiB | **runtime only** — 0.080 B/param |
 | `_flip_sample_indices` | (4096,) | int64 | 32.0 KiB | runtime only, fixed per layer |
 | `_flip_sample_prev` | (4096,) | int8 | 4.0 KiB | runtime only, fixed per layer |
 
@@ -37,13 +40,15 @@ the counting.
 |---|---:|---:|---:|
 | 6-bit ideal | 1.69 MiB | 0.750 | 1.00x |
 | `persistent_bytes()` (checkpoint) | 2.04 MiB | **0.906** | 1.21x |
-| resident (checkpoint + runtime tensors) | 2.43 MiB | **1.082** | 1.44x |
+| resident (checkpoint + runtime tensors) | 2.25 MiB | **1.002** | 1.34x |
 | strict-update scratch (transient) | 222.0 KiB | 0.096 | — |
 
-So the honest per-coefficient numbers are **0.906 B persistent / 1.082 B resident**,
+So the honest per-coefficient numbers are **0.906 B persistent / 1.002 B resident**,
 not 0.750. The largest single non-body item is the salient channel
-(0.12 B/param persistent at 2%), and the largest *runtime* item is its int64
-flat-index mirror, which is twice the int32 index it mirrors.
+(0.12 B/param persistent at 2%), and the largest *runtime* item is its flat-index
+mirror, which mirrors the int32 `salient_idx` at the same width while the model has
+fewer than 2**31 coefficients (above that it must widen to int64 — a 27B-class
+layer then pays 0.160 B/param again).
 
 `--salient 0` gives 0.797 B/param: state + group scales + RMS + perm only.
 
@@ -92,8 +97,10 @@ The 12B number matches the measured 0.906 to 0.3%. Note the 27B report quotes
 1.31 B/param, which no measured layer reaches, so the 15.59B figure is the
 converter's counter and undercounts (the report itself gives the 24.35B
 per-layer recount). Quote 0.84-0.90 B/param for that state, not the counter.
-Resident (`CLAUDE.md`, 12B on 2xT4) was 11.7 GiB = 1.15 B/param — consistent with
-1.08 B/param resident + fp-tail buffers.
+Resident (`CLAUDE.md`, 12B on 2xT4) was recorded as 11.7 GiB = 1.15 B/param when
+the runtime mirror was int64 (1.7 GiB of that figure); with the dtype rule below
+the same model would sit at ~10.85 GiB = 1.07 B/param, i.e. the measured 1.002
+plus fp-tail buffers.
 
 ## Solver-side transients (the other "more than expected")
 
@@ -118,14 +125,18 @@ gap, the fp tail (embeddings/head/norms) with its own AdamW moments, fp32 logits
 (one vocabulary-sized tensor), and load-time duplication when a state dict is
 copied into fresh modules. Add those per model before quoting a training peak.
 
-## Open levers (measured, not applied)
+## Levers
 
-1. `_salient_perm_flat` is int64 for every model. At 2% salient it costs 0.160
-   B/param (17% of the body). A flat index needs 64 bits only when
-   `out*in >= 2**31` (true at 27B, false at 1.5B): a dtype chosen from that
-   condition halves it below the threshold.
+1. **Applied 2026-10-17:** `_salient_perm_flat` is int32 while the layer has at most
+   2**31 coefficients (`_salient_index_dtype` in `group_scale_packed.py`), so the
+   mirror costs 0.080 instead of 0.160 B/param at 2% salient. The flat index is
+   per-layer (`row*in_features + col`), so every layer of every donor converted so
+   far fits: the widest one in the 27B run is 5120x17408 = 89M positions, two
+   orders below 2**31. Only a layer above ~46k x 46k needs the int64 branch, which
+   is kept and unit-tested.
 2. `_flip_sample_indices` is 4096 int64 per layer; int32 would halve it (0.03
-   B/param on a 1536^2 layer, more on narrow ones).
-3. The pure-PyTorch update chain's temporaries (below) are what the Triton fused
-   kernel exists to remove; on CPU they are the step peak, on GPU they are
-   latency.
+   B/param on a 1536^2 layer, more on narrow ones). Not changed: 32 KiB/layer is
+   16 MiB across a 496-linear 27B model.
+3. The pure-PyTorch update chain's temporaries (see "One training step") are what
+   the Triton fused kernel exists to remove; on CPU they are the step peak, on GPU
+   they are latency.
