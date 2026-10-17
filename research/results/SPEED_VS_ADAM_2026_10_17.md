@@ -318,3 +318,27 @@ covers it. Re-measured with the fixed path (A100, realistic `nn.Linear + AdamW` 
 | 1536x1536 | 64 | 1 | 0.600 | 0.747 | 1.24x |
 
 Tests: 24 (CUDA bit-exactness + packed + the new emission test) pass.
+
+
+## Round 10: whole-stack A/B on Qwen2.5-0.5B layer shapes (the decisive number)
+
+Single-layer A/Bs can hide composition effects (96 layers per step, mixed shapes,
+per-layer fixed costs). Measured a stack matching Qwen2.5-0.5B: 24 blocks x 4 linears
+(896x896, 4864x896, 896x4864, 896x896), fp32, one forward + one backward + state updates
+(dense AdamW vs counter, counter layers with random valid state, group scope, cache on):
+
+| tokens per step | dense nn.Linear+AdamW | counter | ratio |
+|---:|---:|---:|---:|
+| 512 | 64.84 ms | **55.75 ms** | **0.86x** |
+| 64 | 26.61 ms | 53.18 ms | 2.00x |
+
+So at the token batches real training uses, a counter step is **14% faster than the dense
+AdamW step it replaces** across the whole 0.5B-shaped stack. At small batch (64 tokens) the
+per-layer fixed cost dominates and the counter path is 2x slower — the operating envelope
+is therefore: counters win when tokens/step amortize the per-layer update (>= ~256-512
+tokens/step at these shapes).
+
+This closes the objective: per-phase measured at the target shapes/batches, fwd 1.00x,
+grad_x 1.00x, update 0.40x of AdamW, full step 0.83-0.91x single-layer and 0.86x
+whole-stack; counter semantics (SR, carry, group scales) are bit-exact against the torch
+oracle, and the cached dense weight is verified to equal a fresh decode after every update.
