@@ -31,6 +31,19 @@ claim: on CPU it reproduced the counter-optimizer cost over ternary QAT (+2.1…
 not "within ~0.1% of dense" (+3.9…+6.4% above dense across the default run and seeds 0-2,
 and no win over vanilla counter in 3 of 4 runs).
 
+## LUT-GEMM multi-token scaling and a verification-first counter/AdamW re-measurement (2026-10-17)
+
+[`research/results/lut_scaling_2026_10_17/REPORT.md`](../research/results/lut_scaling_2026_10_17/REPORT.md)
+adds a real multi-token LUT-GEMM pipeline (M=1..512), a CUDA-graph replay harness and a
+counter-vs-AdamW harness that verifies real gradients, real AdamW state/parameter changes
+and exactly one counter update per step before timing anything. On an A100 at
+`ab39b3f`: multi-token LUT is exact (2.2e-6 relative) and 3-35x faster than the in-repo
+fused-decode kernel, but loses to bf16 tensor-core GEMM at every M and to fp32 GEMM from
+M~16-32; the counter step is 0.97-1.06x of an AdamW step at 4096^2/B=512 (decimation 4/8
+help) and slower on 1024^2. Limits: strict ternary only (no alpha>0, no salient), single
+A100, and **no controlled time-to-quality training experiment** - per-step cost is not
+shown to translate into equal-quality wall-clock savings yet.
+
 For the full capability matrix, read [project status](status.md). For raw measurements,
 negative results and historical protocols, use the [results index](../research/results/README.md).
 To reproduce or challenge a claim, follow [reproducibility](reproducibility.md).

@@ -5,6 +5,23 @@ forecasts, and negative results. Evidence completeness differs by experiment: ma
 early T4 logs are committed; some later runs exist only as Markdown summaries or
 external Drive/Kaggle artifacts. A historical table is not a complete raw witness.
 
+## LUT-GEMM multi-token scaling (2026-10-17, A100)
+
+Independent reproduction and extension of the M=1 LUT result to M=1..512 tokens, plus a
+verification-first re-measurement of the 6-bit counter updater against AdamW.
+[`lut_scaling_2026_10_17/REPORT.md`](lut_scaling_2026_10_17/REPORT.md) has the analysis,
+raw CSVs/JSONs, VRAM accounting and reproduction commands; the kernels are
+`src/memory_native/lut_scaling.py` with `tests/test_lut_scaling.py`.
+
+Measured on an A100-SXM4-40GB at commit `ab39b3f` (branch `research/lut-multi-token`):
+the multi-token LUT is exact (max 2.2e-6 relative vs the fp32 product) and 3-35x faster
+than the in-repo fused-decode kernel, but it **loses to tensor-core bf16 GEMM at every M**
+and to fp32 GEMM from M~16-32; the earlier "2.7x" is a win over the repo's own
+fused-decode kernel, which itself runs ~20-190x above its memory roofline at M=1. The
+counter step measured 0.97-1.06x of a real AdamW step at 4096^2/B=512 (1.06x dec1, 0.97x
+dec4) with exactly one verified update per step; no controlled time-to-quality training
+experiment was run.
+
 ## Small-model memory and throughput
 
 The tested short character-LM runs had lower counter training peak and similar or
