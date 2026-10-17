@@ -41,12 +41,19 @@ SALIENT_SCOPE=layer, IN_SWEEP_REFIT=1, CASCADE=1, CALIB 16x512 tokens from the
 Qwen3.8 tokenizer), DEVICE=cpu, DTYPE=fp32, MICRO_BATCH=1.
 
 - 64/64 blocks, 317 targets, 496 counter linears on restore, **15,591,342,080 coeffs**
-  (24.35B counted with per-layer linear recount), solver-only, zero training.
+  is the converter's own counter and it undercounts: a per-layer linear recount gives
+  **24.35B**, and only that number is consistent with the state size below. Quote
+  24.35B, solver-only, zero training.
 - Wall 671 min (11.2 h) + 23-block replay after a restart; steady ~14.5 min/block.
 - Peak resident 2.65 GiB during streaming; solve-phase plateau ~18.6 GiB commit
-  (fp64 Cholesky workspaces) — flat across block landings after the leak fix below.
-- Output: 64 `block_*.pt`, **20.5 GiB** total (~2.68 bpw over 61B total params;
-  ternary body 17.4 GiB + scales fp32 + salient fp16 2% + perm int32).
+  (fp64 Cholesky workspaces plus the 24 GiB default Hessian chunk budget, see
+  `STATE_ACCOUNTING.md`) — flat across block landings after the leak fix below.
+- Output: 64 `block_*.pt`, **20.5 GiB** total (ternary body 17.4 GiB + scales fp32 +
+  salient fp16 2% + perm int32). Over the 24.35B converted coefficients that is
+  **0.84 B/param**, consistent with the 0.906 B/param measured for a deployed packed
+  layer (`STATE_ACCOUNTING.md`). The "~2.68 bpw over 61B total params" phrasing mixes
+  denominators (the donor manifest's total, not the converted count) — use the
+  per-coefficient figure when comparing against the 6-bit ideal.
 
 ### Memory bugs found at 27B scale (each pinned, fixed, regression-tested)
 
