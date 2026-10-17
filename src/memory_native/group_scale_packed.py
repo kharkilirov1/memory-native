@@ -333,6 +333,9 @@ class PackedGroupScaleCounterLinear(RoundingStreamMixin, nn.Module):
         if not torch.equal(torch.sort(p).values, expected):
             raise ValueError("perm must contain every input column exactly once")
         self.perm.copy_(p.to(torch.int32))
+        self._weight_cache = None
+        self._dense_cache = None
+        self._decim_cache.clear()
 
     def _all_codes_perm(self) -> torch.Tensor:
         return unpack_codes(self.state, self.in_features)
@@ -374,7 +377,7 @@ class PackedGroupScaleCounterLinear(RoundingStreamMixin, nn.Module):
     def _weight_cache_key(self, dtype: torch.dtype | None):
         return (
             self._sr_step, dtype,
-            self.state._version, self.scale._version,
+            self.state._version, self.scale._version, self.perm._version,
             self.salient_idx._version, self.salient_val._version,
         )
 
@@ -593,9 +596,9 @@ class PackedGroupScaleCounterLinear(RoundingStreamMixin, nn.Module):
             dense_out = None
             if self._cacheable_weight(torch.float32):
                 if self._dense_cache is None:
-                    self._dense_cache = torch.empty(
-                        (self.out_features, self.in_features),
-                        device=self.state.device, dtype=torch.float32)
+                    # Full decode, not empty(): a decimated update writes only its active
+                    # groups, so every other column must already hold the correct value.
+                    self._dense_cache = self.visible_weight(torch.float32).clone()
                 dense_out = self._dense_cache
             if active_cols is not None:
                 upd_kw["active_groups"] = active_cols if False else active
@@ -647,6 +650,9 @@ class PackedGroupScaleCounterLinear(RoundingStreamMixin, nn.Module):
         salient_idx: torch.Tensor | None = None,
         salient_val: torch.Tensor | None = None,
     ) -> None:
+        self._weight_cache = None
+        self._dense_cache = None
+        self._decim_cache.clear()
         if perm is not None:
             self.set_permutation(perm)
         scales = scales.to(device=self.state.device, dtype=torch.float32)
