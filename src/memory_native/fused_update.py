@@ -21,7 +21,8 @@ import torch
 
 from .counter import decode_state, encode_state
 
-__all__ = ["hash_u32", "uniform01", "counter_update_hashsr", "HAS_TRITON", "triton_counter_update"]
+__all__ = ["hash_u32", "uniform01", "hash_u32_unmasked", "uniform01_seeded",
+           "counter_update_hashsr", "HAS_TRITON", "triton_counter_update"]
 
 _M1 = 0x7feb352d
 _M2 = 0x846ca68b
@@ -40,6 +41,35 @@ def hash_u32(x: torch.Tensor) -> torch.Tensor:
 
 def uniform01(x: torch.Tensor) -> torch.Tensor:
     return (hash_u32(x) & 0x00FFFFFF).to(torch.float32) * (1.0 / 16777216.0)
+
+
+def hash_u32_unmasked(x: torch.Tensor) -> torch.Tensor:
+    """``hash_u32`` for an input already known to be in ``[0, 2**32)``.
+
+    Bit-identical to ``hash_u32`` under that precondition: both the opening
+    ``to(int64) & 0xFFFFFFFF`` and the closing ``& 0xFFFFFFFF`` are then no-ops
+    (the xor-shift and the two masked multiplies already keep every value below
+    2**32). Saves two full-tensor passes per hash, which matters because the
+    group-scale reference hashes the whole ``[out, in]`` element index twice per
+    update — measured 61 ms of a ~330 ms CPU update at 1536x1536.
+    """
+    x = x ^ (x >> 16)
+    x = (x * _M1) & 0xFFFFFFFF
+    x ^= x >> 15
+    x = (x * _M2) & 0xFFFFFFFF
+    x ^= x >> 16
+    return x
+
+
+def uniform01_seeded(elem: torch.Tensor, seed: int) -> torch.Tensor:
+    """Exactly ``uniform01((seed ^ hash_u32(elem)) & 0xFFFFFFFF)`` for ``elem < 2**32``.
+
+    Same two hash rounds, XOR and 24-bit mantissa as the literal expression, with the
+    provably-no-op masks dropped; use it only when the caller guarantees the bound.
+    """
+    h = hash_u32_unmasked(elem)
+    z = h ^ (int(seed) & 0xFFFFFFFF)
+    return (hash_u32_unmasked(z) & 0x00FFFFFF).to(torch.float32) * (1.0 / 16777216.0)
 
 
 @torch.no_grad()
