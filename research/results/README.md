@@ -51,6 +51,7 @@ whole-step VRAM savings are smaller and include activations and temporary buffer
 | Pure-PyTorch step speed (CPU A/B) | [`STEP_SPEED_2026_10_17.md`](STEP_SPEED_2026_10_17.md), [`../../scripts/bench_counter_step.py`](../../scripts/bench_counter_step.py) | −15.5% step, bit-identical; the automaton chain still dominates, so this is not GPU-parity evidence |
 | PTQ recipe + rotation (0.5B GPU) | [`PTQ_RECIPE_2026_10_17.md`](PTQ_RECIPE_2026_10_17.md) | align+salient+iters>=4 = 12.3x PPL vs defaults; rotation +1.40x but does NOT replace salient; grad_w sketching rejected (7% ceiling) |
 | LUT-GEMM (A100, M=1) | [`LUT_GEMM_2026_10_17.md`](LUT_GEMM_2026_10_17.md), [`../../scripts/bench_lut_gemm.py`](../../scripts/bench_lut_gemm.py) | 2.7x faster than the fused decode-in-GEMM for single-token decode; exact (1.8e-7); M=1 only, no salient channel yet, not wired into a layer |
+| Counter step vs dense AdamW (A100) | [`SPEED_VS_ADAM_2026_10_17.md`](SPEED_VS_ADAM_2026_10_17.md), [`../../scripts/bench_vs_adam.py`](../../scripts/bench_vs_adam.py) | 3.55x -> 2.33x full-step gap after hybrid mode + decoded-weight cache; matmuls now match dense exactly; remaining gap = 1 decode/step + updater |
 | MLX/group/Bonsai compatibility | [`../../docs/MLX_PORT.md`](../../docs/MLX_PORT.md), MLX tests | Linux CPU gates; Metal performance/parity on Apple silicon still open |
 
 ## Donor conversion and recovery
