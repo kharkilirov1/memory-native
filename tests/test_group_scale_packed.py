@@ -250,3 +250,27 @@ def test_triton_decode_dense_matches_the_torch_decode():
     got = layer.visible_weight()
     assert torch.allclose(got, want, atol=1e-6, rtol=0), (got - want).abs().max().item()
     layer.residual_alpha = 0.0
+
+
+def test_dense_emission_matches_the_decode_after_an_update():
+    """The updater's emitted dense buffer must equal a fresh decode of the new state."""
+    if not torch.cuda.is_available():
+        import pytest
+        pytest.skip("CUDA required")
+    from memory_native.group_scale_kernels import HAS_TRITON
+    if not HAS_TRITON:
+        import pytest
+        pytest.skip("Triton unavailable")
+
+    torch.manual_seed(4)
+    out, k, group, C = 64, 256, 128, 11
+    layer = PackedGroupScaleCounterLinear(k, out, group=group, C=C, kernel_mode="gemm",
+                                          stats_scope="group", decimation=2,
+                                          weight_cache_bytes=1 << 24).cuda()
+    x = torch.randn(32, k, device="cuda")
+    go = torch.randn(32, out, device="cuda")
+    y = layer(x)
+    y.backward(go)                      # runs the fused updater + dense emission
+    emitted = layer._cached_visible_weight(torch.float32)
+    decoded = layer.visible_weight(torch.float32)   # same kernel, fresh from state
+    assert torch.equal(emitted, decoded), (emitted - decoded).abs().max().item()
