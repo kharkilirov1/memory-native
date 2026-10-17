@@ -1,0 +1,86 @@
+{
+ "device": "NVIDIA A100-SXM4-40GB",
+ "measured_commit": "b5657f6",
+ "harness": "repo char-LM parity gate (memory-native-charlm): same architecture, corpus (tinyshakespeare, vocab 65), tokenizer, initialisation and token budget per arm (config=tiny: 4 layers, d=256, block 128, 4 heads; batch 32; 600 steps; eval 20)",
+ "seeds": [
+  0,
+  1
+ ],
+ "final_val_loss": {
+  "dense": {
+   "seed0": 2.1923,
+   "seed1": 2.2101,
+   "mean": 2.2012
+  },
+  "counter_rms": {
+   "seed0": 1.9303,
+   "seed1": 1.9256,
+   "mean": 1.928,
+   "note": "old torch path"
+  },
+  "counter_triton": {
+   "seed0": 1.9448,
+   "seed1": 1.9708,
+   "mean": 1.9578
+  },
+  "counter_fast": {
+   "seed0": 1.9606,
+   "seed1": 1.8931,
+   "mean": 1.9269
+  }
+ },
+ "throughput_tok_s": {
+  "dense": {
+   "seed0": 435292,
+   "seed1": 446184,
+   "mean": 440738
+  },
+  "counter_rms": {
+   "seed0": 90010,
+   "seed1": 90454,
+   "mean": 90232
+  },
+  "counter_triton": {
+   "seed0": 197121,
+   "seed1": 201620,
+   "mean": 199371
+  },
+  "counter_fast": {
+   "seed0": 190498,
+   "seed1": 195267,
+   "mean": 192883
+  }
+ },
+ "persistent_state_mib": {
+  "dense": 12.21,
+  "counter_rms": 3.31,
+  "counter_triton": 2.56,
+  "counter_fast": 2.56
+ },
+ "peak_training_vram_mib": {
+  "dense": 342.4,
+  "counter_rms": 324.54,
+  "counter_triton": 306.77,
+  "counter_fast": 306.77
+ },
+ "memory_gate": {
+  "harness": "memory-native-memgate --config tiny --batch 16 --device cuda",
+  "counter_rms_persistent_mib": 5.25,
+  "counter_weights_packed_6bit_mib": 2.25,
+  "peak_counter_rms_mib": 209.72,
+  "peak_dense_adamw_mib": 234.14,
+  "peak_ratio_dense_over_counter": 1.12
+ },
+ "ratios_vs_baseline": {
+  "speed_counter_triton_over_counter_rms": 2.21,
+  "persistent_dense_over_counter_triton": 4.77,
+  "peak_dense_over_counter_triton": 1.12,
+  "quality_counter_triton_minus_dense": -0.243,
+  "quality_counter_triton_minus_counter_rms": 0.03
+ },
+ "caveats": [
+  "2 seeds only; the 0.03 val difference between counter_triton and the old torch path is within run-to-run spread for this budget and comes from a different stochastic-rounding stream, not from different math (same update kernel, same decode semantics)",
+  "peak VRAM is activation-dominated at this model size: the 4.8x persistent-state win does not translate into a large peak win",
+  "the fast path consumes no persistent fp32 weight and no AdamW moments; the per-step cost of the transient buffers is included in the measured peak"
+ ]
+}

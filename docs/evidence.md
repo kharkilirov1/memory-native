@@ -60,6 +60,22 @@ and documents an open defect: on 4096^2 the fused updater moves 2 of 16.8M codes
 quantum at lr=0. Peak memory at model scale is activation-dominated (1.05-1.12x total win),
 so storage savings must not be quoted as training-memory savings.
 
+## Speed recovery of the counter layer path (2026-10-18)
+
+[`research/results/speed_recovery_2026_10_18/REPORT.md`](../research/results/speed_recovery_2026_10_18/REPORT.md)
+locates and fixes the char-LM 4x slowdown on an A100 at `b5657f6`. The gate had been training
+the pure-torch reference counter layers (27k-30k CUDA launches per step, 30-35 ms of a
+55-60 ms step); the fused kinds also decoded (t,c) with torch in backward although their
+fused updater and kernel grad_x never read it, and each fused update did a pageable H2D seed
+copy that synchronized the stream once per layer per step. With lazy decode, a cached device
+seed slot, the fused kinds wired into the gate and an exact lr=0 no-op guard, the same gate
+(counter_triton, 2 seeds) goes from **90.2k to 199.4k tok/s (2.21x)** with val loss 1.958 vs
+1.928 (both better than AdamW 2.201), persistent state **2.56 vs 12.21 MiB**, peak 306.8 vs
+342.4 MiB. Bit-level contracts now pass 10/10 (decimation restricted to active groups, one
+update per step, lr=0 leaves codes and scales bitwise unchanged). Parity with AdamW is not
+reached (199k vs 441k at batch 32); the remaining bottleneck is CPU dispatch plus redundant
+per-M-block weight decode, quantified in the report.
+
 For the full capability matrix, read [project status](status.md). For raw measurements,
 negative results and historical protocols, use the [results index](../research/results/README.md).
 To reproduce or challenge a claim, follow [reproducibility](reproducibility.md).

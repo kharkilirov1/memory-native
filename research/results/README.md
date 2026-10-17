@@ -5,6 +5,30 @@ forecasts, and negative results. Evidence completeness differs by experiment: ma
 early T4 logs are committed; some later runs exist only as Markdown summaries or
 external Drive/Kaggle artifacts. A historical table is not a complete raw witness.
 
+## Speed recovery: root cause of the char-LM 4x slowdown (2026-10-18, A100)
+
+[`speed_recovery_2026_10_18/REPORT.md`](speed_recovery_2026_10_18/REPORT.md) profiles the
+char-LM gate, finds why Memory Native trained 4x slower than FP32 AdamW, fixes it, and
+re-measures. Branch `research/speed-recovery`, verified at `b5657f6`.
+
+Root cause (measured, not inferred): the gate trained the pure-PyTorch reference counter
+layers (`counter.py::_update_tile` automaton, ~20 CUDA kernels per layer per step, 27k-30k
+launches/step, 30-35 ms of a 55-60 ms step); on the fast kinds the backward still decoded
+(t,c) with torch even when the fused updater and the kernel grad_x never needed it; and each
+fused update allocated a fresh seed tensor (pageable H2D + a stream sync per layer per step).
+Fixed: lazy tile decode, cached device seed slot, fused kinds wired into the gate with their
+hyperparameters, exact no-op guard for lr=0, plus a new bitwise-exact packed->dense Triton
+decoder (`fast_decode.py`) that is kept as an alternative.
+
+Measured on the same gate/data/budget (2 seeds): counter_triton **90.2k -> 199.4k tok/s
+(2.21x)**, val loss **1.958 vs 1.928** for the old torch path (both better than AdamW 2.201),
+persistent state **2.56 vs 12.21 MiB (4.77x less)**, peak 306.8 vs 342.4 MiB. The lr=0
+no-op defect is fixed: `scripts/verify_counter_semantics.py` now reports 10 checks /
+0 failures. Parity with AdamW is NOT reached (199k vs 441k at batch 32); the remaining gap
+is attributed to CPU dispatch (step is CPU-bound: 23.3 vs 17.7 ms upper bounds) and the
+redundant per-M-block weight decode in the fused GEMM (4.8 ms/step), with ranked next steps
+in the report.
+
 ## Compute bottleneck: full-step decomposition, the no-FP32-cache path, and a real training gate (2026-10-17/18, A100)
 
 [`compute_bottleneck_2026_10_17/REPORT.md`](compute_bottleneck_2026_10_17/REPORT.md)

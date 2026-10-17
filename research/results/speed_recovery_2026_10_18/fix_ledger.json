@@ -1,0 +1,96 @@
+{
+ "measured_commit": "b5657f6",
+ "device": "NVIDIA A100-SXM4-40GB",
+ "ledger": [
+  {
+   "id": "F1",
+   "file": "src/memory_native/counter.py",
+   "function": "_FusedCounterLinearFn.backward",
+   "problem": "decoded the (t,c) tile with torch unconditionally at the top of the tile loop, although the fused Triton updater and the kernel grad_x path never read it",
+   "evidence": "update-disabled ablation for counter_triton: 15.44 ms/step while the update was 20.49 ms; the decode produced ~13 torch kernels per layer per step",
+   "change": "decode lazily: only the torch grad_x fallback and the torch update fallback request (t,c); fused paths skip it",
+   "effect": {
+    "counter_triton_step_ms": [
+     35.93,
+     22.99
+    ],
+    "tok_s": [
+     113984,
+     178164
+    ],
+    "n": 1,
+    "commit": "2254902"
+   }
+  },
+  {
+   "id": "F2",
+   "file": "src/memory_native/fused_update.py",
+   "function": "triton_counter_update",
+   "problem": "built torch.tensor([seed], device=...) per call: a pageable H2D copy that synchronizes the stream, once per layer per step",
+   "evidence": "torch.profiler showed cudaStreamSynchronize x360 (24/step) and cudaMemcpyAsync in the counter_triton step",
+   "change": "cache one int64 seed slot per device and fill_ it (async device store)",
+   "effect": {
+    "counter_triton_step_ms": [
+     21.05,
+     18.37
+    ],
+    "tok_s": [
+     194541,
+     222919
+    ],
+    "n": 1,
+    "commit": "5bd07d7"
+   }
+  },
+  {
+   "id": "F3",
+   "file": "src/memory_native/cli.py, src/memory_native/baselines.py",
+   "function": "_train_one / make_linear",
+   "problem": "the char-LM gate only forwarded counter kwargs to the pure-torch kinds ('counter','counter_rms'); the fused kinds existed but could not be selected with the right lr/C, so the published 80-86k baseline measured the torch reference path",
+   "change": "forward counter kwargs to counter_packed/counter_triton/counter_fast and add the new kind; use counter_triton for the gate comparison",
+   "effect": {
+    "gate_tok_s": [
+     90010,
+     197121
+    ],
+    "val_loss": [
+     1.9303,
+     1.9448
+    ],
+    "old_kind": "counter_rms",
+    "new_kind": "counter_triton"
+   }
+  },
+  {
+   "id": "F4",
+   "file": "src/memory_native/fused_update.py",
+   "function": "_tick",
+   "problem": "lr=0 was not a bit-exact no-op: 2 of 16,777,216 codes at 4096^2 (1 of 4.2M at 2048^2) moved by one quantum, deterministically; torch reference moved none",
+   "change": "exact no-op guard: when lr==0 and s_old==s_new return the loaded code unchanged",
+   "effect": {
+    "verify_checks": [
+     1,
+     0
+    ],
+    "n": 2,
+    "note": "1 failure -> 0 failures at 1024^2 and 4096^2"
+   }
+  },
+  {
+   "id": "F5",
+   "file": "src/memory_native/fast_decode.py (new)",
+   "function": "decode_dense_triton / PackedDecodeCounterLinear",
+   "problem": "no one-launch decoder from packed 6-bit state to a dense fp32 tile existed for the plain format; the torch decode was ~13 kernels",
+   "change": "new Triton decode kernel (bitwise-identical to scale*t: decode err 0.0) + cuBLAS matmul + inherited fused update, exposed as kind 'counter_fast'",
+   "effect": {
+    "single_layer_256x256_step_ms": {
+     "triton_packed": 0.957,
+     "decode_cublas": 0.948,
+     "packed_torch": 2.029,
+     "torch_rms": 1.898
+    },
+    "verdict": "bitwise-exact and equal at layer level, but slower at model level (43.5 ms vs 20.6 ms): extra launch + allocation per direction; kept as an alternative, not the recommended path"
+   }
+  }
+ ]
+}
