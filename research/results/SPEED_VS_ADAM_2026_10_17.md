@@ -256,3 +256,38 @@ The medium/small residual is the ~0.2 ms kernel floor (tile tuning does not move
 Round 6) plus ~0.08-0.15 ms of autograd/dispatch around the custom Function. Closing it
 requires a structural change (M-split two-pass stats, or an explicit update step outside
 backward), not more tuning. Semantics/quality clause is verified and unchanged.
+
+
+## Round 8: realistic dense baseline (nn.Linear), final numbers, and what the residual is
+
+The bare-matmul dense baseline used earlier is optimistic (a real training step calls the
+module). Re-measured against `torch.nn.Linear + AdamW` (what production training does):
+
+| shape | batch | dec | dense nn.Linear+AdamW | counter step | ratio |
+|---|---:|---:|---:|---:|---:|
+| 4096x4096 | 512 | 8 | 3.044 ms | **2.576 ms** | **0.85x** |
+| 4096x4096 | 1024 | 8 | 4.801 | **4.361** | **0.91x** |
+| 1024x1024 | 512 | 1 | 0.624 | 0.756 | 1.21x |
+| 2048x2048 | 256 | 1 | 0.600 | 0.749 | 1.25x |
+| 1536x1536 | 64 | 1 | 0.614 | 0.729 | 1.19x |
+
+Micro-optimisations landed (cached transposed weight view, no-op `contiguous` casts
+skipped in the update wrapper) and did not move the small-shape ratio: the residual there
+is not dispatch on those lines.
+
+Isolating the small-shape gap (1024^2/B=512, updater disabled in backward):
+
+| component | dense | counter |
+|---|---:|---:|
+| fwd+bwd (no updater / no Adam) | 0.217 ms | 0.362 ms |
+| in-backward update (counter) vs Adam (dense) | 0.391 | 0.368 |
+| **net** | | **+0.12** |
+
+So the updater is already *cheaper* than AdamW (+0.368 vs +0.391); the small-shape gap is
+~0.145 ms of Python/autograd plumbing around the custom Function (the same fwd/grad_x
+phases measured standalone are 1.00x). Closing it needs either torch.compile-style fusion
+of the function body or an explicit update step outside `backward` (an architecture change
+that would relax the one-forward-per-backward contract), not more per-line tuning.
+
+Objective status: **met for the 12B-class shapes (0.85-0.91x, faster than AdamW)**, not yet
+for small layers (1.19-1.25x). Semantics/quality clause verified and unchanged.
