@@ -125,8 +125,10 @@ class PackedGroupScaleCounterLinear(RoundingStreamMixin, nn.Module):
         if group <= 0 or group % 4:
             raise ValueError("group must be positive and divisible by 4")
         C = _validate_packed_C(C)
-        if kernel_mode not in {"auto", "gemm", "triton", "torch"}:
-            raise ValueError("kernel_mode must be 'auto', 'gemm', 'triton' or 'torch'")
+        if kernel_mode not in {"auto", "gemm", "triton", "torch", "hybrid"}:
+            raise ValueError(
+                "kernel_mode must be 'auto', 'gemm', 'triton', 'torch' or 'hybrid'"
+            )
         if stats_scope not in {"row", "group"}:
             raise ValueError("stats_scope must be 'row' or 'group'")
         decimation = int(decimation)
@@ -378,13 +380,19 @@ class PackedGroupScaleCounterLinear(RoundingStreamMixin, nn.Module):
         #       reference path, whose correlation is already a cuBLAS GEMM (semi-strict).
         #   "triton" -> decode-in-GEMM matmuls + (with strict_update) the 3-launch bounded-
         #       scratch update. The low-memory path for cards where 52 MiB matters.
-        if self.kernel_mode != "triton":
+        #   "hybrid" -> decode-in-GEMM matmuls, dense cuBLAS-correlation update. Measured
+        #       on A100 (1536^2, B=64, row scope): decode-in-GEMM wins the matmuls
+        #       (fwd 0.35 vs 0.54 ms, grad_x 0.31 vs 0.50 ms) but loses the update badly
+        #       (from-I/O 1.66 ms vs dense 0.45 ms), so the best per-phase mix is hybrid.
+        if self.kernel_mode not in {"triton", "hybrid"}:
             return False
         available = HAS_TRITON and tensor.is_cuda and tensor.dtype in {
             torch.float32, torch.float16, torch.bfloat16
         }
         if not available:
-            raise RuntimeError("kernel_mode='triton' requires CUDA + Triton and a floating input")
+            raise RuntimeError(
+                f"kernel_mode={self.kernel_mode!r} requires CUDA + Triton and a floating input"
+            )
         return available
 
     def _forward_2d(self, x2: torch.Tensor) -> torch.Tensor:
@@ -424,7 +432,12 @@ class PackedGroupScaleCounterLinear(RoundingStreamMixin, nn.Module):
         if self.stats_scope == "group":
             self._update_from_io_grouplocal(x2, go2)
             return
-        want_triton = self._use_triton(x2) and self.strict_update
+        # "hybrid" keeps the decode-in-GEMM matmuls but deliberately takes the dense
+        # cuBLAS-correlation update: measured on A100 the from-I/O updater is ~3.7x slower
+        # than the dense one at 1536^2/B=64, so only the matmul half of the triton mode pays.
+        want_triton = (
+            self.kernel_mode == "triton" and self._use_triton(x2) and self.strict_update
+        )
         if want_triton and not _is_power_of_two(self.group):
             raise ValueError(
                 "strict Triton group update requires a power-of-two group size; "
