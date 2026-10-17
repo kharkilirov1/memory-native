@@ -45,7 +45,9 @@ def _train_one(kind: str, args, vocab, train_data, val_data, device) -> dict:
     cfg = CONFIGS[args.config]
     counter_kw = dict(lr=args.fs_lr if kind == "counter" else args.fs_lr_rms,
                       lr_scale=args.fs_lr_scale, C=args.C, tile_rows=args.tile_rows)
-    kw = counter_kw if kind in ("counter", "counter_rms") else {}
+    counter_kinds = ("counter", "counter_rms", "counter_packed", "counter_triton",
+                     "counter_fast")
+    kw = counter_kw if kind in counter_kinds else {}
     model = GPT(kind, cfg, **kw).to(device)
     model.train()
 
