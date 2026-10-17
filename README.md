@@ -157,9 +157,15 @@ DATA_PATH=/path/to/tinyshakespeare.txt scripts/run_scale_validation.sh small 400
 
 Logs land in `results/` (not committed pre-filled — capture them on your GPU).
 
-A 60-step micro run already reproduces the method's story: `counter_rms` lands within ~0.1%
-of dense, beats vanilla counter, and isolates to ~+2.5% over ternary-QAT (the counter-
-optimizer cost) — matching the larger-scale numbers in [`results/SUMMARY.md`](results/SUMMARY.md).
+On this CPU box the 60-step micro gate reproduces the *isolation* but not the
+"within ~0.1% of dense" framing: across the default run and seeds 0-2, `counter_rms`
+was +3.9…+6.4% above dense, did not beat vanilla `counter` in 3 of 4 runs, and the
+counter-optimizer cost over ternary-QAT was +2.1…+5.7%. Treat this gate as plumbing and
+regression (it is now reproducible: `--seed` seeds every RNG), not as a parity claim;
+the larger-scale numbers are in [`results/SUMMARY.md`](results/SUMMARY.md). Measured
+per-parameter bytes are in [`results/STATE_ACCOUNTING.md`](results/STATE_ACCOUNTING.md)
+(6 bits is 0.750 B/param of packed code, a deployed layer is 0.906 persistent /
+1.082 resident, and a pure-PyTorch training step peaks near 23 B/param).
 
 ## What is measured vs what is roadmap
 
