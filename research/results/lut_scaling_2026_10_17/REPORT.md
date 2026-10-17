@@ -269,6 +269,19 @@ with `python research/results/lut_scaling_2026_10_17/_make_plot.py` (stdlib only
 Colab: `notebooks/LUT_Scaling_A100.ipynb` performs all of the above in order with
 "Run all" (it pins the same commit and writes the same artifacts).
 
+## 6b. Notebook validation (executed end-to-end)
+
+`notebooks/LUT_Scaling_A100.ipynb` was executed with
+`jupyter nbconvert --to notebook --execute` on the same A100 runtime at commit
+`fa14032` (clone + pin + install + tests + all three harnesses + plot + tables):
+8/8 code cells executed, **0 error outputs**, 1 plot, and it regenerated the artifact
+files under `/content/results/lut_scaling_2026_10_17/`. The second, independent run
+reproduced the headline numbers within noise (4096^2, graph): dense fp32 0.0551 vs 0.0557
+ms, dense bf16 0.0286 vs 0.0315, fused decode 1.3289 vs 1.3294, LUT gather 0.0375 vs
+0.0376, LUT full 0.1349 vs 0.1347. Its crossover table (reproduced):
+LUT/dense_fp32 = 0.68x at M=2, 0.70x at M=8, 1.95x at M=32, 3.09x at M=128, 3.73x at
+M=512 — the same M~16-32 crossover.
+
 ## 7. Limits of this study
 
 - Single device (A100-SXM4-40GB in a shared Colab runtime); medians over 3–7 reps with IQRs
