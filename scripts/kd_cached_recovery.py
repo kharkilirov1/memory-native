@@ -16,6 +16,8 @@ env: STEPS (from cache), BATCH/SEQ/SEED (must match cache), KD_T (2.0), CE_ALPHA
      COUNTER_LR_START (0.002) / COUNTER_LR_END (1e-4), FP_LR (1e-4), GRAD_CLIP (1.0),
      SCALE_LR_START / SCALE_LR_END (both 2e-4; historical flat scale rate),
      STATS_SCOPE (group), DECIMATION (4), HOMOTOPY_HOLD (0.2) / HOMOTOPY_END (0.9),
+     HOMOTOPY_ALPHA_START (1; set 0 for strict-only control),
+     STRICT_EXPOSURE_EVERY (0=off; 4 runs one strict alpha=0 step per four steps),
      EVAL_EVERY (300), EVAL_MAX_TOKENS (60000), NUM_BLOCKS (0; smoke only), DEVICE,
      GRAD_CKPT (1), FREEZE_EMBED (1), SPLIT_GPUS (1; 2-GPU model-parallel when >=2
      CUDA devices — see split_across_gpus), SPLIT_AT (0 = n_layers//2),
@@ -63,6 +65,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from memory_native.recovery.strict_exposure import strict_exposure_alpha
 from kd_cache_contract import (
     ShardedCache, load_cache_manifest, model_identity, sha256_file,
     validate_cache_context, validate_warm_source,
@@ -84,6 +87,8 @@ FP_LR = float(os.environ.get("FP_LR", "0.0001"))
 GRAD_CLIP = float(os.environ.get("GRAD_CLIP", "1.0"))
 STATS_SCOPE = os.environ.get("STATS_SCOPE", "group")
 DECIMATION = int(os.environ.get("DECIMATION", "4"))
+HOMOTOPY_ALPHA_START = float(os.environ.get("HOMOTOPY_ALPHA_START", "1.0"))
+STRICT_EXPOSURE_EVERY = int(os.environ.get("STRICT_EXPOSURE_EVERY", "0"))
 HOMOTOPY_HOLD = float(os.environ.get("HOMOTOPY_HOLD", "0.2"))
 HOMOTOPY_END = float(os.environ.get("HOMOTOPY_END", "0.9"))
 EVAL_EVERY = int(os.environ.get("EVAL_EVERY", "300"))
@@ -112,11 +117,11 @@ def cosine(start: float, end: float, progress: float) -> float:
 
 def homotopy_alpha(progress: float) -> float:
     if progress <= HOMOTOPY_HOLD:
-        return 1.0
+        return HOMOTOPY_ALPHA_START
     if progress >= HOMOTOPY_END:
         return 0.0
     span = (progress - HOMOTOPY_HOLD) / (HOMOTOPY_END - HOMOTOPY_HOLD)
-    return 0.5 * (1.0 + math.cos(math.pi * span))
+    return HOMOTOPY_ALPHA_START * 0.5 * (1.0 + math.cos(math.pi * span))
 
 
 def _tree_to(obj, dev):
@@ -507,6 +512,10 @@ def main() -> None:
         raise ValueError("evaluation/log/chunk sizes must be positive and MIN_IMPROVEMENT finite/nonnegative")
     if not 0 <= HOMOTOPY_HOLD < HOMOTOPY_END <= 1:
         raise ValueError("homotopy schedule requires 0 <= HOLD < END <= 1")
+    if not math.isfinite(HOMOTOPY_ALPHA_START) or not 0 <= HOMOTOPY_ALPHA_START <= 1:
+        raise ValueError("HOMOTOPY_ALPHA_START must be finite in [0,1]")
+    if STRICT_EXPOSURE_EVERY < 0:
+        raise ValueError("STRICT_EXPOSURE_EVERY must be nonnegative")
     if not math.isfinite(KD_T) or KD_T <= 0 or not math.isfinite(CE_ALPHA) or CE_ALPHA < 0:
         raise ValueError("KD_T must be positive and CE_ALPHA nonnegative, both finite")
     if any(not math.isfinite(x) or x < 0 for x in (COUNTER_LR_START, COUNTER_LR_END, SCALE_LR_START, SCALE_LR_END, FP_LR, GRAD_CLIP)):
@@ -585,6 +594,7 @@ def main() -> None:
                  if not p.requires_grad}
     drop_suffix = (".salient_idx", ".salient_val", ".perm", ".v")
     checkpoint_format = {"kind": warm_meta["kind"], "group": warm_meta["group"], "C": warm_meta["C"], "stats_scope": STATS_SCOPE,
+                         "homotopy_alpha_start": HOMOTOPY_ALPHA_START, "strict_exposure_every": STRICT_EXPOSURE_EVERY,
                          "decimation": DECIMATION, "num_blocks": NUM_BLOCKS,
                          "fp_dtype": "bfloat16" if device.type == "cuda" else "float32"}
     provenance = {"cache_schema_version": cache_meta["schema_version"],
@@ -621,7 +631,8 @@ def main() -> None:
         progress = step / max(STEPS - 1, 1)
         clr = cosine(COUNTER_LR_START, COUNTER_LR_END, progress)
         slr = cosine(SCALE_LR_START, SCALE_LR_END, progress)
-        alpha = homotopy_alpha(progress)
+        base_alpha = homotopy_alpha(progress)
+        alpha = strict_exposure_alpha(base_alpha, step, STRICT_EXPOSURE_EVERY)
         for m in counters:
             m.set_lr(clr)
             m.lr_scale = slr
@@ -643,7 +654,8 @@ def main() -> None:
 
         if (step + 1) % LOG_EVERY == 0:
             log(f"step {step + 1}/{STEPS} kd={loss_kd.item():.4f} ce={loss_ce.item():.4f} "
-                f"clr={clr:.5f} alpha={alpha:.2f} {(time.time() - t0) / (step + 1):.2f}s/step")
+                f"clr={clr:.5f} alpha={alpha:.2f} base_alpha={base_alpha:.2f} "
+                f"strict_exposure_every={STRICT_EXPOSURE_EVERY} {(time.time() - t0) / (step + 1):.2f}s/step")
         if (step + 1) % EVAL_EVERY == 0 or step + 1 == STEPS:
             res = evaluate_at_alpha(student, 0.0, strict_eval)
             metric = metric_from_ppl(res)
