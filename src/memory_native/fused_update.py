@@ -246,6 +246,9 @@ if HAS_TRITON:
         tl.store(scale_ptr + row, s_new)
 
 
+_SEED_BUFFERS: dict = {}
+
+
 def triton_counter_update(state_packed: torch.Tensor, scale: torch.Tensor, v: torch.Tensor,
                           grad_w: torch.Tensor, *, C: int, lr: float, lr_scale: float,
                           rms_beta: float, rms_eps: float, seed: int, lagged: bool = False,
@@ -261,7 +264,15 @@ def triton_counter_update(state_packed: torch.Tensor, scale: torch.Tensor, v: to
     in_features = grad_w.shape[1]
     assert in_features % 4 == 0
     BLOCK_I = 256
-    seed_t = torch.tensor([int(seed) & 0xFFFFFFFF], dtype=torch.int64, device=grad_w.device)
+    # Reuse one device seed slot per (device, dtype) instead of allocating a fresh tensor from a
+    # python int every call: ``torch.tensor([seed], device=...)`` is a pageable H2D copy that
+    # synchronizes the stream. That sync was measurable as ~24 cudaStreamSynchronize per model
+    # step (one per layer) in the char-LM profile. ``fill_`` is an async device-side store.
+    seed_t = _SEED_BUFFERS.get(grad_w.device)
+    if seed_t is None:
+        seed_t = torch.zeros(1, dtype=torch.int64, device=grad_w.device)
+        _SEED_BUFFERS[grad_w.device] = seed_t
+    seed_t.fill_(int(seed) & 0xFFFFFFFF)
     _counter_update_kernel[(out,)](
         state_packed, scale.reshape(out), v.reshape(out), grad_w.contiguous(), seed_t,
         C, in_features, lr, lr_scale, rms_beta, rms_eps, float(clip),
