@@ -23,6 +23,18 @@ def _evidence(root, names):
                               "sha256": preflight._sha256(root / name)} for name in names}}
 
 
+def _symlink_or_skip(link, target):
+    """Create a symlink, or skip when this host cannot.
+
+    Windows without Developer Mode / SeCreateSymbolicLinkPrivilege raises
+    ``WinError 1314`` here, which is a host capability gap, not a preflight bug.
+    """
+    try:
+        link.symlink_to(target)
+    except (OSError, NotImplementedError) as exc:  # pragma: no cover - host dependent
+        pytest.skip(f"symlinks unavailable on this host: {exc}")
+
+
 @pytest.fixture
 def campaign(tmp_path, monkeypatch):
     """Small content-bound inputs; external execution is stubbed, not certified."""
@@ -288,7 +300,7 @@ def test_huggingface_snapshot_symlinks_are_hashed_as_donor_content(campaign):
     for path in campaign.donor.iterdir():
         if path.name == "model.safetensors":
             (blobs / "weights").write_bytes(path.read_bytes())
-            (snapshot / path.name).symlink_to("../../blobs/weights")
+            _symlink_or_skip(snapshot / path.name, "../../blobs/weights")
         else:
             (snapshot / path.name).write_bytes(path.read_bytes())
     campaign.env["MODEL"] = str(snapshot)
