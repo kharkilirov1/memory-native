@@ -98,6 +98,9 @@ def main(argv=None) -> int:
                 y_ref = x @ w_torch.t()
                 entry["forward_max_abs_err"] = float((y - y_ref).abs().max() / y_ref.abs().max())
                 del w_triton
+                # correctness probe forward has no backward: clear the one-forward-per-backward
+                # guard so the timing loop below starts from a clean state (test-only reset).
+                layer._outstanding_forward = False
                 # reference forward from the torch layer for the same weights
                 if ref_layer is None:
                     ref_layer = layer
