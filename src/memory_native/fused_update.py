@@ -170,7 +170,14 @@ if HAS_TRITON:
         sgn = tl.where(cc > 0, 1.0, tl.where(cc < 0, -1.0, 0.0))
         rem = tl.where(ct != nt, sgn * (Cf - 1.0), rem)
         rem = tl.minimum(tl.maximum(rem, -(Cf - 1.0)), Cf - 1.0)
-        return ((ct.to(tl.int32) + 1) * lv + (rem.to(tl.int32) + (C - 1))) & 0x3F
+        new_code = ((ct.to(tl.int32) + 1) * lv + (rem.to(tl.int32) + (C - 1))) & 0x3F
+        # Exact no-op guard: a zero step must leave the 6-bit code bit-for-bit unchanged.
+        # The automaton rebuilds the code from a float expression (`c * s_old/s_new + tick`);
+        # on large layers rounding in that expression can tip ~1e-7 of codes by one quantum
+        # even when lr == 0 and the scale does not move (measured: 2 of 16,777,216 at 4096^2,
+        # deterministic). The guard restores the invariant without changing any non-zero step.
+        no_op = (lr == 0.0) & (s_old == s_new)
+        return tl.where(no_op, code, new_code)
 
     @triton.jit
     def _counter_update_kernel(state_ptr, scale_ptr, v_ptr, grad_w_ptr, seed_ptr,
