@@ -208,3 +208,40 @@ def test_partial_last_group_supported():
     assert y.shape == (7, out)
     y.square().mean().backward()
     assert torch.isfinite(layer.scale).all()
+
+
+def test_triton_decode_dense_matches_the_torch_decode():
+    """The fused decode must be bit-identical to the torch chain it replaces."""
+    if not torch.cuda.is_available():
+        import pytest
+        pytest.skip("CUDA required")
+    from memory_native.group_scale_kernels import HAS_TRITON, _broadcast_groups
+    if not HAS_TRITON:
+        import pytest
+        pytest.skip("Triton unavailable")
+
+    torch.manual_seed(3)
+    out, k, group, C = 96, 256, 64, 11
+    perm = torch.randperm(k)
+    layer = PackedGroupScaleCounterLinear(k, out, group=group, C=C, perm=perm,
+                                          kernel_mode="gemm").cuda()
+    levels = 3 * (2 * C - 1)
+    from memory_native.packed import pack_codes
+    layer.state.copy_(pack_codes(torch.randint(0, levels, (out, k), dtype=torch.uint8,
+                                               device="cuda")))
+    layer.scale.copy_(torch.rand(out, k // group, device="cuda") * 0.05 + 0.01)
+
+    def torch_decode(alpha):
+        layer.residual_alpha = alpha
+        t, c = layer._decode_perm()
+        value = t.float() + alpha * c.float() / C if alpha else t.float()
+        w_perm = _broadcast_groups(layer.scale, group, k) * value
+        w = torch.empty_like(w_perm)
+        w[:, layer.perm.long()] = w_perm
+        return w
+
+    for alpha in (0.0, 0.5):
+        want = torch_decode(alpha)
+        got = layer.visible_weight()          # takes the Triton path on CUDA
+        assert torch.equal(got, want), (alpha, (got - want).abs().max().item())
+    layer.residual_alpha = 0.0

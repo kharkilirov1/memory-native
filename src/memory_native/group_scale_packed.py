@@ -15,6 +15,7 @@ from .group_scale_kernels import (
     group_update_scratch_bytes,
     triton_group_counter_update_dense,
     triton_group_counter_update_from_io,
+    triton_decode_dense,
     triton_group_counter_update_fused,
     triton_group_decode_matmul,
     triton_group_grad_x,
@@ -341,6 +342,16 @@ class PackedGroupScaleCounterLinear(RoundingStreamMixin, nn.Module):
 
     def visible_weight(self, dtype: torch.dtype | None = None) -> torch.Tensor:
         """Dense reference weight in original input order (debug/CPU only)."""
+        if HAS_TRITON and self.state.is_cuda and (dtype is None or dtype == torch.float32):
+            # One launch instead of ~10 elementwise passes (1.8 ms -> ~0.05 ms at 4096^2).
+            w = triton_decode_dense(
+                self.state, self.scale, self.perm,
+                C=self.C, group=self.group, residual_alpha=self.residual_alpha,
+            )
+            if self._has_salient():
+                w.reshape(-1).index_copy_(0, self.salient_idx.long(),
+                                          self.salient_val.float())
+            return w
         t, c = self._decode_perm()
         # alpha=0 is the strict ternary readout: the counter is invisible, so skip the two
         # full [out, in] residual temporaries (bit-exact — adding 0.0 to t changes nothing).
