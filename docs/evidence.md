@@ -15,6 +15,7 @@ measured performance depends on the workload, hardware and implementation path.
 | MLX | [Port guide](MLX_PORT.md) | Covered layer/state behavior; Apple-silicon performance remains an open gate |
 | Per-parameter bytes | [State accounting](../research/results/STATE_ACCOUNTING.md) | 0.750 B/param is the code body; 0.906 persistent / 1.002 resident measured; ~23 B/param for one pure-PyTorch step |
 | Step speed (CPU) | [Step speedup A/B](../research/results/STEP_SPEED_2026_10_17.md) | −15.5% on the pure-PyTorch step, bit-identical; the automaton chain still dominates |
+| PTQ recipe (GPU, 0.5B) | [PTQ recipe + rotation](../research/results/PTQ_RECIPE_2026_10_17.md) | align+salient+iters≥4 = 12.3× PPL vs defaults; rotation +1.40× (does not replace salient); sketching rejected |
 
 Six bits are the coefficient code size, not total training memory. Count scales, RMS
 statistics, floating-point model components, activations and temporary buffers. Kernel

@@ -66,3 +66,28 @@ def test_rotation_hurts_group_ternary_fit_documented_negative():
     e_plain = err(w, X)
     e_rot = err(w @ R, X @ R)
     assert e_rot > e_plain, (e_rot, e_plain)           # if this flips, revisit A3 for ternary
+
+
+def test_solver_rotation_flag_is_plumbing_only():
+    """``rotate=True`` is opt-in and must not change behaviour when off.
+
+    The measured MODEL-level result (0.5B PPL 346.9 -> 247.9 with align/salient, see
+    research/results/PTQ_RECIPE_2026_10_17.md) does not reproduce on the single-layer
+    synthetic witness above, so it stays an opt-in flag gated on a deploy-scale run; this
+    test only pins the plumbing (off = no-op, on = a valid rotated+quantized model).
+    """
+    from memory_native.donor.ptq import maybe_rotate_residual_stream, quantize_dense_group_ternary
+
+    m = _tiny(0)
+    w0 = m.model.layers[0].self_attn.q_proj.weight.detach().clone()
+    assert maybe_rotate_residual_stream(m, False) is False
+    assert torch.equal(m.model.layers[0].self_attn.q_proj.weight, w0)
+
+    ids = torch.randint(0, 64, (2, 16))
+    quantize_dense_group_ternary(
+        m, [ids], group=32, refine_iters=1, scale_refit="align",
+        progress=False, rotate=True, rotate_seed=1,
+    )
+    with torch.no_grad():
+        out = m(ids).logits
+    assert out.shape[:2] == (2, 16) and torch.isfinite(out).all()
