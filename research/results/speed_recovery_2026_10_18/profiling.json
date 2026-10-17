@@ -1,0 +1,132 @@
+{
+ "device": "NVIDIA A100-SXM4-40GB",
+ "torch": "2.11.0+cu130",
+ "cuda": "13.0",
+ "triton": "3.6.0",
+ "measured_commit": "b5657f6",
+ "batch": 32,
+ "tokens_per_step": 4096,
+ "harness": "scripts/profile_charlm_step.py (torch.profiler CPU+CUDA, warmed-up steps; step wall time from CUDA events)",
+ "note_on_totals": "cpu_ms_per_step and cuda_ms_per_step are SUMS of self times and may include intervals that overlap in wall time; treat them as an upper-bound attribution, not as additive latency. Step ms is measured separately.",
+ "before_32f0fa2": {
+  "header": "old gate kinds (torch reference layers), profiling harness",
+  "dense": {
+   "step_ms": 9.13,
+   "tok_s": 448579
+  },
+  "counter": {
+   "step_ms": 54.98,
+   "tok_s": 74499,
+   "update_disabled_step_ms": 24.18,
+   "update_cost_ms": 30.8,
+   "launches_per_step": 27060,
+   "top_cuda": [
+    "aten::mm 7.108",
+    "aten::copy_ 1.818",
+    "aten::mul 0.939",
+    "aten::sum 0.936"
+   ],
+   "top_cpu": [
+    "_FusedCounterLinearFnBackward 14.977",
+    "cudaLaunchKernel 14.307",
+    "aten::mul 3.505",
+    "aten::copy_ 3.088"
+   ]
+  },
+  "counter_rms": {
+   "step_ms": 59.61,
+   "tok_s": 68712,
+   "update_disabled_step_ms": 24.42,
+   "update_cost_ms": 35.19,
+   "launches_per_step": 29580,
+   "top_cpu": [
+    "_FusedCounterLinearFnBackward 16.504",
+    "cudaLaunchKernel 15.484"
+   ]
+  },
+  "counter_packed": {
+   "step_ms": 51.54,
+   "tok_s": 79468,
+   "launches_per_step": 19140,
+   "top_cpu": [
+    "_FusedCounterLinearFnBackward 11.377",
+    "cudaLaunchKernel 10.671"
+   ]
+  },
+  "counter_triton": {
+   "step_ms": 35.93,
+   "tok_s": 113984,
+   "update_disabled_step_ms": 15.44,
+   "update_cost_ms": 20.49,
+   "launches_per_step": 9420
+  },
+  "group_scale_packed": {
+   "step_ms": 33.08,
+   "tok_s": 123815,
+   "update_disabled_step_ms": 19.6,
+   "update_cost_ms": 13.48,
+   "launches_per_step": 4740
+  }
+ },
+ "intermediate_after_lazy_decode": {
+  "header": "after fix 1 (lazy tile decode) at 2254902",
+  "dense": {
+   "step_ms": 8.09,
+   "tok_s": 506368
+  },
+  "counter_triton": {
+   "step_ms": 22.99,
+   "tok_s": 178164
+  },
+  "counter_fast": {
+   "step_ms": 26.76,
+   "tok_s": 153042
+  },
+  "group_scale_packed": {
+   "step_ms": 32.3,
+   "tok_s": 126799
+  }
+ },
+ "after_all_fixes": {
+  "header": "final HEAD b5657f6, profiling harness",
+  "dense": {
+   "step_ms": 8.02,
+   "tok_s": 510869,
+   "cpu_ms_upper": 13.23,
+   "gpu_ms_upper": 15.61,
+   "launches_per_step": 196,
+   "bound": "gpu"
+  },
+  "counter_triton": {
+   "step_ms": 20.55,
+   "tok_s": 199283,
+   "cpu_ms_upper": 23.32,
+   "gpu_ms_upper": 17.69,
+   "launches_per_step": 196,
+   "bound": "cpu",
+   "top_cuda": {
+    "_decode_matmul_kernel": 2.558,
+    "_decode_gradx_kernel": 2.257,
+    "aten::mm": 1.833,
+    "attention_backward": 0.371
+   },
+   "top_cpu": {
+    "_FusedCounterLinearFnBackward": 7.057,
+    "_FusedCounterLinearFn": 3.003,
+    "cudaLaunchKernel": 2.04,
+    "aten::empty": 1.242,
+    "aten::mm": 1.111
+   }
+  },
+  "counter_fast": {
+   "step_ms": 43.52,
+   "tok_s": 94119,
+   "cpu_ms_upper": 26.6,
+   "gpu_ms_upper": 18.72,
+   "launches_per_step": 244,
+   "bound": "cpu",
+   "note": "decode-to-dense + cuBLAS; equal at layer level but slower at model level (allocation + extra launches); not adopted"
+  }
+ },
+ "verdict": "the old 4x gap was not one slow kernel: (a) the gate used the pure-torch reference layer kinds, whose automaton runs ~20 elementwise kernels per layer per step (27k-30k launches/step, 30-35 ms of a 55-60 ms step); (b) even the fast kinds decoded (t,c) with torch in backward although the fused update and the decode-in-GEMM grad_x never read them (~13 launches/layer/step); (c) each layer's fused update allocated a fresh seed tensor -> pageable H2D copy + cudaStreamSynchronize once per layer per step."
+}

@@ -1,0 +1,102 @@
+{
+ "device": "NVIDIA A100-SXM4-40GB",
+ "measured_commit": "b5657f6",
+ "tokens": 4096,
+ "harness": "scripts/probe_fast_paths.py (CUDA events, warmup 5, iters 20, median of 5) + torch.profiler launch counts",
+ "layers": {
+  "256x256": {
+   "torch_rms": {
+    "fwd_ms": 0.156,
+    "update_ms": 1.032,
+    "step_ms": 1.898,
+    "launches": 77
+   },
+   "packed_torch": {
+    "fwd_ms": 0.561,
+    "update_ms": 0.151,
+    "step_ms": 2.029,
+    "launches": 48
+   },
+   "triton_packed": {
+    "fwd_ms": 0.074,
+    "gradx_ms": 0.064,
+    "update_ms": 0.15,
+    "step_ms": 0.957,
+    "launches": 2
+   },
+   "decode_cublas": {
+    "fwd_ms": 0.132,
+    "gradx_ms": 0.122,
+    "update_ms": 0.149,
+    "step_ms": 0.948,
+    "launches": 4,
+    "decode_bitwise_equal": true,
+    "decode_max_abs_err": 0.0
+   }
+  },
+  "1024x256": {
+   "torch_rms": {
+    "fwd_ms": 0.225,
+    "update_ms": 1.372,
+    "step_ms": 2.478,
+    "launches": 76
+   },
+   "packed_torch": {
+    "fwd_ms": 0.582,
+    "update_ms": 0.152,
+    "step_ms": 2.239,
+    "launches": 47
+   },
+   "triton_packed": {
+    "fwd_ms": 0.203,
+    "gradx_ms": 0.206,
+    "update_ms": 0.152,
+    "step_ms": 1.017,
+    "launches": 1
+   },
+   "decode_cublas": {
+    "fwd_ms": 0.162,
+    "gradx_ms": 0.155,
+    "update_ms": 0.151,
+    "step_ms": 1.073,
+    "launches": 3,
+    "decode_bitwise_equal": true
+   }
+  }
+ },
+ "decode_tile_scan_4096x4096_M4096": {
+  "256x256": {
+   "current_64_64_32": {
+    "fwd_ms": 0.0616,
+    "gradx_ms": 0.055
+   },
+   "best_alternative": "same (64,64,32) wins",
+   "decode_plus_cublas": {
+    "fwd_ms": 0.1128,
+    "gradx_ms": 0.0982,
+    "decode_alone": 0.0537
+   }
+  },
+  "1024x256": {
+   "best_fwd": {
+    "ms": 0.135,
+    "tiles": "256,64,32"
+   },
+   "best_gradx": {
+    "ms": 0.1914,
+    "tiles": "128,32,32"
+   }
+  },
+  "256x1024": {
+   "best_fwd": {
+    "ms": 0.256,
+    "tiles": "256,64,32"
+   },
+   "best_gradx": {
+    "ms": 0.1777,
+    "tiles": "256,64,32"
+   }
+  }
+ },
+ "read": "the decode work is repeated M/BLOCK_M times per weight tile (grid is over M blocks), so the fused decode-in-GEMM is ~4.4x off fp32 peak on these small tiles; the tile scan says the shipped 64/64/32 choice is already the best of the tried set for the narrow 256-wide layers"
+}
