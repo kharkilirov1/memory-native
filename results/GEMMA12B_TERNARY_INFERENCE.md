@@ -38,5 +38,9 @@ instead of KeyError):
   (+ asym s=0.15 + salient_refit) for the warm floor, then KD recovery (group+dec4
   production recipe) for coherent text.
 - Speed ladder for real 12B inference: GPU + T-cache + the inference export pack
-  (state -> t, drop c, base-3 repack: ~35 GiB for 12B, ~81 GiB for a 284B V4-Flash) —
-  the export utility remains the open utility task.
+  (state -> t, drop c, base-3 repack: ~1.6 bits body + ~0.125 scales + ~0.6 for the
+  2% salient channel ≈ 2.4 bpw, i.e. **~3 GiB for the 10.9B converted coefficients**
+  and ~81 GiB for a 284B V4-Flash-class MoE) — the export utility remains the open
+  utility task. (This line previously read "~35 GiB for 12B", which is 10x its own
+  bpw arithmetic; corrected 2026-10-17 — see `STATE_ACCOUNTING.md` for the measured
+  per-coefficient bytes this is derived from.)
