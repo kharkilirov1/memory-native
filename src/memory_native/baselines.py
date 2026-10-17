@@ -53,6 +53,10 @@ def make_linear(kind: str, fin: int, fout: int, init_gain: float = 1.0, **counte
     if kind == "counter_triton":
         from .triton_counter import TritonCounterLinear
         return TritonCounterLinear(fin, fout, init_gain=init_gain, **counter_kw)
+    if kind == "counter_fast":
+        # one Triton decode per direction + cuBLAS + one-launch fused update
+        from .fast_decode import PackedDecodeCounterLinear
+        return PackedDecodeCounterLinear(fin, fout, init_gain=init_gain, **counter_kw)
     if kind == "slowfast":                                  # M3
         from .slowfast import SlowFastCounterLinear
         return SlowFastCounterLinear(fin, fout, init_gain=init_gain, **counter_kw)

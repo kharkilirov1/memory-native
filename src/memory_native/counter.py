@@ -288,9 +288,14 @@ class _FusedCounterLinearFn(torch.autograd.Function):
         if do_update or not use_kernel:
             for lo in range(0, module.out_features, module.tile_rows):
                 hi = min(lo + module.tile_rows, module.out_features)
-                t_i, c_i = module._decode_rows(lo, hi)
                 s_i = module.scale[lo:hi]
+                # Decode the tile lazily: the fused Triton update and the kernel grad_x path
+                # never read (t, c) from torch -- only the torch fallbacks do. Decoding here
+                # unconditionally cost ~13 CUDA launches and ~0.3 ms CPU per layer per step
+                # (measured with torch.profiler), which dominated small-layer training.
+                t_i = c_i = None
                 if not use_kernel:
+                    t_i, c_i = module._decode_rows(lo, hi)
                     w_i = s_i.to(x.dtype) * t_i.to(x.dtype)
                     grad_x2.add_(go2[:, lo:hi] @ w_i)
                 if fire:
@@ -337,6 +342,9 @@ class _FusedCounterLinearFn(torch.autograd.Function):
                     if proxy_gsq is not None:
                         _allreduce_grad_w_(proxy_gsq)
                     if not module._fused_update(lo, hi, grad_w_i):
+                        # torch fallback keeps the flip-rate diagnostics; it needs the decode
+                        if t_i is None:
+                            t_i, c_i = module._decode_rows(lo, hi)
                         module._update_tile(lo, hi, grad_w_i, t_i, c_i, s_i, proxy_gsq=proxy_gsq)
             if fire:
                 # per-layer flip-rate = flips summed over ALL tiles / elements over all tiles
@@ -640,8 +648,8 @@ class CompactCounterLinear(RoundingStreamMixin, nn.Module):
         if not (self.training and self.update_enabled):
             return
         lo, hi = 0, self.out_features
-        t_i, c_i = self._decode_rows(lo, hi)
         if not self._fused_update(lo, hi, grad_w):
+            t_i, c_i = self._decode_rows(lo, hi)
             self._update_tile(lo, hi, grad_w, t_i, c_i, self.scale[lo:hi])
 
     @torch.no_grad()
