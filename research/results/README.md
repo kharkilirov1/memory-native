@@ -47,7 +47,7 @@ whole-step VRAM savings are smaller and include activations and temporary buffer
 | 1.21B T4 scale | [`SCALE_1B.md`](SCALE_1B.md) | Historical 2000-step fit/learning report; primary log and exact runner are missing |
 | Strict update-from-IO / cuBLAS frontier | [`ACCELERATION.md`](ACCELERATION.md), [`group_kernel_opt_stage01.md`](group_kernel_opt_stage01.md) | Strict memory path is dramatically slower on tested T4 shapes |
 | Group-local fused kernel + decimation | [`GPU_GATE_T4_GROUPLOCAL.md`](GPU_GATE_T4_GROUPLOCAL.md), [`GROUP_LOCAL_UPDATE.md`](GROUP_LOCAL_UPDATE.md) | Dec4 update kernel 1.7–3.0× faster than dense update; full-group kernel slower; not whole-step speed |
-| Per-parameter byte accounting (6-bit vs 0.9-1.1 vs ~23 B/param) | [`STATE_ACCOUNTING.md`](STATE_ACCOUNTING.md), [`../../scripts/state_accounting.py`](../../scripts/state_accounting.py) | CPU measurement of one deployed layer plus one fwd+bwd step; not a full training peak |
+| Per-parameter byte accounting (6-bit vs 0.9-1.0 vs ~23 B/param) | [`STATE_ACCOUNTING.md`](STATE_ACCOUNTING.md), [`../../scripts/state_accounting.py`](../../scripts/state_accounting.py) | CPU measurement of one deployed layer plus one fwd+bwd step; not a full training peak |
 | MLX/group/Bonsai compatibility | [`../../docs/MLX_PORT.md`](../../docs/MLX_PORT.md), MLX tests | Linux CPU gates; Metal performance/parity on Apple silicon still open |
 
 ## Donor conversion and recovery
