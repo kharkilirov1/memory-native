@@ -515,7 +515,7 @@ if HAS_TRITON:
     ):
         row = tl.program_id(0)
         grp = tl.program_id(1)
-        seed = seed_val.to(tl.uint32)
+        seed = tl.load(seed_ptr).to(tl.uint32)
         packed_per_group = group_size // 4
         local_pg = tl.arange(0, BLOCK_PG)
         packed_group = grp * packed_per_group + local_pg
@@ -615,7 +615,7 @@ if HAS_TRITON:
         # Same transition as _group_state_from_io_kernel with the correlation read from gw_ptr.
         row = tl.program_id(0)
         grp = tl.program_id(1)
-        seed = seed_val.to(tl.uint32)
+        seed = tl.load(seed_ptr).to(tl.uint32)
         packed_per_group = group_size // 4
         local_pg = tl.arange(0, BLOCK_PG)
         packed_group = grp * packed_per_group + local_pg
