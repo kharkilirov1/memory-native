@@ -227,3 +227,32 @@ Current standing of the objective:
 - semantics/quality clause is satisfied and pinned: 5 CUDA bit-exactness tests against the
   torch oracle (SR, carry, group scales), 18 packed tests, and the dense emission only
   writes a derived buffer, so strict-alpha=0 outputs are unchanged.
+
+
+## Round 7: decimation is a LARGE-shape tool; dec1 wins on small layers
+
+Measured the decimation knee per shape (A100, group scope, cache, fused decode):
+
+| shape | batch | dec1 | dec2 | dec4 | dec8 | best |
+|---|---:|---:|---:|---:|---:|---:|
+| 4096x4096 | 512 | 1.13x | - | 0.90x | **0.83x** | dec8 |
+| 1024x1024 | 512 | **1.20x** | 1.36x | 1.40x | - | dec1 |
+| 2048x2048 | 256 | **1.26x** | 1.50x | 1.46x | - | dec1 |
+| 1536x1536 | 64 | **1.25x** | 1.41x | - | - | dec1 |
+
+Decimation only pays when the updater is compute-bound (wide layers, large batch); on
+small layers the decimated path's compact x copy and thin grid cost more than the skipped
+groups save, so the recipe is: **dec1 below ~4M parameters per layer, dec8 at 4096^2**.
+
+Final standing against the objective:
+
+| regime | dense AdamW | counter step | ratio | verdict |
+|---|---:|---:|---:|---|
+| 12B-class (4096^2, B=512-1024) | 3.047 / 4.823 | 2.544 / 4.516 | **0.83-0.94x** | met: faster than AdamW |
+| medium (1024^2-2048^2, B=256-512) | 0.592 / 0.574 | 0.712 / 0.724 | 1.20-1.26x | not met |
+| small/batch-64 (1536^2) | 0.577 | 0.726 | 1.25x | not met |
+
+The medium/small residual is the ~0.2 ms kernel floor (tile tuning does not move it, see
+Round 6) plus ~0.08-0.15 ms of autograd/dispatch around the custom Function. Closing it
+requires a structural change (M-split two-pass stats, or an explicit update step outside
+backward), not more tuning. Semantics/quality clause is verified and unchanged.
