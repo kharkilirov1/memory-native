@@ -102,7 +102,12 @@ def main(argv=None) -> int:
                 if ref_layer is None:
                     ref_layer = layer
             entry["fwd_ms"] = bench(lambda: layer._forward_matmul(x))
-            entry["bwd_gradx_ms"] = bench(lambda: layer._backward_grad_x(go))
+            if layer._has_fast_grad_x():
+                entry["bwd_gradx_ms"] = bench(lambda: layer._backward_grad_x(go))
+            else:
+                bg = torch.zeros((args.tokens, in_f), device="cuda")
+                entry["bwd_gradx_ms"] = bench(lambda: bg.add_(go[:, :in_f] if out_f == in_f else 0))
+                entry["bwd_gradx_note"] = "torch kinds compute grad_x inside the tiled backward loop"
             entry["update_ms"] = bench(lambda: layer.apply_update_from_grad_w(gw))
 
             def one_step():
@@ -112,9 +117,10 @@ def main(argv=None) -> int:
             entry["step_ms"] = bench(one_step)
             entry["launches_per_step"] = count_launches(one_step)
             results["layers"][f"{name}_{out_f}x{in_f}"] = entry
-            print(f"{name:15s} {out_f}x{in_f}: fwd {entry['fwd_ms']:7.3f} | gradx "
-                  f"{entry['bwd_gradx_ms']:7.3f} | upd {entry['update_ms']:7.3f} | step "
-                  f"{entry['step_ms']:7.3f} ms | launches {entry['launches_per_step']:5d}"
+            gradx = f"{entry['bwd_gradx_ms']:7.3f}" if "bwd_gradx_note" not in entry else "  (n/a)"
+            print(f"{name:15s} {out_f}x{in_f}: fwd {entry['fwd_ms']:7.3f} | gradx {gradx} | upd "
+                  f"{entry['update_ms']:7.3f} | step {entry['step_ms']:7.3f} ms | launches "
+                  f"{entry['launches_per_step']:5d}"
                   + (f" | decode err {entry.get('decode_max_abs_err', float('nan')):.2e}"
                      if "decode_max_abs_err" in entry else ""))
             del layer
