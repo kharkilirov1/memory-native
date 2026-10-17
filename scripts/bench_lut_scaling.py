@@ -179,6 +179,13 @@ def main(argv=None) -> int:
                 return lut_gather_multi(lut, idx, layer.scale, group=args.group,
                                         block_n=args.block_n)
 
+            def lut_cached_idx():
+                # realistic serving: weight-side index table cached once, LUT rebuilt for
+                # every new input token batch, then the gather
+                fresh_lut = lut_build(x_perm)
+                return lut_gather_multi(fresh_lut, idx, layer.scale, group=args.group,
+                                        block_n=args.block_n)
+
             def lut_prep_only():
                 ternary_index_build(layer.state, layer.in_features, C=args.C)
                 return lut_build(x_perm)
@@ -194,6 +201,7 @@ def main(argv=None) -> int:
                 ("fused_decode", fused_decode, packed_bytes, rel_err(got_fused, ref)),
                 ("lut_total", lut_total, packed_bytes, rel_err(got_lut, ref)),
                 ("lut_amortized", lut_amortized, packed_bytes, rel_err(got_lut, ref)),
+                ("lut_cached_idx", lut_cached_idx, packed_bytes, rel_err(got_lut, ref)),
                 ("lut_prep_only", lut_prep_only, packed_bytes + lut_bytes, None),
             ]
             for name, fn, nbytes, err in paths:
@@ -209,6 +217,9 @@ def main(argv=None) -> int:
                     "bytes_streamed": nbytes,
                     "gbps": gbps,
                     "max_rel_err": err,
+                    "lut_buf_bytes": lut_bytes,
+                    "idx_buf_bytes": idx.numel() * idx.element_size(),
+                    "out_buf_bytes": m * shape * 4,
                 }
                 rows.append(row)
                 err_s = "n/a" if err is None else f"{err:.2e}"
