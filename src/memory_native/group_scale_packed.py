@@ -29,6 +29,18 @@ def _is_power_of_two(value: int) -> bool:
     return value > 0 and (value & (value - 1)) == 0
 
 
+def _salient_index_dtype(num_positions: int) -> torch.dtype:
+    """Dtype for a flat ``row * in_features + column`` salient index.
+
+    The widest index is ``num_positions - 1``. int32 covers a layer with up to 2**31
+    coefficients, which is every layer of every donor converted so far (the widest,
+    5120x17408 in the 27B run, is 89M positions). The buffer is a non-persistent
+    runtime mirror of the persistent int32 ``salient_idx``, so this only trades RAM;
+    the int64 branch is kept for a hypothetical layer above ~46k x 46k.
+    """
+    return torch.int32 if int(num_positions) <= 2 ** 31 else torch.int64
+
+
 class _PackedGroupScaleFn(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x: torch.Tensor, module: "PackedGroupScaleCounterLinear", tap: torch.Tensor):
@@ -196,7 +208,9 @@ class PackedGroupScaleCounterLinear(RoundingStreamMixin, nn.Module):
         self.register_buffer("salient_idx", torch.zeros(0, dtype=torch.int32))
         self.register_buffer("salient_val", torch.zeros(0, dtype=torch.float16))
         self.register_buffer(
-            "_salient_perm_flat", torch.zeros(0, dtype=torch.int64), persistent=False
+            "_salient_perm_flat",
+            torch.zeros(0, dtype=_salient_index_dtype(self.out_features * self.in_features)),
+            persistent=False,
         )
         self._salient_sparse_cache = None
         self._salient_zero_code = int(encode_state(
@@ -245,9 +259,13 @@ class PackedGroupScaleCounterLinear(RoundingStreamMixin, nn.Module):
             inv = torch.argsort(p)
             o = self.salient_idx.long() // self.in_features
             j = self.salient_idx.long() % self.in_features
-            self._salient_perm_flat = o * self.in_features + inv[j]
+            flat = o * self.in_features + inv[j]     # int64 math; narrowed only on store
+            self._salient_perm_flat = flat.to(
+                _salient_index_dtype(self.out_features * self.in_features))
         else:
-            self._salient_perm_flat = torch.zeros(0, dtype=torch.int64, device=self.state.device)
+            self._salient_perm_flat = torch.zeros(
+                0, dtype=_salient_index_dtype(self.out_features * self.in_features),
+                device=self.state.device)
         self._salient_sparse_cache = None
 
     def _sample_codes(self) -> torch.Tensor:

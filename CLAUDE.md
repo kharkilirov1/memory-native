@@ -43,7 +43,8 @@ The historical session ledger is preserved in [research/notes/DEVELOPMENT_LOG.md
   "No module named pip". Install with `uv pip install --python .venv\Scripts\python.exe …`
   (or run the venv's own console scripts, e.g. `memory-native-charlm.exe`).
 - Per-parameter bytes: 6 bits is the *code body* (0.750 B/param). Measured on a deployed
-  packed layer: 0.906 B/param persistent, 1.082 B/param resident (int64 salient mirror),
+  packed layer: 0.906 B/param persistent, 1.002 B/param resident (the salient mirror
+  is int32 below 2**31 coefficients per layer; it was 1.082 while hard-coded int64),
   1.012 B/param for the unpacked reference layer, and ~23 B/param for one pure-PyTorch
   fwd+bwd step. Re-measure with `scripts/state_accounting.py`; see
   `research/results/STATE_ACCOUNTING.md`. Never quote 0.75 as a training-memory figure.
