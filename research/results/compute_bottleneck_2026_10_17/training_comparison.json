@@ -1,0 +1,121 @@
+{
+ "harness": "repo char-LM parity gate (memory-native-charlm), same architecture/data/tokenizer/init/budget per kind; tinyshakespeare char corpus (vocab 65), config=tiny (4 layers, d=256, block=128, 4 heads), batch 32, 600 steps, eval 20 iters",
+ "device": "NVIDIA A100-SXM4-40GB",
+ "measured_commit": "ab39b3f3b13fc663f58730e25eaf214f6ec17570",
+ "seeds": [
+  0,
+  1
+ ],
+ "final_val_loss": {
+  "seed0": {
+   "dense": 2.1549,
+   "qat": 2.3337,
+   "counter": 2.1652,
+   "counter_rms": 1.9747
+  },
+  "seed1": {
+   "dense": 2.1956,
+   "qat": 2.1652,
+   "counter": 2.1444,
+   "counter_rms": 1.9463
+  }
+ },
+ "mean_val_loss": {
+  "dense": 2.1753,
+  "qat": 2.2495,
+  "counter": 2.1548,
+  "counter_rms": 1.9605
+ },
+ "throughput_tok_s": {
+  "seed0": {
+   "dense": 334235,
+   "qat": 231145,
+   "counter": 84293,
+   "counter_rms": 79945
+  },
+  "seed1": {
+   "dense": 376222,
+   "qat": 232082,
+   "counter": 85573,
+   "counter_rms": 79974
+  }
+ },
+ "persistent_state_mib": {
+  "dense": 12.21,
+  "qat": 12.21,
+  "counter": 3.24,
+  "counter_rms": 3.31
+ },
+ "peak_training_vram_mib": {
+  "seed0": {
+   "dense": 342.4,
+   "qat": 354.4,
+   "counter": 324.47,
+   "counter_rms": 324.54
+  },
+  "seed1": {
+   "dense": 342.4,
+   "qat": 354.4,
+   "counter": 324.47,
+   "counter_rms": 324.54
+  }
+ },
+ "time_to_quality": {
+  "note": "val loss vs wall-clock for dense vs counter_rms, seed 0, same budget per run; each row is a separate run with the given number of steps",
+  "steps_150": {
+   "dense": {
+    "val": 2.5881,
+    "s": 2
+   },
+   "counter_rms": {
+    "val": 2.3674,
+    "s": 8
+   }
+  },
+  "steps_300": {
+   "dense": {
+    "val": 2.4662,
+    "s": 4
+   },
+   "counter_rms": {
+    "val": 2.1202,
+    "s": 15
+   }
+  },
+  "steps_450": {
+   "dense": {
+    "val": 2.3582,
+    "s": 5
+   },
+   "counter_rms": {
+    "val": 2.013,
+    "s": 23
+   }
+  },
+  "steps_600": {
+   "dense": {
+    "val": 2.1549,
+    "s": 7
+   },
+   "counter_rms": {
+    "val": 1.9747,
+    "s": 31
+   }
+  },
+  "dense_final_quality": 2.1549,
+  "counter_rms_reaches_dense_final_between_s": [
+   15,
+   23
+  ],
+  "ratio_time_to_equal_quality_estimate": "~2.1x slower (14-16 s vs 7 s) but then overtakes dense quality (1.97 vs 2.15 at 600 steps)"
+ },
+ "memory_gate": {
+  "harness": "memory-native-memgate --config tiny --batch 16 --device cuda",
+  "persistent_counter_rms_mib": 5.25,
+  "counter_weights_packed_6bit_mib": 2.25,
+  "peak_counter_rms_mib": 209.72,
+  "peak_dense_adamw_mib": 234.14,
+  "peak_ratio_dense_over_counter": 1.12
+ },
+ "honest_read": "Counter variants reach equal or better val loss at the same step budget with 3.7-3.8x less persistent state, but the char-LM gate runs them 4x slower per token (84k vs 334-376k tok/s) because the GPT model uses the plain counter layers, not the fast group-scale packed path measured in the layer benchmark. Peak VRAM at this model scale is activation-dominated: only 1.05-1.12x less."
+}

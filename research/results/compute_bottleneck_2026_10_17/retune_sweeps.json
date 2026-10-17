@@ -1,0 +1,61 @@
+{
+ "measured_commit": "ab39b3f3b13fc663f58730e25eaf214f6ec17570",
+ "device": "NVIDIA A100-SXM4-40GB",
+ "shape": "4096x4096",
+ "fused_decode_in_gemm_forward": {
+  "original_tiles_32_32_32": {
+   "M=1": 1.33,
+   "M=64": 1.3,
+   "M=512": 12.5
+  },
+  "best_retuned": {
+   "M=1": {
+    "ms": 1.003,
+    "tiles": "BM=32,BN=64,BK=64,w=4"
+   },
+   "M=64": {
+    "ms": 1.1844,
+    "tiles": "BM=64,BN=64,BK=64,w=4"
+   },
+   "M=512": {
+    "ms": 3.876,
+    "tiles": "BM=128,BN=128,BK=64,w=4"
+   }
+  },
+  "references_ms": {
+   "M=1": {
+    "dense_fp32": 0.0588,
+    "decode_once": 0.5
+   },
+   "M=64": {
+    "dense_fp32": 0.1566,
+    "decode_once": 0.4988
+   },
+   "M=512": {
+    "dense_fp32": 1.0734,
+    "decode_once": 0.5004
+   }
+  }
+ },
+ "fused_grad_x": {
+  "best_retuned": {
+   "M=64": {
+    "ms": 1.0538,
+    "tiles": "BM=64,BN=128,BK=64,w=4"
+   },
+   "M=512": {
+    "ms": 3.9834,
+    "tiles": "BM=64,BN=128,BK=64,w=4"
+   }
+  },
+  "references_ms": {
+   "M=64": {
+    "cublas_materialized": 1.4448
+   },
+   "M=512": {
+    "cublas_materialized": 2.4073
+   }
+  }
+ },
+ "conclusion": "retuning recovers 3.2x on the fused forward at M=512 (12.5 -> 3.88 ms) but it stays 3.6x above dense fp32 GEMM and 7.8x above decode-once; the fused grad_x is 1.65x above cuBLAS-with-materialized-weight at M=512. Triton-level decode-in-GEMM on A100 is ~3 GB/s of packed state vs a 1.8 TB/s roofline."
+}

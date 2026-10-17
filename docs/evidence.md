@@ -44,6 +44,22 @@ help) and slower on 1024^2. Limits: strict ternary only (no alpha>0, no salient)
 A100, and **no controlled time-to-quality training experiment** - per-step cost is not
 shown to translate into equal-quality wall-clock savings yet.
 
+## Compute bottleneck: step decomposition, the no-fp32-cache path and a real training gate (2026-10-17/18)
+
+[`research/results/compute_bottleneck_2026_10_17/REPORT.md`](../research/results/compute_bottleneck_2026_10_17/REPORT.md)
+measures, on an A100 at `ab39b3f`: a 4096^2/B=512 packed-counter step is 0.87x the wall
+time of FP32 AdamW with 3.8x less peak allocated VRAM (2.67 vs 3.07 ms, 17 vs 64 MB) using
+the persistent fp32 cache + decimation; dropping the cache is a memory regression (144 MB
+peak with two live decodes) and the truly fused decode-in-GEMM step is 98 ms even after a
+3.2x tile retune. Small layers stay 1.1-1.3x slower. In the repo's real char-LM gate
+(2 seeds) counter_rms reaches a **better** val loss than dense AdamW at the same budget
+(1.9605 vs 2.1753) with 3.7x less persistent state but ~4x lower tokens/s, so time to equal
+quality is ~2.1x worse - the open problem is the model-level counter layer overhead, not the
+matmuls. A new verification harness confirms the decimation contract and one-update-per-step
+and documents an open defect: on 4096^2 the fused updater moves 2 of 16.8M codes by one
+quantum at lr=0. Peak memory at model scale is activation-dominated (1.05-1.12x total win),
+so storage savings must not be quoted as training-memory savings.
+
 For the full capability matrix, read [project status](status.md). For raw measurements,
 negative results and historical protocols, use the [results index](../research/results/README.md).
 To reproduce or challenge a claim, follow [reproducibility](reproducibility.md).

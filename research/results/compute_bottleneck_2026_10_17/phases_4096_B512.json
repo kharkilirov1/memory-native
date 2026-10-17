@@ -1,0 +1,37 @@
+{
+ "measured_commit": "ab39b3f3b13fc663f58730e25eaf214f6ec17570",
+ "device": "NVIDIA A100-SXM4-40GB",
+ "shape": "4096x4096",
+ "tokens": 512,
+ "note": "fwd/inner phases measured with no_grad on the layer's own entry points; full_step is the real fwd+backward (the counter updater runs inside backward); decode = visible_weight() (torch/cached-fused decode path)",
+ "ms": {
+  "dense_fp32": {
+   "fwd": 1.0737,
+   "full_step": 3.0658
+  },
+  "packed_decode_once": {
+   "fwd": 1.5732,
+   "full_step": 4.8931,
+   "fwd_2d": 1.574,
+   "grad_x_2d": 1.438,
+   "update_only": 1.7938,
+   "decode": 0.499
+  },
+  "packed_cache_g": {
+   "fwd": 1.0755,
+   "full_step": 3.2855,
+   "fwd_2d": 1.074,
+   "grad_x_2d": 0.939,
+   "update_only": 1.282,
+   "decode": 0.5003
+  },
+  "packed_cache_g_dec8": {
+   "fwd": 1.0751,
+   "full_step": 2.6722,
+   "fwd_2d": 1.0746,
+   "grad_x_2d": 0.938,
+   "update_only": 0.3974,
+   "decode": 0.4983
+  }
+ }
+}
