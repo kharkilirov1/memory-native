@@ -103,6 +103,21 @@ def profile_steps(model, opt, x, y, steps: int, out_dir: Path, kind: str) -> dic
     trace = out_dir / f"trace_{kind.replace('.', '_')}.json"
     prof.export_chrome_trace(str(trace))
 
+    # CPU-vs-GPU attribution per step: if CPU total > GPU total the step is dispatch-bound and
+    # kernel micro-optimisation cannot help (this decides the next lever).
+    cpu_total = 0.0
+    cuda_total = 0.0
+    launches = 0
+    for evt in prof.key_averages():
+        cpu_total += getattr(evt, "self_cpu_time_total", 0.0) or 0.0
+        cuda_total += getattr(evt, "self_device_time_total", 0.0) or 0.0
+        if evt.key == "cudaLaunchKernel":
+            launches = evt.count
+    totals = {"cpu_ms_per_step": cpu_total / 1e3 / steps,
+              "cuda_ms_per_step": cuda_total / 1e3 / steps,
+              "launches_per_step": launches / steps,
+              "bound": ("cpu" if cpu_total > cuda_total else "gpu")}
+
     def table(sort_key: str, n: int = 20):
         rows = []
         for evt in prof.key_averages():
@@ -119,8 +134,12 @@ def profile_steps(model, opt, x, y, steps: int, out_dir: Path, kind: str) -> dic
         rows.sort(key=lambda r: r[key], reverse=True)
         return rows[:n]
 
-    return {"cuda_top20": table("cuda"), "cpu_top20": table("cpu"),
-            "trace": str(trace)}
+    out = {"cuda_top20": table("cuda"), "cpu_top20": table("cpu"),
+           "trace": str(trace), **totals}
+    print(f"  attribution: CPU {totals['cpu_ms_per_step']:.2f} ms/step | GPU "
+          f"{totals['cuda_ms_per_step']:.2f} ms/step | {totals['launches_per_step']:.0f} "
+          f"launches/step -> {totals['bound'].upper()}-bound")
+    return out
 
 
 def main(argv=None) -> int:
