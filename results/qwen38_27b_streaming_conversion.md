@@ -23,9 +23,15 @@ lm_head; vision tower + MTP stay fp. Download 51.7 GiB (18 shards, 78 min).
   tower depth to 2 (a 27x1152 tower is ~1.6 GiB of probe nobody reads).
 - `restore_witness.py` phases 1-2 both build through `_skeleton_for_checkpoint`.
 
-Witness: `.codex-tmp/tiny_qwen35_smoke.py` — synthetic 2-layer qwen3_5 VLM through
+Witness: [`scripts/tiny_qwen35_smoke.py`](../scripts/tiny_qwen35_smoke.py) — preserved
+verbatim from the campaign scratch directory on 2026-10-17 (it used to be cited as
+`.codex-tmp/tiny_qwen35_smoke.py`, an untracked path that a fresh clone does not have).
+It runs a synthetic 2-layer qwen3_5 VLM through
 the real `convert_streaming` twice (resume), `load_streamed_state`, full-VLM
 phase2-restore with vision uncovered via `extra_skip`, forward finite. ALL GREEN.
+It needs `transformers` with the qwen3_5 config classes and writes its synthetic
+donor/output directories next to itself (both git-ignored); it was preserved, not
+re-executed, while the conversion path changed since the run.
 
 ## Conversion run
 

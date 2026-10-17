@@ -14,3 +14,13 @@ data/
 # pytest tmp_path roots created under the workspace on Windows
 pytest-of-*/
 .nul
+# local build / tool caches that are not source
+torchinductor_*/
+*.pipeline_cache.bin
+# agent scratch directories (working notes, not tracked evidence)
+.codex-tmp/
+# Kaggle run outputs copied down from the kernels (contain checkpoints, not source)
+kaggle_kernels/*_out/
+# local artifacts written by scripts/tiny_qwen35_smoke.py
+scripts/tiny_qwen35/
+scripts/tiny_qwen35_out/
