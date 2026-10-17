@@ -657,13 +657,14 @@ if HAS_TRITON:
     @triton.jit
     def _group_fused_update_kernel(
         state_ptr, scale_ptr, v_ptr, x_ptr, go_ptr, perm_ptr, seed_ptr, groups_ptr,
+        dense_ptr,
         M, N, K, G, C, group_size, lr, lr_scale, rms_beta, rms_eps, clip, residual_alpha,
         stride_sn, stride_xm, stride_xk, stride_gom, stride_gon,
-        stride_scn, stride_scg, stride_vn, stride_vg,
+        stride_scn, stride_scg, stride_vn, stride_vg, stride_dense,
         BLOCK_N: tl.constexpr, BLOCK_M: tl.constexpr,
         BLOCK_K: tl.constexpr, BLOCK_PG: tl.constexpr,
         X_BF16: tl.constexpr, X_FP16: tl.constexpr, LAGGED: tl.constexpr,
-        DECIMATED: tl.constexpr,
+        DECIMATED: tl.constexpr, WRITE_DENSE: tl.constexpr,
     ):
         # One-pass GROUP-LOCAL update (v is [N, G]): each program owns a [BLOCK_N rows x one
         # scale group] tile, forms its slice of grad_w = go^T x with tl.dot ENTIRELY in
@@ -784,6 +785,25 @@ if HAS_TRITON:
         tl.store(state_ptr + base + 0, p0b.to(tl.uint8), mask=bmask)
         tl.store(state_ptr + base + 1, p1b.to(tl.uint8), mask=bmask)
         tl.store(state_ptr + base + 2, p2b.to(tl.uint8), mask=bmask)
+
+        if WRITE_DENSE:
+            # Emit the dense visible weight for the NEXT step. This removes the standalone
+            # decode pass from the step entirely (the decode is only needed because the
+            # update invalidates the cached weight); it costs one scattered store per
+            # element and reuses values this program already has in registers.
+            dense_base = dense_ptr + offs_n[:, None] * stride_dense
+            w0 = sn2 * ((nc0 // lv - 1).to(tl.float32)
+                        + residual_alpha * (nc0 % lv - (C - 1)).to(tl.float32) / Cf)
+            w1 = sn2 * ((nc1 // lv - 1).to(tl.float32)
+                        + residual_alpha * (nc1 % lv - (C - 1)).to(tl.float32) / Cf)
+            w2 = sn2 * ((nc2 // lv - 1).to(tl.float32)
+                        + residual_alpha * (nc2 % lv - (C - 1)).to(tl.float32) / Cf)
+            w3 = sn2 * ((nc3 // lv - 1).to(tl.float32)
+                        + residual_alpha * (nc3 % lv - (C - 1)).to(tl.float32) / Cf)
+            tl.store(dense_base + c0_orig[None, :], w0, mask=bmask)
+            tl.store(dense_base + c1_orig[None, :], w1, mask=bmask)
+            tl.store(dense_base + c2_orig[None, :], w2, mask=bmask)
+            tl.store(dense_base + c3_orig[None, :], w3, mask=bmask)
 
     @triton.jit
     def _group_decode_dense_kernel(
@@ -1101,6 +1121,7 @@ def triton_group_counter_update_fused(
     lagged: bool = False,
     clip: float = 0.0,
     active_groups: torch.Tensor | None = None,
+    dense_out: torch.Tensor | None = None,
 ) -> None:
     """One-launch fused GROUP-LOCAL update: tensor-core correlation + counter epilogue.
 
@@ -1168,16 +1189,28 @@ def triton_group_counter_update_fused(
         grid = (triton.cdiv(N, 32), G)
         decimated = False
     BLOCK_N, BLOCK_M = 32, 64
+    if dense_out is None:
+        dense_arg = scale                      # unused when WRITE_DENSE is False
+        dense_stride = 0
+        write_dense = False
+    else:
+        if dense_out.shape != (N, K) or dense_out.dtype != torch.float32:
+            raise ValueError("dense_out must be a fp32 [out, in_features] tensor")
+        dense_arg = dense_out
+        dense_stride = dense_out.stride(0)
+        write_dense = True
     with torch.cuda.device(x2.device):  # launch on the tensors' GPU, not the current one
         _group_fused_update_kernel[grid](
             state, scale, v, x_perm, go2, perm, seed_t, groups_t,
+            dense_arg,
             M, N, K, G, C, group,
             float(lr), float(lr_scale), float(rms_beta), float(rms_eps),
             float(clip), float(residual_alpha),
             state.stride(0), x_perm.stride(0), x_perm.stride(1), go2.stride(0), go2.stride(1),
-            scale.stride(0), scale.stride(1), v.stride(0), v.stride(1),
+            scale.stride(0), scale.stride(1), v.stride(0), v.stride(1), dense_stride,
             BLOCK_N=BLOCK_N, BLOCK_M=BLOCK_M, BLOCK_K=group, BLOCK_PG=group // 4,
             X_BF16=bf16, X_FP16=fp16, LAGGED=lagged, DECIMATED=decimated,
+            WRITE_DENSE=write_dense,
             num_warps=8,
         )
 
