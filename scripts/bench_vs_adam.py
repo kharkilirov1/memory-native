@@ -1,19 +1,19 @@
 #!/usr/bin/env python
 """Fair GPU A/B: counter training step vs dense Linear + AdamW, phase by phase.
 
-The question this answers is the project's speed target: the counter format is a memory
-win, but its step costs more than a dense AdamW step. This harness attributes the gap so
-a change can be aimed at the right term:
+The project's speed target is "counter step <= dense AdamW step". This harness measures
+both sides at the same shape/batch and splits the gap so a change is aimed at the right
+term:
 
-    dense   : fwd | grad_x | grad_w | AdamW       + full step (all four)
-    counter : fwd | grad_x | update (correlation + automaton) + full step (all three)
+    dense   : fwd | grad_x | grad_w | AdamW step      + full step
+    counter : fwd | grad_x | update (correlation+automaton) + full step
 
-Note the updater is NOT inside autograd: the full counter step is fwd + backward +
-`_update_from_io`, while the dense step is fwd + backward + `opt.step()`. Both sides
-therefore include their state update.
+Both full steps include their state update (dense `opt.step()`, counter
+`_update_from_io`), which the older CPU witness did not do for the counter side.
 
-    python scripts/bench_vs_adam.py                       # 1536^2, B=64, gemm
-    python scripts/bench_vs_adam.py --shape 4096 --batch 512 --mode both
+    python scripts/bench_vs_adam.py --shape 1536 --batch 64 --mode all
+    python scripts/bench_vs_adam.py --shape 4096 --batch 512 --mode gemm
+    python scripts/bench_vs_adam.py --shape 1536 --batch 64 --mode hybrid --stats-scope group
 """
 from __future__ import annotations
 
@@ -58,10 +58,12 @@ def _dense(in_features: int, out_features: int, batch: int, dev: str, run_time: 
 
 
 def _counter(in_features: int, out_features: int, batch: int, dev: str,
-             mode: str, group: int, C: int, run_time: float) -> dict:
+             mode: str, group: int, C: int, run_time: float,
+             stats_scope: str = "row") -> dict:
     torch.manual_seed(0)
-    layer = PackedGroupScaleCounterLinear(in_features, out_features, group=group, C=C,
-                                          kernel_mode=mode, lr=1e-3).to(dev)
+    layer = PackedGroupScaleCounterLinear(
+        in_features, out_features, group=group, C=C,
+        kernel_mode=mode, lr=1e-3, stats_scope=stats_scope).to(dev)
     x = torch.randn(batch, in_features, device=dev)
     go = torch.randn(batch, out_features, device=dev)
 
@@ -80,20 +82,14 @@ def _counter(in_features: int, out_features: int, batch: int, dev: str,
     return out
 
 
-def _row(name: str, value: float | None, ref: float | None = None) -> str:
-    if value is None:
-        return f"  {name:22s} {'-':>10s}"
-    ratio = f"{value / ref:6.2f}x" if ref else " " * 7
-    return f"  {name:22s} {value:10.3f} ms {ratio}"
-
-
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--shape", type=int, default=1536)
     ap.add_argument("--batch", type=int, default=64)
     ap.add_argument("--group", type=int, default=128)
     ap.add_argument("--C", type=int, default=11)
-    ap.add_argument("--mode", choices=["gemm", "triton", "both"], default="both")
+    ap.add_argument("--mode", choices=["gemm", "triton", "hybrid", "both", "all"], default="all")
+    ap.add_argument("--stats-scope", choices=["row", "group"], default="row")
     ap.add_argument("--run-time", type=float, default=2.0)
     args = ap.parse_args(argv)
 
@@ -103,11 +99,16 @@ def main(argv=None) -> int:
     dev = "cuda"
     I = O = args.shape
     B = args.batch
-    print(f"layer {O}x{I}  batch {B}  group {args.group}  C={args.C}  ({torch.cuda.get_device_name(0)})")
+    print(f"layer {O}x{I}  batch {B}  group {args.group}  C={args.C}  "
+          f"stats={args.stats_scope}  ({torch.cuda.get_device_name(0)})")
 
     dense = _dense(I, O, B, dev, args.run_time)
-    modes = ["gemm", "triton"] if args.mode == "both" else [args.mode]
-    counter = {m: _counter(I, O, B, dev, m, args.group, args.C, args.run_time) for m in modes}
+    modes = {"both": ["gemm", "triton"], "all": ["gemm", "triton", "hybrid"]}.get(
+        args.mode, [args.mode])
+    counter = {
+        m: _counter(I, O, B, dev, m, args.group, args.C, args.run_time, args.stats_scope)
+        for m in modes
+    }
 
     phases = ["fwd", "grad_x", "state update", "full step"]
     print(f"{'phase':24s} {'dense':>13s} " + " ".join(f"{m:>16s}" for m in modes))
@@ -118,9 +119,9 @@ def main(argv=None) -> int:
         print(line)
 
     for m in modes:
-        print(f"\n  [{m}] overhead vs dense {counter[m]['full step'] - dense['full step']:+.3f} ms "
-              f"({counter[m]['full step'] / dense['full step']:.2f}x)")
-        if m == "gemm":
+        total, base = counter[m]["full step"], dense["full step"]
+        print(f"\n  [{m}] overhead vs dense {total - base:+.3f} ms ({total / base:.2f}x)")
+        if m in {"gemm", "hybrid"}:
             decode = (counter[m]["fwd"] - dense["fwd"]) + (counter[m]["grad_x"] - dense["grad_x"])
             autom = counter[m]["state update"] - dense["state update"]
             print(f"     decode-in-fwd/grad_x {decode:+.3f} ms | update-vs-AdamW {autom:+.3f} ms")
