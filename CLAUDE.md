@@ -355,9 +355,18 @@ Gemma conversion budget nor a guarantee that fine-tuning will fit in 2.7 GiB.
   on garbage — finite numbers, silently corrupted calibration. Streaming rebuilds rotary
   from config and `_materialize` raises on any tensor the checkpoint lacks. Caught only
   because the streaming tests demand bit-exact agreement with the in-memory path.
-- The installed `memory_native` may resolve to a DIFFERENT checkout
-  (`Desktop\memory-native`). Run with `PYTHONPATH=<this repo>/src` and check
-  `memory_native.__file__` before trusting any result.
+- Confirm which install you are measuring: `python -c "import memory_native; print(memory_native.__file__)"`.
+  On 2026-10-17 this box resolved to `<repo>/src/memory_native/__init__.py` and no
+  `Desktop\memory-native` checkout existed, so the old "duplicate checkout" warning is
+  satisfied here — keep the one-command check when switching checkouts.
+- The workspace `.venv` is uv-managed and contains **no pip**: `python -m pip …` fails with
+  "No module named pip". Install with `uv pip install --python .venv\Scripts\python.exe …`
+  (or run the venv's own console scripts, e.g. `memory-native-charlm.exe`).
+- Per-parameter bytes: 6 bits is the *code body* (0.750 B/param). Measured on a deployed
+  packed layer: 0.906 B/param persistent, 1.082 B/param resident (int64 salient mirror),
+  1.012 B/param for the unpacked reference layer, and ~23 B/param for one pure-PyTorch
+  fwd+bwd step. Re-measure with `scripts/state_accounting.py`; see
+  `results/STATE_ACCOUNTING.md`. Never quote 0.75 as a training-memory figure.
 - `TEMP` is a Windows system variable — never use it as an env knob name (`GEN_TEMP` in
   `scripts/infer_counter_cpu.py` exists for exactly that reason).
 - Packed kinds need `in_features % 4 == 0`; strict Triton group update needs a
@@ -383,6 +392,12 @@ pip install -e .[donor]     # + transformers/safetensors/accelerate for donor wo
 pip install pytest
 python -m pytest tests/ -q  # CUDA/Triton tests skip on CPU-only boxes
 ```
+
+On this box the checked-in `.venv` is uv-managed (`uv 0.11`, CPython 3.13, torch 2.12.1+cpu)
+and has no pip inside; either activate it and use its `Scripts/*.exe` entry points, or
+`uv pip install --python .venv\Scripts\python.exe -e ".[dev,donor]"`. The CPU suite is
+green here (495 passed, 23 skipped, 0 failed, 2026-10-17); the one ever-failing case was
+the HF-snapshot symlink test, now skipped when the host cannot create symlinks.
 
 Recovery runs live in `scripts/` (`run_ptq_recovery.py` is the resumable v3 runner;
 env-driven: MODEL, DATA_DIR, CKPT_DIR, STEPS, GRID, SALIENT_FIRST, …). Results and
