@@ -19,6 +19,7 @@ __all__ = [
     "group_counter_update_grouplocal_hashsr",
     "group_counter_update_grouplocal_from_io_hashsr",
     "group_update_scratch_bytes",
+    "triton_decode_dense",
     "triton_group_decode_matmul",
     "triton_group_grad_x",
     "triton_group_counter_update_from_io",
@@ -784,6 +785,48 @@ if HAS_TRITON:
         tl.store(state_ptr + base + 1, p1b.to(tl.uint8), mask=bmask)
         tl.store(state_ptr + base + 2, p2b.to(tl.uint8), mask=bmask)
 
+    @triton.jit
+    def _group_decode_dense_kernel(
+        state_ptr, scale_ptr, perm_ptr, out_ptr,
+        N, P, G, C, group_size, residual_alpha,
+        stride_sn, stride_scn, stride_scg, stride_outn,
+        BLOCK_O: tl.constexpr, BLOCK_P: tl.constexpr,
+    ):
+        """Materialize the dense [N, 4P] visible weight in ORIGINAL column order.
+
+        One read of the packed 6-bit stream, one write: replaces the ~10 elementwise torch
+        passes (`unpack_codes`, `decode_state`, dtype casts, `repeat_interleave`, the
+        permute-scatter) that make `visible_weight()` cost ~1.8 ms at 4096^2. Bit-identical
+        to that path: same fp32 operations in the same order.
+        """
+        pid_p = tl.program_id(0)
+        pid_o = tl.program_id(1)
+        offs_o = pid_o * BLOCK_O + tl.arange(0, BLOCK_O)
+        omask = offs_o < N
+        offs_p = pid_p * BLOCK_P + tl.arange(0, BLOCK_P)
+        pmask = offs_p < P
+        m2 = omask[:, None] & pmask[None, :]
+        base = offs_o[:, None] * stride_sn + offs_p[None, :] * 3
+        b0 = tl.load(state_ptr + base + 0, mask=m2, other=0).to(tl.int32)
+        b1 = tl.load(state_ptr + base + 1, mask=m2, other=0).to(tl.int32)
+        b2 = tl.load(state_ptr + base + 2, mask=m2, other=0).to(tl.int32)
+        lv = 2 * C - 1
+        Cf = C * 1.0
+        bpg = group_size // 4
+        s = tl.load(
+            scale_ptr + offs_o[:, None] * stride_scn
+            + (offs_p[None, :] // bpg) * stride_scg,
+            mask=m2, other=0.0,
+        )
+        for lane in tl.static_range(4):
+            code = _decode6(b0, b1, b2, lane)
+            t = code // lv - 1
+            c = code % lv - (C - 1)
+            val = s * (t.to(tl.float32) + residual_alpha * c.to(tl.float32) / Cf)
+            col = offs_p * 4 + lane
+            dst = tl.load(perm_ptr + col, mask=pmask, other=0).to(tl.int64)
+            tl.store(out_ptr + offs_o[:, None] * stride_outn + dst[None, :], val, mask=m2)
+
 
 def _dtype_flags(tensor: torch.Tensor) -> tuple[bool, bool]:
     return tensor.dtype == torch.bfloat16, tensor.dtype == torch.float16
@@ -860,6 +903,46 @@ def triton_group_grad_x(
             BLOCK_M=BM, BLOCK_N=BN, BLOCK_K=BK, GO_BF16=bf16, GO_FP16=fp16,
         )
     return gx
+
+
+def triton_decode_dense(
+    state_packed_perm: torch.Tensor,
+    scale: torch.Tensor,
+    perm: torch.Tensor,
+    *,
+    C: int,
+    group: int,
+    residual_alpha: float = 0.0,
+    block_o: int = 32,
+    block_p: int = 64,
+) -> torch.Tensor:
+    """Dense fp32 visible weight in original column order, in ONE Triton launch.
+
+    The torch equivalent (`visible_weight`) makes ~10 elementwise passes over [out, in]:
+    unpack -> decode -> cast -> broadcast scale -> permute-scatter. Measured on A100 at
+    4096^2 that is ~1.8 ms per call, and a step pays it once (forward/grad-x share the
+    cache). This kernel reads the packed stream once and writes the dense result once.
+    """
+    if not HAS_TRITON:
+        raise RuntimeError("triton not available")
+    state = state_packed_perm.contiguous()
+    scale = scale.contiguous()
+    perm = perm.contiguous()
+    out_features, cols = state.shape
+    n_pack = cols // 3
+    in_features = n_pack * 4
+    if not (state.is_cuda and scale.is_cuda and perm.is_cuda):
+        raise ValueError("triton_decode_dense requires CUDA tensors")
+    out = torch.empty((out_features, in_features), device=state.device, dtype=torch.float32)
+    grid = (triton.cdiv(n_pack, block_p), triton.cdiv(out_features, block_o))
+    with torch.cuda.device(state.device):
+        _group_decode_dense_kernel[grid](
+            state, scale, perm, out,
+            out_features, n_pack, scale.shape[1], C, group, float(residual_alpha),
+            state.stride(0), scale.stride(0), scale.stride(1), out.stride(0),
+            BLOCK_O=block_o, BLOCK_P=block_p,
+        )
+    return out
 
 
 @torch.no_grad()
