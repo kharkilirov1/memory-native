@@ -68,3 +68,39 @@ here).
 
 Tests: `tests/test_group_scale_packed.py` green; full CPU suite 639 passed / 24 skipped
 after the hybrid mode and the cache.
+
+## Round 2: fused decode + group scope + decimation, and a measurement bug
+
+`triton_decode_dense` landed (one launch; 0.145 ms at 1536^2, 0.557 ms at 4096^2 vs ~1.8 ms
+for the torch chain; bit-identical at the deployable alpha=0, fp32-close at alpha>0).
+`--decimation` and `--stats-scope` were added to the harness. Also found that the earlier
+"AdamW state update = 0.031 ms" was wrong: `opt.step()` on a parameter whose `.grad` is None
+is a no-op, so that row measured launch overhead only. With a gradient loaded, AdamW costs
+**1.21 ms** at 4096^2 (and 0.318 ms at 1536^2), which changes the attribution.
+
+A100, 4096x4096, B=512, cache on, fused decode:
+
+| config | fwd | grad_x | update | full step | vs dense |
+|---|---:|---:|---:|---:|---:|
+| dense + AdamW | 1.105 | 0.932 | 1.211 | **3.047** | 1.00x |
+| group, dec1 | 1.108 | 0.932 | 1.075 | 4.532 | 1.49x |
+| **group, dec4** | 1.108 | 0.932 | **0.721** | **3.862** | **1.27x** |
+| group, dec8 | — | — | 0.620 | 3.856 | 1.27x |
+| group, dec16 | — | — | 0.568 | 3.864 | 1.27x |
+| row, dec1 | 1.106 | 0.931 | 1.844 | 6.061 | 1.99x |
+
+At 1536x1536/B=64: group dec1 1.233 vs dense 0.580 = 2.12x (decimation is *counter*
+productive there: the update is already only 0.345 ms and the mask path costs more).
+
+Two things stand out:
+- **The updater already beats AdamW** at 4096^2 (0.721 vs 1.211) — dec4 is not the
+  bottleneck any more. The gap is now elsewhere: fwd/grad_x are exactly 1.00x, so the
+  remaining +0.8 ms is the **per-step decode** (~0.56 ms, because the update invalidates
+  the cache) plus ~0.25 ms of autograd/Function overhead.
+- Decimation saturates: dec4/8/16 all land at 1.27x, so the update has a fixed ~0.57 ms
+  floor at this shape.
+
+Next lever, aimed at that: make the updater **emit the dense weight itself** (it already
+computes each element's new code and scale) so the per-step decode disappears. Expected
+~3.1 ms ≈ 1.0-1.05x at 4096^2/B=512. The alternative — a faster decode — cannot go below
+its ~0.5 ms read/write floor at this size.
