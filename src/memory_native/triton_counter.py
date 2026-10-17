@@ -7,7 +7,7 @@ the per-row scale, reconstructs each weight tile in registers, and accumulates y
 without ever materializing the dense weight. That removes the transient dense weight from the
 forward and reads 0.75 byte/weight from HBM instead of 4.
 
-Scope / status (verified on a Tesla T4 -- see results/SUMMARY.md, results/KERNEL.md):
+Scope / status (verified on a Tesla T4 -- see research/results/SUMMARY.md, research/results/KERNEL.md):
   * Two kernels run in-GEMM with no dense weight: the FORWARD (y = x W^T) and the backward
     grad_x (grad_x = grad_out W), both decoding packed state in registers. T4-VERIFIED for
     correctness (forward err <= 3e-6, grad_x err <= 1e-5 vs the dense decode). HOWEVER they are

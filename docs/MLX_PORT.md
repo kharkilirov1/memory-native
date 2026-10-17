@@ -1,6 +1,6 @@
 # memory-native on MLX / Metal — the macOS port
 
-The MLX port lives in [`src/memory_native_mlx/`](../src/memory_native_mlx/).
+The MLX port lives in [`src/memory_native_mlx/`](../src/memory_native_mlx).
 Code encoding/packing and covered state round-trips match PyTorch bit-for-bit on the
 Linux `mlx[cpu]` backend. Numerical update parity is tested with tolerances for FP
 reduction order and stochastic-rounding boundary flips; it is not a promise of
@@ -65,7 +65,7 @@ inference path), no `mx.compile` over the update path (the SR seed advances in P
 - **On an Apple-silicon Mac (next gate — needs real hardware):** run the same
   `pytest tests/test_mlx_port.py`; `test_metal_fused_update_matches_reference` stops
   skipping and gates the fused Metal kernel against the pure-MLX reference. Then
-  `python scripts/mlx_demo.py` for the end-to-end smoke (on Linux CPU it reaches
+  `python examples/mlx.py` for the end-to-end smoke (on Linux CPU it reaches
   loss 188→1.5 in ~50 s at 0.75 B/weight state).
 
 ## What is NOT ported yet (deliberate v1 cuts)
@@ -153,9 +153,9 @@ identical numerical learning trajectories across hardware or unsupported update 
 
 1. `pip install -e . mlx pytest && python -m pytest tests/test_mlx_port.py -v` — the Metal
    kernel parity test engages; everything else must stay green on the Metal backend.
-2. `python scripts/mlx_demo.py` — end-to-end smoke on the GPU.
+2. `python examples/mlx.py` — end-to-end smoke on the GPU.
 3. Microbench fused-Metal update vs pure-MLX fallback across layer widths (mirror
-   `results/KERNEL.md` methodology).
-4. `mx.get_peak_memory()` sweep over reversible depth (mirror `results/POOLS.md`).
+   `research/results/KERNEL.md` methodology).
+4. `mx.get_peak_memory()` sweep over reversible depth (mirror `research/results/POOLS.md`).
 5. Build and validate a full-model/group-scale checkpoint bridge, then run recovery on
    a named donor/Mac configuration with strict quality, throughput and peak-memory logs.

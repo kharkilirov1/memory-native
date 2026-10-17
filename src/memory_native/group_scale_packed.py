@@ -6,6 +6,7 @@ import torch.distributed as dist
 import torch.nn as nn
 
 from .counter import decode_state, encode_state
+from .rounding import RoundingStreamMixin
 from .group_scale_kernels import (
     HAS_TRITON,
     group_counter_update_from_io_hashsr,
@@ -59,7 +60,7 @@ class _PackedGroupScaleFn(torch.autograd.Function):
         return grad_x2.reshape(ctx.x_shape), None, None
 
 
-class PackedGroupScaleCounterLinear(nn.Module):
+class PackedGroupScaleCounterLinear(RoundingStreamMixin, nn.Module):
     """6-bit act-ordered group counter with group-aware forward/grad-x/strict update kernels.
 
     State is packed in act-order, not original input order. That aligns each scale group with a
@@ -104,6 +105,7 @@ class PackedGroupScaleCounterLinear(nn.Module):
         state: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
+        self._init_rounding_stream()
         del init_gain  # PTQ imports the state; kept for factory compatibility.
         if in_features % 4:
             raise ValueError("in_features must be divisible by 4 for 6-bit packing")
@@ -120,7 +122,7 @@ class PackedGroupScaleCounterLinear(nn.Module):
         if decimation > 1:
             # Only well-defined under group-local statistics (nothing crosses a group
             # boundary); round-robin g % S == step % S. Compensate lr by ~S at the caller
-            # (measured recipe: dec4 + lr*4, results/DECIMATION_WITNESS.md).
+            # (measured recipe: dec4 + lr*4, research/results/DECIMATION_WITNESS.md).
             if stats_scope != "group":
                 raise ValueError("decimation requires stats_scope='group'")
             if in_features % group:
@@ -417,7 +419,7 @@ class PackedGroupScaleCounterLinear(nn.Module):
             not want_triton and HAS_TRITON and x2.is_cuda
             and _is_power_of_two(self.group)
         )
-        seed = self._sr_step
+        seed = self._next_rounding_seed(self._sr_step)
         if want_triton and not self._has_salient():
             # No [out,in] grad_w and no dense W are created on this path.
             triton_group_counter_update_from_io(
@@ -463,7 +465,7 @@ class PackedGroupScaleCounterLinear(nn.Module):
         """Group-local statistics path: one-launch fused tensor-core kernel on CUDA (grad_w
         stays in registers -- no [out,in] temporary, no fp32 input casts, no scratch), the
         bit-exact torch reference elsewhere. Salient codes stay frozen on both."""
-        seed = self._sr_step
+        seed = self._next_rounding_seed(self._sr_step)
         use_fused = (
             HAS_TRITON and x2.is_cuda and _is_power_of_two(self.group) and self.group >= 16
         )
@@ -557,6 +559,7 @@ class PackedGroupScaleCounterLinear(nn.Module):
         self.update_events.zero_()
         self._sr_step = 0
         self.sr_step.zero_()
+        self._rounding_step = 0
         self.observe_flip_sample(reset=True)
 
     @torch.no_grad()

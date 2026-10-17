@@ -16,7 +16,7 @@ tests pin the three CPU-checkable claims the Triton kernel relies on:
 
 The Triton fused kernel (`triton_group_counter_update_fused`) mirrors
 `group_counter_update_grouplocal_hashsr` and is gated on GPU at quanta-level, like the
-dense kernels; those runs live in scripts/benchmark_group_kernels.py, not here.
+dense kernels; those runs live in research/experiments/benchmark_group_kernels.py, not here.
 """
 import pytest
 import torch

@@ -41,7 +41,7 @@ def campaign(tmp_path, monkeypatch):
     yaml = pytest.importorskip("yaml")
     project, donor, data, cache = (tmp_path / name for name in ("project", "donor", "data", "cache"))
     for path in (project / "scripts", project / "tests", project / "src" / "mn_strict_kd",
-                 project / "production", donor, data, cache):
+                 project / "research" / "campaigns", donor, data, cache):
         path.mkdir(parents=True, exist_ok=True)
     (project / "src" / "mn_strict_kd" / "__init__.py").write_text("")
     (project / "scripts" / "kd_cached_strict_v3.py").write_text("# SCALE_LR_END STATS_SCOPE DECIMATION\n")
@@ -72,7 +72,7 @@ def campaign(tmp_path, monkeypatch):
               "eval": {"full_every": 5, "full_max_tokens": 24},
               "early_stop": {"patience": 3, "min_improvement": 0.001},
               "teacher_cache": {"K": 8, "expected_steps": 7, "tail_bucket": True, "logsumexp_saved": True}}
-    policy_path = project / "production" / "qwen38_27b_recovery_3k.yaml"
+    policy_path = project / "research" / "campaigns" / "qwen38_27b_recovery_3k.yaml"
     policy_path.write_text(yaml.safe_dump(policy))
     env = {name: str(preflight._get(policy, keys)) for name, keys, _ in preflight.ENV_FIELDS}
     env.update({"GRAD_CKPT": "0", "SAVE_BEST": "1", "FP_LR": "0", "NUM_BLOCKS": "0",

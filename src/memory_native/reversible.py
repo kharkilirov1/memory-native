@@ -1,9 +1,9 @@
 """Reversible coupling block — the memory lever for activations.
 
-A reversible block computes its output without storing the input activations: the backward
-pass reconstructs the input from the output via the exact inverse, then recomputes the local
-forward to get gradients. Forward therefore stores only the block's output, not its inputs,
-so a deep stack's activation memory stays O(1) in depth instead of O(depth).
+A reversible block computes its output without storing the input activations. Backward
+reuses one evaluation each of G and F for both reconstruction and local vector-Jacobian
+products. ReversibleSequence stores only the final output of the whole chain, so saved
+activation memory is O(1) in depth. ReversibleSequential saves one output per block.
 
     forward:  y1 = x1 + F(x2);   y2 = x2 + G(y1)
     inverse:  x2 = y2 - G(y1);   x1 = y1 - F(x2)
@@ -11,12 +11,10 @@ so a deep stack's activation memory stays O(1) in depth instead of O(depth).
 F and G must be deterministic (no dropout/RNG inside, no in-place state side effects). This
 is pure PyTorch and runs on CPU/CUDA.
 
-Note on float reconstruction: the inverse need not be bit-exact in principle. Empirically, for
-these coupling maps the recomputed INPUT GRADIENTS match a stored-activation reference to ~0 across
-a weight-scale sweep up to forward magnitudes ~1e9 (test_inverse_and_anchored_exact_across_weight
-_scales) -- the reconstruction is exact in fp32 here, so the inverse path is training-neutral on the
-regimes tested. Anchors (anchor_every=K) recompute-from-anchor instead of inverting; use them for
-the activation-MEMORY tradeoff (and as a safety margin for unusually deep/ill-conditioned stacks).
+Float subtraction is not a bit-exact inverse: errors can grow with depth and conditioning.
+Gradient agreement on the tested linear/nonlinear maps is a bounded regression witness, not
+a guarantee for arbitrary networks. Anchors (anchor_every=K) avoid inverse reconstruction
+at the cost of extra saved activations. This implementation supports first-order backward.
 """
 from __future__ import annotations
 
@@ -24,8 +22,51 @@ from typing import Sequence
 
 import torch
 import torch.nn as nn
+from torch.autograd.function import once_differentiable
 
 __all__ = ["ReversibleCouplingBlock", "ReversibleSequential", "ReversibleSequence"]
+
+
+def _trainable_params(module: nn.Module) -> tuple[torch.Tensor, ...]:
+    return tuple(p for p in module.parameters() if p.requires_grad)
+
+
+def _branch_vjp(output, input_leaf, params, upstream):
+    # A deterministic branch may be constant or independent of its input. Its input
+    # Jacobian is zero, while the coupling's identity path still carries the gradient.
+    grads = (torch.autograd.grad(output, (input_leaf,) + params, upstream, allow_unused=True)
+             if output.requires_grad else (None,) * (1 + len(params)))
+    input_grad = grads[0] if grads[0] is not None else torch.zeros_like(input_leaf)
+    return input_grad, grads[1:]
+
+
+def _inverse_backward(F, G, y, grad_y, f_params, g_params):
+    """Invert and differentiate a coupling, evaluating each branch only once.
+
+    Detach reconstruction arithmetic: differentiate G at the saved y1 and F at the
+    reconstructed x2, rather than differentiating the inverse itself. Reconstruct before
+    each local VJP, since counter layers mutate their own state during that VJP.
+    """
+    y1, y2 = y.chunk(2, dim=-1)
+    dy1, dy2 = grad_y.chunk(2, dim=-1)
+    y1_leaf = y1.detach().requires_grad_(True)
+    with torch.enable_grad():
+        g = G(y1_leaf)
+    with torch.no_grad():
+        x2 = y2 - g
+    g_input_grad, g_param_grads = _branch_vjp(g, y1_leaf, g_params, dy2)
+    dx1 = dy1 + g_input_grad
+    del g
+
+    x2_leaf = x2.detach().requires_grad_(True)
+    with torch.enable_grad():
+        f = F(x2_leaf)
+    with torch.no_grad():
+        x1 = y1 - f
+    f_input_grad, f_param_grads = _branch_vjp(f, x2_leaf, f_params, dx1)
+    dx2 = dy2 + f_input_grad
+    return (torch.cat([x1, x2], dim=-1), torch.cat([dx1, dx2], dim=-1),
+            f_param_grads + g_param_grads)
 
 
 class _ReversibleFn(torch.autograd.Function):
@@ -47,29 +88,14 @@ class _ReversibleFn(torch.autograd.Function):
         return y
 
     @staticmethod
+    @once_differentiable
     def backward(ctx, grad_y):
         saved = ctx.saved_tensors
         y, params = saved[0], saved[1:]
-        d = y.shape[-1] // 2
-        y1, y2 = y[..., :d], y[..., d:]
-
-        # 1) reconstruct the input from the output (the reversible trick: no stored input).
-        with torch.no_grad():
-            x2 = y2 - ctx.G(y1)
-            x1 = y1 - ctx.F(x2)
-
-        # 2) recompute the local forward with grad enabled, from the reconstructed input.
-        x1 = x1.detach().requires_grad_(True)
-        x2 = x2.detach().requires_grad_(True)
-        with torch.enable_grad():
-            z1 = x1 + ctx.F(x2)
-            z2 = x2 + ctx.G(z1)
-            z = torch.cat([z1, z2], dim=-1)
-
-        grads = torch.autograd.grad(z, (x1, x2) + tuple(params), grad_y)
-        grad_x = torch.cat([grads[0], grads[1]], dim=-1)
+        _, grad_x, param_grads = _inverse_backward(
+            ctx.F, ctx.G, y, grad_y, params[:ctx.n_f], params[ctx.n_f:])
         # match apply's signature: x, F(None), G(None), tap(None), n_f(None), then param grads.
-        return (grad_x, None, None, None, None) + tuple(grads[2:])
+        return (grad_x, None, None, None, None) + param_grads
 
 
 class ReversibleCouplingBlock(nn.Module):
@@ -89,8 +115,8 @@ class ReversibleCouplingBlock(nn.Module):
         self.G = G if G is not None else nn.Linear(d, d, bias=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        f_params = tuple(self.F.parameters())
-        g_params = tuple(self.G.parameters())
+        f_params = _trainable_params(self.F)
+        g_params = _trainable_params(self.G)
         # tap forces the output to require grad so backward runs even when neither the input
         # nor F/G need a gradient (e.g. F/G are self-updating counter layers with no params).
         tap = (torch.zeros((), device=x.device, dtype=x.dtype, requires_grad=True)
@@ -122,22 +148,8 @@ def _couple_fwd(block: "ReversibleCouplingBlock", x: torch.Tensor) -> torch.Tens
 
 
 def _couple_bwd(block: "ReversibleCouplingBlock", y: torch.Tensor, grad_y: torch.Tensor):
-    d = y.shape[-1] // 2
-    y1, y2 = y[..., :d], y[..., d:]
-    with torch.no_grad():                       # reconstruct this block's input from its output
-        x2 = y2 - block.G(y1)
-        x1 = y1 - block.F(x2)
-    x1 = x1.detach().requires_grad_(True)
-    x2 = x2.detach().requires_grad_(True)
-    with torch.enable_grad():                   # recompute to get grads (fires inner counters)
-        z1 = x1 + block.F(x2)
-        z2 = x2 + block.G(z1)
-        z = torch.cat([z1, z2], dim=-1)
-    params = tuple(block.F.parameters()) + tuple(block.G.parameters())
-    grads = torch.autograd.grad(z, (x1, x2) + params, grad_y)
-    grad_x = torch.cat([grads[0], grads[1]], dim=-1)
-    x = torch.cat([x1.detach(), x2.detach()], dim=-1)
-    return x, grad_x, grads[2:]
+    return _inverse_backward(block.F, block.G, y, grad_y,
+                             _trainable_params(block.F), _trainable_params(block.G))
 
 
 class _ReversibleSequenceFn(torch.autograd.Function):
@@ -152,6 +164,7 @@ class _ReversibleSequenceFn(torch.autograd.Function):
         return x
 
     @staticmethod
+    @once_differentiable
     def backward(ctx, grad_out):
         y = ctx.saved_tensors[0]
         n_params = len(ctx.saved_tensors) - 1
@@ -173,8 +186,8 @@ class _ReversibleSequenceFn(torch.autograd.Function):
 class _AnchoredReversibleSequenceFn(torch.autograd.Function):
     # Speed/memory knob (acceleration memo M7): store the activation at every A-th block (an
     # "anchor") and, in backward, recompute each chunk forward FROM its anchor with grad
-    # (checkpoint-style) instead of reconstructing via the inverse. That drops the inverse pass
-    # (~1 forward/block faster) and is exact (no float-inverse error), at O(L/A + A) activation
+    # (checkpoint-style) instead of reconstructing via the inverse. This avoids float-inverse
+    # error at O(L/A + A) activation
     # memory. A=L is one whole-chain checkpoint; A=1 stores every block. Counter contract is the
     # same as the reversible path: a no-grad forward walk, then an enable_grad recompute that
     # fires each inner counter exactly once.
@@ -193,6 +206,7 @@ class _AnchoredReversibleSequenceFn(torch.autograd.Function):
         return xi
 
     @staticmethod
+    @once_differentiable
     def backward(ctx, grad_out):
         saved = ctx.saved_tensors
         anchors, all_params = saved[:ctx.n_anchors], saved[ctx.n_anchors:]
@@ -212,8 +226,8 @@ class _AnchoredReversibleSequenceFn(torch.autograd.Function):
                     h = _couple_fwd(blocks[i], h)
             chunk_params = []
             for i in range(start, end):
-                chunk_params.extend(tuple(blocks[i].F.parameters()))
-                chunk_params.extend(tuple(blocks[i].G.parameters()))
+                chunk_params.extend(_trainable_params(blocks[i].F))
+                chunk_params.extend(_trainable_params(blocks[i].G))
             grads = torch.autograd.grad(h, (xin,) + tuple(chunk_params), grad_y)
             grad_y = grads[0]
             k = 1
@@ -228,13 +242,14 @@ class _AnchoredReversibleSequenceFn(torch.autograd.Function):
 class ReversibleSequence(nn.Module):
     """A reversible stack with **O(1)-in-depth** activation memory (default): the whole chain is a
     single autograd Function that stores ONLY the final output. Backward walks the chain in
-    reverse, reconstructing each block's input from its output and recomputing locally (classic
-    RevNet). Inner self-updating counter layers fire once per block during that walk.
+    reverse, evaluating G and F once each to reconstruct inputs and obtain local gradients.
+    Inner self-updating counter layers fire once per block during that walk.
 
     `anchor_every=A > 0` switches to anchored mode (acceleration memo M7): store the activation
     every A blocks and recompute each chunk forward from its anchor instead of inverting. This is
-    the speed/memory knob — O(1) reversible is the minimum-memory extreme, not the fastest point;
-    anchors spend O(L/A + A) memory to skip the inverse pass (and avoid float-inverse error).
+    a reconstruction/memory trade-off: anchors spend O(L/A + A) activation memory to avoid
+    float-inverse error. Both modes now evaluate each branch once during backward; their
+    relative throughput depends on the workload and must be measured.
 
     Note: the float inverse (anchor_every=0) accumulates a little reconstruction error with depth
     (~3e-3 over ~12 blocks); training-neutral at modest depth, but very deep stacks may want
@@ -248,8 +263,8 @@ class ReversibleSequence(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         all_params, meta = [], []
         for b in self.blocks:
-            fp = tuple(b.F.parameters())
-            gp = tuple(b.G.parameters())
+            fp = _trainable_params(b.F)
+            gp = _trainable_params(b.G)
             meta.append((len(fp), len(gp)))
             all_params.extend(fp)
             all_params.extend(gp)

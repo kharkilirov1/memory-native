@@ -1,4 +1,4 @@
-"""Unit gate for salient_refit='align' (the L1 lever, results/SALIENT_REFIT_WITNESS.md).
+"""Unit gate for salient_refit='align' (the L1 lever, research/results/SALIENT_REFIT_WITNESS.md).
 
 The refit touches ONLY the salient channel: ternary codes, scales, perm and the residual
 counter are bit-identical to the salient_refit='none' solve; the H-error never increases

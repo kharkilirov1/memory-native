@@ -24,6 +24,7 @@ from .counter import (
 from .convert import CounterLinearWithBias, SwapReport, swap_linears_to_counter
 from .reversible import ReversibleCouplingBlock, ReversibleSequence, ReversibleSequential
 from .packed import PackedRMSCounterLinear, pack_codes, unpack_codes
+from .rounding import configure_rounding_streams
 from .slowfast import SlowFastCounterLinear
 from .triton_counter import HAS_TRITON, TritonCounterLinear, triton_decode_matmul, triton_grad_x
 from .baselines import TernaryQATLinear, make_linear
@@ -75,6 +76,7 @@ __all__ = [
     "RMSCounterLinear",
     "SlowFastCounterLinear",
     "PackedRMSCounterLinear",
+    "configure_rounding_streams",
     "pack_codes",
     "unpack_codes",
     "TritonCounterLinear",
