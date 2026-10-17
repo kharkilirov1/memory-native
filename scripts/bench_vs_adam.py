@@ -46,6 +46,9 @@ def _dense(in_features: int, out_features: int, batch: int, dev: str, run_time: 
         (x @ w.t()).backward(go)
         opt.step()
 
+    # AdamW is a no-op on a parameter with grad=None, so the state-update phase must be
+    # measured WITH a gradient loaded or it reports launch overhead only (~0.03 ms).
+    w.grad = torch.randn_like(w)
     out = {
         "fwd": bench(lambda: x @ w.t(), run_time),
         "grad_x": bench(lambda: go @ w, run_time),
@@ -53,6 +56,7 @@ def _dense(in_features: int, out_features: int, batch: int, dev: str, run_time: 
         "state update": bench(lambda: opt.step(), run_time),
         "full step": bench(step, run_time),
     }
+    del w.grad
     out["_bytes"] = w.numel() * 4
     return out
 
