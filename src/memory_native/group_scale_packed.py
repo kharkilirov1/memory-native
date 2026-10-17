@@ -116,6 +116,7 @@ class PackedGroupScaleCounterLinear(RoundingStreamMixin, nn.Module):
         init_gain: float = 1.0,
         flip_sample_size: int = 4096,
         state: torch.Tensor | None = None,
+        weight_cache_bytes: int = 0,
     ) -> None:
         super().__init__()
         self._init_rounding_stream()
@@ -160,6 +161,8 @@ class PackedGroupScaleCounterLinear(RoundingStreamMixin, nn.Module):
         self.update_enabled = True
         self._outstanding_forward = False
         self._sr_step = 0
+        self._weight_cache = None
+        self._weight_cache_bytes = int(weight_cache_bytes)
 
         # Zero state packs to a CONSTANT 3-byte pattern (encode_state is
         # elementwise, so a zero [out, in] yields one repeated code; packing 4
@@ -354,6 +357,36 @@ class PackedGroupScaleCounterLinear(RoundingStreamMixin, nn.Module):
                                       self.salient_val.float())
         return w if dtype is None else w.to(dtype)
 
+    def _cached_visible_weight(self, dtype: torch.dtype | None = None) -> torch.Tensor:
+        """`visible_weight()` cached across one step's fwd/grad_x.
+
+        The counter state only changes in an update, so decoding it twice per step is pure
+        waste: at 4096^2 the decode is ~1.8 ms and it is paid once in forward and once in
+        grad_x. The key is `_sr_step` (bumped by every updater) plus the tensors' version
+        counters, which catches in-place state edits as well.
+
+        Off by default (`weight_cache_bytes=0`) because a cache slot per layer reserves
+        `out*in*4` bytes each: caching every layer of a 12B model would hold the whole
+        model in fp32. Enable it per layer (or via the factories) for small models or for
+        wide-layer benchmarks; `weight_cache_bytes` caps the size of a cached layer.
+        """
+        if self._weight_cache_bytes <= 0:
+            return self.visible_weight(dtype=dtype)
+        itemsize = 4 if dtype is None else max(1, torch.finfo(dtype).bits // 8)
+        if self.out_features * self.in_features * itemsize > self._weight_cache_bytes:
+            return self.visible_weight(dtype=dtype)
+        key = (
+            self._sr_step, dtype,
+            self.state._version, self.scale._version,
+            self.salient_idx._version, self.salient_val._version,
+        )
+        cache = self._weight_cache
+        if cache is not None and cache[0] == key:
+            return cache[1]
+        w = self.visible_weight(dtype=dtype)
+        self._weight_cache = (key, w)
+        return w
+
     def _salient_sparse(self) -> torch.Tensor | None:
         """Salient overrides as a coalesced COO [out, in] fp32 (cached per device)."""
         if not self._has_salient():
@@ -407,7 +440,7 @@ class PackedGroupScaleCounterLinear(RoundingStreamMixin, nn.Module):
                 # sparse.mm requires matching dtypes — A is fp32, activations bf16/fp16.
                 y2 = y2 + torch.sparse.mm(A, x2.t().float()).t().to(y2.dtype)
             return y2
-        return x2 @ self.visible_weight(dtype=x2.dtype).t()
+        return x2 @ self._cached_visible_weight(dtype=x2.dtype).t()
 
     def _grad_x_2d(self, go2: torch.Tensor) -> torch.Tensor:
         if self._use_triton(go2):
@@ -420,7 +453,7 @@ class PackedGroupScaleCounterLinear(RoundingStreamMixin, nn.Module):
             if A is not None:
                 gx2 = gx2 + torch.sparse.mm(A.t(), go2.t().float()).t().to(gx2.dtype)
             return gx2
-        return go2 @ self.visible_weight(dtype=go2.dtype)
+        return go2 @ self._cached_visible_weight(dtype=go2.dtype)
 
     @torch.no_grad()
     def _update_from_io(self, x2: torch.Tensor, go2: torch.Tensor) -> None:
