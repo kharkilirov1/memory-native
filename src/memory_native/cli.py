@@ -8,8 +8,10 @@ Both run on stock PyTorch (CPU/CUDA), no engine, and fall back to a synthetic co
 from __future__ import annotations
 
 import argparse
+import random
 import time
 
+import numpy as np
 import torch
 
 from .data import get_batch, load_corpus
@@ -23,6 +25,20 @@ def _device(name: str) -> torch.device:
         print("cuda requested but not available; using cpu")
         return torch.device("cpu")
     return torch.device(name)
+
+
+def _seed_everything(seed: int) -> None:
+    """Seed every RNG a gate run touches, so ``--seed`` reproduces the run.
+
+    ``--seed`` used to seed only the batch sampler. Model initialisation and the
+    counter layers' stochastic rounding draw from the global torch RNG, so two
+    identical invocations produced different numbers (observed: dense val
+    2.9905 vs 3.0529 on the documented 60-step micro gate). numpy and random are
+    seeded too for any donor-side code path that uses them.
+    """
+    random.seed(seed)
+    np.random.seed(seed % (2 ** 32))
+    torch.manual_seed(seed)
 
 
 def _train_one(kind: str, args, vocab, train_data, val_data, device) -> dict:
@@ -99,6 +115,7 @@ def charlm_main(argv=None) -> None:
                     help="optimizer for the trainable (non-counter) params: "
                          "adamw | bnb8 | galore | lomo")
     args = ap.parse_args(argv)
+    _seed_everything(args.seed)
 
     device = _device(args.device)
     train_data, val_data, vocab = load_corpus(device, args.data_path, download=not args.no_download)
@@ -134,7 +151,9 @@ def memgate_main(argv=None) -> None:
     ap.add_argument("--optimizers", default="adamw,galore,lomo",
                     help="comma list of dense baselines to compare against: "
                          f"{','.join(available_optimizers())}")
+    ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args(argv)
+    _seed_everything(args.seed)
     device = _device(args.device)
     cfg = CONFIGS[args.config]
 
