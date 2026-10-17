@@ -291,3 +291,30 @@ that would relax the one-forward-per-backward contract), not more per-line tunin
 
 Objective status: **met for the 12B-class shapes (0.85-0.91x, faster than AdamW)**, not yet
 for small layers (1.19-1.25x). Semantics/quality clause verified and unchanged.
+
+
+## Round 9: correctness bug found by a regression test on the fast path
+
+Added a test that the updater-emitted dense buffer equals a fresh decode of the updated
+state, and it FAILED for decimation > 1: the emitted cache was allocated with
+`torch.empty()` and a decimated step writes only its active groups, so the inactive
+groups held uninitialized memory (max diff 0.01 = one scale unit, exactly the group that
+was inactive on step 0). Two bugs, both fixed:
+
+- the dense cache is now seeded with a FULL decode (one extra decode on the first update
+  only) so untouched groups always hold the correct value;
+- `perm` joined the cache identity tuple, and `set_permutation` / `load_group_state` clear
+  the weight, dense and decimation caches.
+
+After the fix: emission == decode exactly (max diff 0.0) at dec 1/2/4, and the pinned test
+covers it. Re-measured with the fixed path (A100, realistic `nn.Linear + AdamW` baseline):
+
+| shape | batch | dec | dense | counter | ratio |
+|---|---:|---:|---:|---:|---:|
+| 4096x4096 | 512 | 8 | 3.045 ms | **2.597 ms** | **0.85x** |
+| 4096x4096 | 1024 | 8 | 4.817 | **4.372** | **0.91x** |
+| 1024x1024 | 512 | 1 | 0.703 | 0.759 | 1.08x |
+| 2048x2048 | 256 | 1 | 0.599 | 0.720 | 1.20x |
+| 1536x1536 | 64 | 1 | 0.600 | 0.747 | 1.24x |
+
+Tests: 24 (CUDA bit-exactness + packed + the new emission test) pass.
