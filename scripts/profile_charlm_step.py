@@ -145,11 +145,12 @@ def main(argv=None) -> int:
         return 0
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    cfg = CONFIGS[args.config]
+    cfg0 = CONFIGS[args.config]
 
     torch.manual_seed(args.seed)
     train_data, val_data, vocab = load_corpus(device, None, download=True)
-    cfg.vocab_size = vocab
+    # GPTConfig is a frozen dataclass: rebuild it with the corpus vocab like cli.py does.
+    cfg = type(cfg0)(vocab, cfg0.block_size, cfg0.n_layer, cfg0.n_head, cfg0.n_embd)
     print(f"corpus vocab={vocab} config={args.config} device={device}")
     g = torch.Generator().manual_seed(args.seed)
     x, y = get_batch(train_data, cfg.block_size, args.batch, device, g)
