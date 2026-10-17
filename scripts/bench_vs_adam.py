@@ -8,8 +8,10 @@ term:
     dense   : fwd | grad_x | grad_w | AdamW step      + full step
     counter : fwd | grad_x | update (correlation+automaton) + full step
 
-Both full steps include their state update (dense `opt.step()`, counter
-`_update_from_io`), which the older CPU witness did not do for the counter side.
+Both full steps include their state update: dense `opt.step()` after backward, and the
+counter updater, which runs inside the autograd Function's backward. (An earlier version
+of this script called `_update_from_io` explicitly as well, so it counted the counter
+update TWICE.)
 
     python scripts/bench_vs_adam.py --shape 1536 --batch 64 --mode all
     python scripts/bench_vs_adam.py --shape 4096 --batch 512 --mode gemm
@@ -74,9 +76,10 @@ def _counter(in_features: int, out_features: int, batch: int, dev: str,
     go = torch.randn(batch, out_features, device=dev)
 
     def full():
+        # The counter updater runs INSIDE the autograd Function's backward (same as the
+        # dense optimizer runs after backward), so the fair step is fwd + backward here.
         y = layer(x)
         y.backward(go)
-        layer._update_from_io(x, go)
 
     out = {
         "fwd": bench(lambda: layer._forward_2d(x), run_time),
