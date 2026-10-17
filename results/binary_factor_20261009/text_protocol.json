@@ -1,0 +1,24 @@
+{
+  "created_utc": "2026-10-08T21:30:57.744729+00:00",
+  "arms": [
+    {"mode": "native", "method": "svd", "lr": 0.001},
+    {"mode": "native", "method": "guarded", "lr": 0.001},
+    {"mode": "qat_adam", "method": "svd", "lr": 0.001},
+    {"mode": "qat_adam", "method": "guarded", "lr": 0.001},
+    {"mode": "frozen", "method": "svd", "lr": 0.0},
+    {"mode": "frozen", "method": "guarded", "lr": 0.0},
+    {"mode": "dense", "method": "svd", "lr": 0.0003}
+  ],
+  "tuning_seeds": [91],
+  "confirmation_seeds": [40, 41, 42],
+  "rank": 16,
+  "replaced": "four FFN matrices only",
+  "steps": 600,
+  "selection": "same factor LR per optimizer across BOTH initializations; scale LR .003 and shell LR .0003 shared",
+  "objective": "KL teacher||student + 0.3 CE at T=1; final heldout CE, no test selection",
+  "scope": "CPU byte GPT pilot; not full LittleBit-2 SmoothSign or Llama QAT reproduction",
+  "source_sha256": {
+    "src/memory_native/research/binary_factor.py": "a9b6a974739e311785b81dd54cc4190c9eced57767837175325ba0fe5daa8491",
+    "scripts/binary_factor_text.py": "ab4db6a8c29393f1d2b1c9cdfc9328f111da6491397a641eefefa62444b1b4ca"
+  }
+}

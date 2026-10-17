@@ -1,0 +1,17 @@
+family,mode,method,final_test_relative_mse,n
+spectral,native,svd,0.4603174328804016,12
+spectral,native,guarded,0.3945819487174352,12
+spectral,qat_adam,svd,0.37348971764246625,12
+spectral,qat_adam,guarded,0.38572562485933304,12
+spectral,qat_rms,svd,0.4264252384503682,12
+spectral,qat_rms,guarded,0.4126606807112694,12
+spectral,frozen,svd,0.4569629579782486,12
+spectral,frozen,guarded,0.37099990248680115,12
+binary,native,svd,0.17189320425192514,12
+binary,native,guarded,0.06430432774750355,12
+binary,qat_adam,svd,0.003298063125618612,12
+binary,qat_adam,guarded,0.012705052166268544,12
+binary,qat_rms,svd,0.011963204105559183,12
+binary,qat_rms,guarded,0.018750813261473407,12
+binary,frozen,svd,0.3614538411299388,12
+binary,frozen,guarded,0.05967075175918599,12
