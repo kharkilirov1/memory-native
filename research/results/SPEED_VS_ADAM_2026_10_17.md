@@ -145,3 +145,31 @@ Semantics: `tests/test_group_scale_kernels_cuda.py` 5 passed (bit-exact vs the t
 oracle), `tests/test_group_scale_packed.py` 18 passed, full CPU suite 639 passed / 24
 skipped. The dense emission only writes a derived buffer; the state math (SR, carry, group
 scales) is untouched.
+
+
+## Round 4: re-measured after the seed experiment; the per-shape picture
+
+Tried to remove the last host-side cost by passing the SR seed as a scalar kernel argument
+(no per-step H2D tensor). Triton renders a python int as a constant, not a tensor, so
+`seed.to(tl.uint32)` stops compiling and the tick's RNG stream would change; reverted. The
+decimation column-index helper (`_decim_index`) stayed. Semantics re-verified: 5 CUDA
+bit-exactness tests + 18 packed tests pass.
+
+Confirmed table (A100, cache on, fused decode, group scope):
+
+| shape | batch | dec | dense full | counter full | ratio |
+|---|---:|---:|---:|---:|---:|
+| 4096x4096 | 512 | 8 | 3.047 ms | **2.742 ms** | **0.90x** |
+| 4096x4096 | 512 | 1 | 3.047 | 3.430 | 1.13x |
+| 4096x4096 | 1024 | 8 | 4.823 | 4.516 | **0.94x** |
+| 2048x2048 | 256 | 4 | 0.590 | 1.065 | 1.81x |
+| 1024x1024 | 512 | 4 | 0.591 | 1.035 | 1.75x |
+| 1536x1536 | 64 | 1 | 0.596 | 0.768 | 1.29x |
+
+Reading: for the layer shapes and batches a 12B-class model uses, one counter step is now
+**faster than the dense AdamW step it replaces (0.90-0.94x)**. Smaller layers stay above
+1.0 because the updater carries a ~0.6 ms floor (0.597 at 1024^2, 0.621 at 2048^2, 0.710 at
+4096^2/dec8) while AdamW is 0.27-0.41 ms there: the floor is flat in N*K, so it is per-call
+overhead in the update path (host work, launch, the decimation index build), not the
+kernel's arithmetic. That is the next target; until it is fixed the objective is met for
+large shapes only.
