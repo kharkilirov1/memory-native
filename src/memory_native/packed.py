@@ -113,13 +113,14 @@ class PackedRMSCounterLinear(RMSCounterLinear):
         """
         from .fused_update import HAS_TRITON, triton_counter_update
         if not (HAS_TRITON and grad_w.is_cuda and self.use_rms
+                and not self.rms_bias_correction
                 and self.pulse_mode == "direct"
                 and self.rms_mode == "exact" and self.scale_rebase == "eager"
                 and not self.decimate_updates):  # kernel doesn't report flip-rate; torch path does
             return False
         if grad_w.shape != (hi - lo, self.in_features):
             return False
-        seed = self._sr_step
+        seed = self._next_rounding_seed(self._sr_step)
         self._sr_step += 1
         # local_grad_clip rides into the kernel (folded into the RMS denominator), so the
         # stable recovery recipe (clip=1.0) gets the fused path too -- the clip==0 gate is gone.

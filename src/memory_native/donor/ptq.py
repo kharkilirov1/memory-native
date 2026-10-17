@@ -574,7 +574,7 @@ def _refit_salient_values(w: torch.Tensor, Q: torch.Tensor, H: torch.Tensor,
 
     After the sweep the k% salient coordinates are the format's only continuous freedom;
     storing copies of w there is suboptimal — the H-optimal values absorb the ternary
-    part's residual: e_S = -H_SS^{-1} H_SB e_B per row (results/SALIENT_REFIT_WITNESS.md:
+    part's residual: e_S = -H_SS^{-1} H_SB e_B per row (research/results/SALIENT_REFIT_WITNESS.md:
     held-out −7.0% q_proj / −1.6..−2.5% MLP at 65k-token calib, never lost). Per-row SPD
     solves via Cholesky (batched-LU is the documented MKL hazard), lstsq fallback.
     Returns the updated (Q, salient_val)."""

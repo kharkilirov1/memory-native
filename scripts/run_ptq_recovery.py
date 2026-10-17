@@ -53,7 +53,7 @@ COUNTER_KIND = os.environ.get("COUNTER_KIND", "counter_packed")
 GROUP_KERNEL_MODE = os.environ.get("GROUP_KERNEL_MODE", "auto")
 STRICT_UPDATE = env_bool("STRICT_UPDATE", True)
 # STATS_SCOPE=group puts the RMS denom/clip on the 128-group (the fused-kernel format;
-# results/GROUPLOCAL_KD_FULLMODEL_GATE.md). NOTE its lr optimum sits at HALF the row
+# research/results/GROUPLOCAL_KD_FULLMODEL_GATE.md). NOTE its lr optimum sits at HALF the row
 # recipe -- re-center COUNTER_LR_START/END when flipping. DECIMATION=S updates 1/S of
 # the groups per step round-robin (group scope only; lr compensation ~x2 at depth).
 STATS_SCOPE = os.environ.get("STATS_SCOPE", "row")
@@ -61,7 +61,7 @@ DECIMATION = int(os.environ.get("DECIMATION", "1"))
 FLIP_SAMPLE_SIZE = int(os.environ.get("FLIP_SAMPLE_SIZE", "4096"))
 REFINE_ITERS = int(os.environ.get("REFINE_ITERS", "2"))
 # Defaults = the measured production config (v3-full: itf + align + salient 1% + in-sweep,
-# results/solver_v3_consolidated_layerwise.md, -24.5% layerwise H-err vs base; both 1.5B
+# research/results/solver_v3_consolidated_layerwise.md, -24.5% layerwise H-err vs base; both 1.5B
 # runs v3f/v3f2 used exactly this via env). To reproduce the legacy base arm:
 # GRID=sym SCALE_REFIT=hdiag SALIENT_FIRST=0.
 SCALE_REFIT = os.environ.get("SCALE_REFIT", "align")
@@ -74,7 +74,7 @@ SALIENT_SCOPE = os.environ.get("SALIENT_SCOPE", "row")
 IN_SWEEP_REFIT = env_bool("IN_SWEEP_REFIT", True)
 # SALIENT_REFIT=align re-solves the salient VALUES as the exact LSQ corrector of the
 # residual layer error after the sweep (copies are suboptimal; held-out −7% q_proj at
-# 65k calib, never lost -- results/SALIENT_REFIT_WITNESS.md). Off by default until a
+# 65k calib, never lost -- research/results/SALIENT_REFIT_WITNESS.md). Off by default until a
 # deploy-scale warm gate.
 SALIENT_REFIT = os.environ.get("SALIENT_REFIT", "none")
 # CALIBRATION=asym switches to the GPTAQ-style cascade objective ||X_q Q - X_fp W||^2

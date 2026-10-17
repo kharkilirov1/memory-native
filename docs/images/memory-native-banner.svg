@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="360" viewBox="0 0 1280 360" role="img" aria-labelledby="title desc">
+  <title id="title">Memory Native</title>
+  <desc id="desc">Compact state. Reversible computation. A PyTorch library for finite-state counter synapses.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#101a23"/>
+      <stop offset="1" stop-color="#101316"/>
+    </linearGradient>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#8cd6bf" stroke-opacity=".06"/>
+    </pattern>
+  </defs>
+  <rect width="1280" height="360" rx="20" fill="url(#bg)"/>
+  <rect width="1280" height="360" rx="20" fill="url(#grid)"/>
+  <path d="M56 56H88" stroke="#8cd6bf" stroke-width="4"/>
+  <text x="104" y="62" fill="#8cd6bf" font-family="monospace" font-size="13" letter-spacing="3">FINITE-STATE LEARNING</text>
+  <text x="52" y="159" fill="#f1f5f4" font-family="Arial, Helvetica, sans-serif" font-size="76" font-weight="700" letter-spacing="-3">memory native</text>
+  <text x="56" y="209" fill="#a5b6bc" font-family="Arial, Helvetica, sans-serif" font-size="23">Compact state. Reversible computation.</text>
+  <text x="56" y="301" fill="#81939a" font-family="monospace" font-size="13" letter-spacing="2">PYTORCH / SIX-BIT STATE / REVERSIBLE BLOCKS</text>
+  <g transform="translate(900 74)" fill="none" stroke="#30454a">
+    <rect width="236" height="204" rx="16" fill="#142126"/>
+    <path d="M0 68H236M0 136H236M78.7 0V204M157.3 0V204"/>
+    <rect x="79" y="68" width="78" height="68" fill="#8cd6bf" stroke="none"/>
+  </g>
+  <g font-family="monospace" font-size="21" text-anchor="middle">
+    <g fill="#718e94">
+      <text x="939" y="116">001</text><text x="1018" y="116">010</text><text x="1097" y="116">011</text>
+      <text x="939" y="184">100</text><text x="1097" y="184">110</text>
+      <text x="939" y="252">111</text><text x="1018" y="252">000</text><text x="1097" y="252">001</text>
+    </g>
+    <text x="1018" y="184" fill="#10251e" font-weight="700">101</text>
+  </g>
+  <circle cx="1188" cy="60" r="4" fill="#8cd6bf"/>
+  <text x="1018" y="308" fill="#8cd6bf" font-family="monospace" font-size="12" text-anchor="middle" letter-spacing="2">STATE → UPDATE → STATE</text>
+</svg>

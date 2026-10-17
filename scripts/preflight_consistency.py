@@ -9,8 +9,8 @@ locally. --cache-validator must explicitly name a validator accepting CACHE,
 tail-bucket/logsumexp tensor semantics. No external format
 compatibility is inferred from metadata alone. No code is downloaded or written
 by this checker. Local policy defaults to
-production/qwen38_27b_recovery_3k.yaml under --project; a remote policy is read only
-when --policy-url is explicitly provided.
+research/campaigns/qwen38_27b_recovery_3k.yaml under --project; a remote policy is
+read only when --policy-url is explicitly provided.
 
 A launch requires --donor, --cache, --data and every mapped runtime environment
 value (or a complete --expected-env-json snapshot). MODEL/DATA_DIR/CACHE must
@@ -44,6 +44,10 @@ import sys
 import urllib.request
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+
+# Archived campaign policy, relative to --project. The recipe lives with the other
+# archived campaign files (formerly production/); see research/layout-map.json.
+DEFAULT_POLICY = Path("research") / "campaigns" / "qwen38_27b_recovery_3k.yaml"
 
 
 class Report:
@@ -382,10 +386,10 @@ def main(argv=None):
     report.section("policy and complete runtime environment")
     policy = None
     try:
-        policy = load_policy(args.policy or project / "production" / "qwen38_27b_recovery_3k.yaml",
+        policy = load_policy(args.policy or project / DEFAULT_POLICY,
                              args.policy_url)
         report.info("policy source: %s" % (args.policy_url or args.policy or
-                                           project / "production" / "qwen38_27b_recovery_3k.yaml"))
+                                           project / DEFAULT_POLICY))
     except (ImportError, OSError, ValueError) as exc:
         report.check(False, "", "policy unavailable/invalid (PyYAML required): %s" % exc)
     # A supplied snapshot is authoritative, not filled from unrelated shell env.

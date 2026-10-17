@@ -47,8 +47,8 @@
 
 ## Gate (layerwise, измерено)
 
-Скрипт `scripts/run_solver_v3_consolidated_layerwise.py`, калибровка
-`scripts/solver_v3_calib_probe.py`. Результаты: `results/solver_v3_consolidated_layerwise.{json,md}`.
+Скрипт `research/experiments/run_solver_v3_consolidated_layerwise.py`, калибровка
+`research/experiments/solver_v3_calib_probe.py`. Результаты: `research/results/solver_v3_consolidated_layerwise.{json,md}`.
 Конфиг: Qwen2.5-0.5B, слои [0, 23], WikiText-2, 8×[2,128] seed 0, CPU fp32.
 
 | arm | rel H-err | vs base |

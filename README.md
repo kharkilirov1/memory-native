@@ -1,297 +1,87 @@
-# memory-native
+<p align="center">
+  <img src="docs/images/memory-native-banner.svg" alt="Memory Native — compact state, reversible computation" width="100%">
+</p>
 
-> **📝 Preprint:** *[Training Without Master Weights: a 6-bit Finite-State Synapse with Optimizer-in-State](paper/MEMORY_NATIVE_PREPRINT.md)* (draft). A six-bit code holds a ternary coefficient and its update accumulator, with no FP master copy or Adam moments for that coefficient. Scales, RMS statistics, metadata, optional caches, and the ordinary FP model tail add storage. A historical 2000-step 1.21B-coefficient run reports 2.25 GiB peak on one T4; its primary raw log is currently missing from the public repository. This is a fit/execution report, not evidence of converged quality parity.
+<p align="center">
+  <a href="https://github.com/kharkilirov1/memory-native/actions/workflows/ci.yml"><img src="https://github.com/kharkilirov1/memory-native/actions/workflows/ci.yml/badge.svg" alt="Tests"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-8cd6bf" alt="MIT license"></a>
+  <a href="docs/status.md"><img src="https://img.shields.io/badge/status-experimental-8ba9e8" alt="Experimental"></a>
+</p>
 
-Finite-state **counter synapses** + **reversible activations** for memory-efficient training,
-in **pure PyTorch** — no custom engine, runs on stock CPU/CUDA. Pure-Python package:
-`pip install -e .` and train.
+<p align="center">
+  <a href="docs/quickstart.md">Get started</a> ·
+  <a href="docs/README.md">Documentation</a> ·
+  <a href="docs/evidence.md">Benchmarks & status</a> ·
+  <a href="CONTRIBUTING.md">Contribute</a>
+</p>
 
-> **Selected GPU evidence** (Tesla T4 / T4×2): [`results/KERNEL.md`](results/KERNEL.md) (fused update
-> ×45.9 / tested layer step ×1.26) · [`results/SCALE_1B.md`](results/SCALE_1B.md) (historical
-> 1.21B-coefficient fit report; primary log missing) · [`results/POOLS.md`](results/POOLS.md) (memory
-> pools) · [`results/SHOOTOUT.md`](results/SHOOTOUT.md) (vs AdamW / 8-bit Adam / GaLore / LoMo).
+**Memory Native is a PyTorch library for training with compact, finite-state weights.**
+Each counter coefficient stores a ternary value and an update accumulator together.
+Reversible blocks reconstruct intermediate activations during backward.
 
-> **Small-model comparison (Tesla T4 — [`results/SHOOTOUT.md`](results/SHOOTOUT.md)):**
-> the tested counter configurations had the lowest training peak among AdamW, 8-bit Adam,
-> GaLore, and LoMo, with similar or lower short-run loss and roughly 1.7–2.1× slower steps
-> after the untiled-update change. The memory gap widened across the two tested widths.
-> At d=768 counter+int4 has lower peak and validation loss in the recorded short run (peak 1.32×
-> below AdamW / 1.62× below 8-bit Adam; val −4.7% vs AdamW; speed gap narrowing). The method
-> saves memory by embedding the coefficient update accumulator in the weight code and
-> reducing saved activations (int4), while the
-> memory-efficient *optimizers* only shrink optimizer state — a small slice of the
-> activation-bound peak.
-
-> **🍎 MLX port:** covered layer operations and state transfers are validated against PyTorch
-> on Linux `mlx[cpu]`, including group-scale and Bonsai format helpers. Packed codes use
-> 0.75 B/coefficient before scales/statistics. The custom Metal kernel, GPU throughput,
-> peak unified memory, and complete model fine-tuning on a Mac still need real hardware
-> validation. See [`docs/MLX_PORT.md`](docs/MLX_PORT.md), package
-> [`src/memory_native_mlx/`](src/memory_native_mlx/), demo [`scripts/mlx_demo.py`](scripts/mlx_demo.py).
-
-> **Forward/backward research pilots:** [interpretation and next steps](results/new_math/INTERPRETATION.md),
-> [raw results and plots](results/new_math/REPORT.md). Scratch CPU experiments compare
-> BLAST factor operators, counter-trained factors, and piecewise-affine multiplication
-> with exact/surrogate backward. These are small character-model experiments; arithmetic
-> reductions and CPU timings do not establish GPU pretraining acceleration.
-
-## Solver ladder on a 1.5B donor
-
-Strict ternary warm PPL at `alpha=0`, Qwen2.5-1.5B donor. Every row is a
-zero-training PTQ conversion. Scope, carried from the evidence
-file itself: calibration 524k tokens; the corpus is rebuilt from the public HF
-sources (shares en40/ru30/code12/math8/science5/instruct5), NOT the historical
-150M val slices — **absolute PPLs are comparable only within this table**; the
-classic arm is the internal baseline. Similarity to historical numbers from other
-validation slices does not establish regression parity.
-
-| solver config | EN PPL | mean log-PPL, 6 domains |
-|---|---:|---:|
-| production solver (classic arm) | 77.9 | 3.792 |
-| + `salient_scope=layer` | 68.0 | 3.687 |
-| + `calibration=asym`, strength 0.15 | 46.75 | 3.156 |
-| + salient 2%, 2 asym passes — **deploy default** | 35.59 | 2.899 |
-| + salient 3% (quality option, ~3.1–3.6 bpw) | 31.68 | 2.795 |
-
-The bpw estimates concern a visible-weight inference representation; actual counter
-training stores six-bit codes plus scales/statistics, salient metadata and the FP tail.
-
-The subsequent s2i2 recovery report records EN **30.06**, RU **22.39**, and mean log-PPL
-**2.6779** after 6000 steps on a newly built 150M-token corpus. That uses a different
-validation slice from the PTQ table; its checkpoint and full raw metrics were not
-preserved publicly. Treat it as a historical report, not a same-slice comparison or
-an independently downloadable result.
-
-Full tables, the ASYM_STRENGTH sweep (smooth, unimodal, minimum at 0.15) and the
-run protocol: [`results/solver_v3_salient_scope_asym_gate_colab.md`](results/solver_v3_salient_scope_asym_gate_colab.md).
-The earlier rungs — naive 575k → optimal ternary 187k → GPTQ 17.5k EN warm PPL —
-are in [`results/recovery_15b_main.md`](results/recovery_15b_main.md).
-
-## Project map
-
-| Start here | Purpose |
-|---|---|
-| [`PROJECT_STATUS.md`](PROJECT_STATUS.md) | What is verified, experimental, or still open |
-| [`REPRODUCIBILITY.md`](REPRODUCIBILITY.md) | Reproduce CPU, CUDA, scale, and recovery witnesses |
-| [`results/README.md`](results/README.md) | Evidence index and measured result boundaries |
-| [`results/ARTIFACT_MANIFEST.md`](results/ARTIFACT_MANIFEST.md) | Public artifacts, external dependencies, and missing raw evidence |
-| [`paper/MEMORY_NATIVE_PREPRINT.md`](paper/MEMORY_NATIVE_PREPRINT.md) | Method, assumptions, and open scientific questions |
-| [`CONTRIBUTING.md`](CONTRIBUTING.md) | Contribution and review workflow |
-| [`SECURITY.md`](SECURITY.md) | Private vulnerability reporting and support scope |
-
-This repository is the **reference research implementation** and primary public project.
-[MotifCL](https://github.com/kharkilirov1/motifcl) is a separate, supporting native runtime
-used to explore Vulkan deployment and compact-state execution on legacy GPUs. Results from one
-repository are not treated as proof for the other unless the corresponding witness is linked
-explicitly.
-
-The method targets persistent training state and activation memory:
-
-| Pool | Lever | What it is |
+| Compact weights | Updates in backward | Reversible blocks |
 |---|---|---|
-| Parameters + optimizer + gradients | `CompactCounterLinear` / `RMSCounterLinear` | a ternary coefficient and update accumulator in one code, plus scale/RMS buffers; update runs in backward, removing separate coefficient master copies, Adam moments, and retained coefficient gradients. The default correlation still forms a transient dense gradient; strict and group-local paths avoid it |
-| Activations | `ReversibleCouplingBlock` | activations are recomputed in backward from the output instead of stored — depth-independent activation memory |
+| Four coefficient codes in three bytes | No separate master weights or Adam moments for counter coefficients | Reconstruct branch inputs instead of retaining every intermediate activation |
 
-## Install
+Six bits describe the coefficient code; scales, statistics, activations and working memory
+are additional. The library is experimental. See [measured results and limits](docs/evidence.md).
+
+## Get started
 
 ```bash
-pip install -e .            # from this directory
-# or, once published: pip install memory-native
+git clone https://github.com/kharkilirov1/memory-native.git
+cd memory-native
+python -m pip install -e .
+python examples/quickstart.py
 ```
 
-Dependencies are `torch>=2.1` and `numpy>=1.21`.
-
-## Quickstart
+The offline CPU example learns a synthetic teacher and reports error and storage separately.
+For environment setup, CUDA and optional dependencies, follow the [quickstart](docs/quickstart.md).
 
 ```python
 import torch
-from memory_native import RMSCounterLinear
+from memory_native import PackedRMSCounterLinear
 
-layer = RMSCounterLinear(256, 256, C=11, lr=3e-3, lr_scale=2e-4)
-x = torch.randn(64, 256)                 # note: no requires_grad needed
-for _ in range(200):
-    loss = (layer(x) - target).pow(2).mean()
-    loss.backward()                       # the layer self-updates here; no optimizer.step()
+layer = PackedRMSCounterLinear(32, 32, C=11, lr=3e-3)
+x, target = torch.randn(64, 32), torch.randn(64, 32)
+
+loss = (layer(x) - target).square().mean()
+loss.backward()  # counter coefficients update here
+
+with torch.no_grad():
+    prediction = layer(x)
 ```
 
-The counter layer exposes **no `nn.Parameter`** — its weight is a `uint8` state buffer and it
-updates itself during `backward()`. Mix it with normal modules; an `AdamW` over the rest of
-the model (embeddings, norms, head) trains those as usual.
+Use one forward followed by one backward per training step. Ordinary parameters in a mixed
+model still need their own optimizer. Read the [execution contract](docs/ARCHITECTURE.md)
+before integrating counters into another model.
 
-## Command-line gates
+## Explore
 
-```bash
-# char-LM parity: counter+RMS vs ternary-QAT vs dense AdamW, same arch/data/seed.
-# Falls back to a synthetic corpus offline; use --data-path for real tinyshakespeare.
-memory-native-charlm --config tiny --steps 600 --device cuda
+| Goal | Guide |
+|---|---|
+| Understand the state and update lifecycle | [Architecture](docs/ARCHITECTURE.md) |
+| Run examples | [Examples](examples/README.md) |
+| Convert and evaluate a donor | [Workflow tools](scripts/README.md) · [Public notebook](notebooks/README.md) |
+| Try experimental update controls | [Counter stability](docs/counter_stability.md) |
+| Use the MLX port | [MLX guide](docs/MLX_PORT.md) |
+| Reproduce measurements | [Reproducibility](docs/reproducibility.md) |
 
-# compare the dense baseline under a memory-efficient optimizer instead of FP32 AdamW:
-memory-native-charlm --config tiny --kinds dense --optimizer galore --device cuda
+## Project layout
 
-# training-peak memory gate: counter_rms vs dense across optimizers (real peak on CUDA)
-memory-native-memgate --config s512 --optimizers adamw,galore,lomo,bnb8 --device cuda
-```
+| Directory | Contents |
+|---|---|
+| [`src/`](src/) | PyTorch library, CUDA kernels and experimental MLX port |
+| [`tests/`](tests/) | Unit and integration tests |
+| [`examples/`](examples/) | Small runnable examples |
+| [`docs/`](docs/) | User and contributor guides |
+| [`scripts/`](scripts/) · [`notebooks/`](notebooks/) | Conversion, evaluation and recovery workflows |
+| [`research/`](research/) | Experiments, measurements, papers and historical campaigns |
 
-### Baselines (the honest comparison set)
-`--optimizer` / `--optimizers` selects what the dense baseline is trained with, so the memory
-claim is measured against real memory-efficient training, not only FP32 AdamW:
+## Contributing
 
-| name | what | optimizer-state memory | deps |
-|---|---|---|---|
-| `adamw` | FP32 AdamW | 2×params (fp32 m,v) | torch |
-| `bnb8` | 8-bit AdamW (bitsandbytes) | ~0.5×params | bitsandbytes + CUDA |
-| `galore` | low-rank projected AdamW | ~2×rank×dim | torch (built in) |
-| `lomo` | fused-backward SGD | **zero** moments | torch (built in) |
+Start with [CONTRIBUTING.md](CONTRIBUTING.md). Bug reports and reproducible counterexamples
+are welcome. Report vulnerabilities through [SECURITY.md](SECURITY.md).
 
-GaLore and LoMo are implemented in plain PyTorch here (run on CPU, no extra deps); `bnb8`
-is optional and used where bitsandbytes+CUDA are present (skips cleanly otherwise).
-
-### Scale validation
-The biggest open question is whether parity holds beyond micro/tiny. One command runs the
-full sweep (parity across kinds + dense-vs-optimizers + memory gate) at d=512 and saves logs:
-
-```bash
-scripts/run_scale_validation.sh s512 2000 cuda      # config steps device
-DATA_PATH=/path/to/tinyshakespeare.txt scripts/run_scale_validation.sh small 4000 cuda
-```
-
-Logs land in `results/` (not committed pre-filled — capture them on your GPU).
-
-On this CPU box the 60-step micro gate reproduces the *isolation* but not the
-"within ~0.1% of dense" framing: across the default run and seeds 0-2, `counter_rms`
-was +3.9…+6.4% above dense, did not beat vanilla `counter` in 3 of 4 runs, and the
-counter-optimizer cost over ternary-QAT was +2.1…+5.7%. Treat this gate as plumbing and
-regression (it is now reproducible: `--seed` seeds every RNG), not as a parity claim;
-the larger-scale numbers are in [`results/SUMMARY.md`](results/SUMMARY.md). Measured
-per-parameter bytes are in [`results/STATE_ACCOUNTING.md`](results/STATE_ACCOUNTING.md)
-(6 bits is 0.750 B/param of packed code, a deployed layer is 0.906 persistent /
-1.082 resident, and a pure-PyTorch training step peaks near 23 B/param).
-
-## What is measured vs what is roadmap
-
-**Honest framing — read before quoting memory numbers.**
-
-- **Realized now (pure PyTorch, verified on CPU):** the *learning dynamics*, the
-  *optimizer-state* saving (no FP master weight, no Adam moments), and — with
-  `PackedRMSCounterLinear` (`kind="counter_packed"`) — **genuinely packed 0.75 byte/weight
-  coefficient-code storage** (4 codes / 3 bytes; scales/statistics and other model buffers
-  are additional, bit-identical to the engine's packing; round-trip
-  and identical-dynamics tested). `memory_report` / `memory-native-memgate` quantify it (real
-  `torch.cuda.max_memory_allocated` on CUDA, byte accounting on CPU).
-- **Verified on GPU (Tesla T4):** the Triton forward kernel (`triton_counter.py`,
-  `TritonCounterLinear`) decodes the packed state *inside* the GEMM (no dense weight) and
-  matches the dense reference within f32 tol (err ≤ 3e-6). And at **d=512** counter+RMS keeps
-  parity with — slightly beats — dense AdamW (val −1.7%). See [`results/SUMMARY.md`](results/SUMMARY.md).
-- **Activation pool — collapsed (T4):** `ReversibleSequence` is a single whole-chain RevNet
-  Function (stores only the final output, reconstructs the rest), so activation memory is **O(1)
-  in depth** — 13.5× below plain at depth 256 (5.29 GiB → 392 MiB), gradients identical to the
-  per-block version. With `act_save_bits` (unbiased int8/int4 saved activations) the saved-X cost
-  drops too. See [`results/POOLS.md`](results/POOLS.md).
-- **Fused update kernel — done (T4):** `memory_native.fused_update` collapses the per-element
-  RMS+stochastic-rounding update into one launch (deterministic hash-SR, bit-quantified against a
-  CPU reference), **×45.9 on the update / ×1.26 on the step**, wired into
-  `PackedRMSCounterLinear`. See [`results/KERNEL.md`](results/KERNEL.md).
-- **Scale — historically reported (T4):** a 2000-step counter + reversible run with
-  **1.21B counter coefficients** reports **2.25 GiB peak** on one 14.6 GiB T4 and
-  a dense+FP32 Adam allocation failure. The linked primary raw log is absent; converged
-  quality parity remains open. See [`results/SCALE_1B.md`](results/SCALE_1B.md).
-- **Strict update-from-IO — implemented and T4-validated:** both the row-scale
-  `update_from_io.triton_counter_update_from_io` path and the group-scale solver-v3 path can form
-  the update directly from `(state, scale, v, x, grad_out)` without materializing a dense
-  `[out,in] grad_w`. The result is correct and establishes the strict-memory bound, but the
-  hand-written correlation is dramatically slower than cuBLAS at real token counts: the row-scale
-  witness was ~860× slower, while the group-scale Qwen-shape path took 30–46 seconds per layer at
-  `M=4096`. The practical default therefore remains cuBLAS correlation plus the fused update,
-  optionally row-tiled to bound transient memory. A group-local fused alternative,
-  with decimation, has separate T4 update-kernel and short recovery witnesses;
-  its 1.7–3.0× kernel improvement is not an end-to-end training speedup. See
-  [`results/ACCELERATION.md`](results/ACCELERATION.md) and
-  [`results/GPU_GATE_T4_GROUPLOCAL.md`](results/GPU_GATE_T4_GROUPLOCAL.md).
-
-**Recovery quality remains open:** the corrected Qwen 1.5B v3f2 run reports EN PPL
-34.41 versus donor 11.6 and about 70.4% mean accuracy retention across five tasks.
-The 12B cached-KD recipe degraded a useful solver-only warm start (EN 46.4) to
-EN 46,608. These results do not establish donor-quality preservation or a general
-large-model fine-tuning solution. See the [evidence index](results/README.md).
-
-Training without FP master copies has prior work, including
-[ECO](https://arxiv.org/abs/2601.22101). The research contribution explored here is the
-specific compact finite-state coefficient/update representation and its memory trade-offs.
-Matched long-run comparisons, including QLoRA for donor fine-tuning, remain needed.
-
-### Roadmap
-1. **Practical low-memory correlation** — retain the verified strict from-IO kernel as the
-   zero-`grad_w` bound, while improving the useful frontier between full cuBLAS correlation and
-   row-tiled correlation. Promote a path only when end-to-end training throughput and peak memory
-   both beat the current default on a named model and GPU.
-2. **Multi-session scale** — 2×T4 data-parallel + checkpoint/resume
-   ([`scripts/fineweb_1b_2xt4.py`](scripts/fineweb_1b_2xt4.py)); accumulate tokens across Kaggle
-   sessions on real web text (FineWeb-Edu, BPE).
-3. **Reversible at depth** — anchors (store every k blocks) to trade a little memory for less
-   recompute, and a depth-sweep for float-reconstruction error beyond the tested range.
-
-## Constraints (same eager-only contract as the engine)
-
-- The in-backward update is **eager-only**: incompatible with gradient accumulation, weight
-  sharing of a counter module, activation checkpointing, and `torch.compile` graph capture
-  without an explicit scheduler. One forward → one backward per step; measure under
-  `torch.no_grad()`. **Data-parallel is supported** a different way than DDP: the counter
-  gradient is all-reduced *inside* backward (the optimizer is an in-place state update, so there
-  is no Parameter `.grad`), keeping every replica's packed state bit-identical — validated on
-  2×T4 (0 bytes differ across ranks). See `scripts/fineweb_1b_2xt4.py`.
-- `ReversibleCouplingBlock` needs deterministic `F`/`G` (no dropout/RNG). Float reconstruction
-  is exact enough at tested depth (≤12 blocks); deeper stacks need a depth-sweep and possibly
-  anchors.
-
-## Layout
-
-```
-src/memory_native/
-  counter.py        CompactCounterLinear, RMSCounterLinear, encode/decode, stochastic rounding
-  packed.py         PackedRMSCounterLinear — real 0.75 byte/weight storage (4 codes / 3 bytes)
-  triton_counter.py TritonCounterLinear + in-GEMM packed decode (CUDA; T4-verified, net-negative)
-  fused_update.py   one-launch RMS+SR counter update kernel (CUDA; T4-verified, ×45.9)
-  reversible.py     ReversibleCouplingBlock, ReversibleSequential (recompute backward)
-  actquant.py       unbiased low-bit saved activations (the counter layer's act_save_bits)
-  budget.py         training_budget — symbolic 4-pool memory model (deep-v2, reproduced exact)
-  baselines.py      TernaryQATLinear, make_linear factory (kinds incl. counter_packed)
-  optimizers.py     build_optimizer: adamw / bnb8 / galore / lomo
-  models.py         swappable-linear GPT harness + configs (micro/tiny/s512/small)
-  memory.py         memory_report, peak_training_memory, compare_training_peak
-  data.py           char corpus loader with offline synthetic fallback
-  cli.py            memory-native-charlm / memory-native-memgate entry points
-src/memory_native_mlx/
-  counter.py        RMSCounterLinear on MLX (custom-VJP self-update, deterministic hash-SR)
-  packed.py         PackedRMSCounterLinear — same 0.75 B/weight packed layout, bit-identical
-  reversible.py     whole-chain reversible sequence (O(1)-in-depth) + anchored mode
-  metal_update.py   fused RMS+SR update as a custom Metal kernel (mirror of the Triton one)
-  group_scale.py    group-scale counter layer (Bonsai/PTQ granularity, act-order, homotopy)
-  bonsai.py         ternary checkpoint (Bonsai-style) <-> trainable counter <-> mx.quantized_matmul
-  interop.py        lossless torch <-> MLX counter-state transfer (the CUDA->MacBook handoff)
-scripts/            run_scale_validation.sh (one-command GPU sweep -> results/)
-                    mlx_demo.py (counter+reversible char-LM on MLX; Metal or CPU)
-tests/              pytest: encode/decode, learning, reversible grad-check, packed round-trip,
-                    optimizers, memory gate, triton (CUDA-skipped)
-```
-
-## Archived Qwen3.8 27B conversion recipe
-
-The older Strict KD v3 recipe is preserved in [`notebooks/MN_Qwen38_27B_StrictKD_V3_RTXPRO6000_H100.ipynb`](notebooks/MN_Qwen38_27B_StrictKD_V3_RTXPRO6000_H100.ipynb). This is an archived workflow that requires an externally supplied runner ZIP absent from the public repository, not a self-contained reproducible runner or a new metric claim.
-
-For new public runs, [`notebooks/cached_kd_public.ipynb`](notebooks/cached_kd_public.ipynb)
-calls the committed conversion, teacher-cache and cached-KD scripts with an explicitly
-supplied donor and corpus. See [`REPRODUCIBILITY.md`](REPRODUCIBILITY.md) for data,
-hardware and historical-artifact limits.
-
-## How this was built
-
-Built entirely by AI (Claude) under sustained human direction, over months, by someone
-with no formal CS/math background. Working protocol: claims should have executable
-witnesses, explicit forecasts, and raw logs next to results; negative results are retained.
-The project is active research. CPU gates run from a fresh clone, while historical GPU
-reports have varying artifact completeness and some workflows need external data or
-runner bundles. See [`REPRODUCIBILITY.md`](REPRODUCIBILITY.md) for the known gaps.
-
-## License
-
-MIT.
+Created under Kharki’s direction with AI coding tools. See [citation and attribution](CITATION.cff).
+Licensed under [MIT](LICENSE).
