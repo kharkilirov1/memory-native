@@ -515,7 +515,7 @@ if HAS_TRITON:
     ):
         row = tl.program_id(0)
         grp = tl.program_id(1)
-        seed = tl.load(seed_ptr).to(tl.uint32)
+        seed = seed_val.to(tl.uint32)
         packed_per_group = group_size // 4
         local_pg = tl.arange(0, BLOCK_PG)
         packed_group = grp * packed_per_group + local_pg
@@ -615,7 +615,7 @@ if HAS_TRITON:
         # Same transition as _group_state_from_io_kernel with the correlation read from gw_ptr.
         row = tl.program_id(0)
         grp = tl.program_id(1)
-        seed = tl.load(seed_ptr).to(tl.uint32)
+        seed = seed_val.to(tl.uint32)
         packed_per_group = group_size // 4
         local_pg = tl.arange(0, BLOCK_PG)
         packed_group = grp * packed_per_group + local_pg
@@ -656,7 +656,7 @@ if HAS_TRITON:
 
     @triton.jit
     def _group_fused_update_kernel(
-        state_ptr, scale_ptr, v_ptr, x_ptr, go_ptr, perm_ptr, seed_ptr, groups_ptr,
+        state_ptr, scale_ptr, v_ptr, x_ptr, go_ptr, perm_ptr, seed_val, groups_ptr,
         dense_ptr,
         M, N, K, G, C, group_size, lr, lr_scale, rms_beta, rms_eps, clip, residual_alpha,
         stride_sn, stride_xm, stride_xk, stride_gom, stride_gon,
@@ -681,7 +681,7 @@ if HAS_TRITON:
             grp = tl.load(groups_ptr + pid_g).to(tl.int32)
         else:
             grp = pid_g
-        seed = tl.load(seed_ptr).to(tl.uint32)
+        seed = seed_val.to(tl.uint32)
         offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
         nmask = offs_n < N
         offs_p = grp * group_size + tl.arange(0, BLOCK_K)
@@ -1102,6 +1102,18 @@ def triton_group_counter_update_dense(
 
 
 @torch.no_grad()
+def _decim_index(perm_long: torch.Tensor, group_ids: torch.Tensor, group: int, K: int,
+                 device) -> tuple[torch.Tensor, torch.Tensor]:
+    """Act-order column indices for one decimation phase.
+
+    ``group_ids`` are the true group ids active on this step; the returned index selects
+    their columns THROUGH ``perm`` so the kernel can stream a compact contiguous x copy.
+    """
+    cols = (group_ids.unsqueeze(1) * group
+            + torch.arange(group, device=device)).reshape(-1)
+    return perm_long[cols].contiguous(), group_ids.to(torch.int32).contiguous()
+
+
 def triton_group_counter_update_fused(
     state_packed_perm: torch.Tensor,
     scale: torch.Tensor,
@@ -1161,7 +1173,7 @@ def triton_group_counter_update_fused(
         raise ValueError(f"group-local v must be [out, n_groups]={N, G}, got {tuple(v.shape)}")
     if K % 4 or G != (K + group - 1) // group or perm.numel() != K:
         raise ValueError("invalid group layout")
-    seed_t = torch.tensor([int(seed) & 0xFFFFFFFF], dtype=torch.int64, device=x2.device)
+    seed_i = int(seed) & 0xFFFFFFFF
     bf16, fp16 = _dtype_flags(x2)
     perm_long = perm.to(dtype=torch.long)
     # One coalesced act-order copy of x ([M, K] or [M, K_active], input dtype -- far
@@ -1177,10 +1189,8 @@ def triton_group_counter_update_fused(
         if group_ids.numel() == 0:
             return
         group_ids = group_ids.to(device=x2.device)
-        cols = (group_ids.unsqueeze(1) * group
-                + torch.arange(group, device=x2.device)).reshape(-1)
-        x_perm = x2.index_select(1, perm_long[cols])
-        groups_t = group_ids.to(torch.int32).contiguous()
+        cols, groups_t = _decim_index(perm_long, group_ids, group, K, perm.device)
+        x_perm = x2.index_select(1, cols)
         grid = (triton.cdiv(N, 32), int(group_ids.numel()))
         decimated = True
     else:
@@ -1201,7 +1211,7 @@ def triton_group_counter_update_fused(
         write_dense = True
     with torch.cuda.device(x2.device):  # launch on the tensors' GPU, not the current one
         _group_fused_update_kernel[grid](
-            state, scale, v, x_perm, go2, perm, seed_t, groups_t,
+            state, scale, v, x_perm, go2, perm, seed_i, groups_t,
             dense_arg,
             M, N, K, G, C, group,
             float(lr), float(lr_scale), float(rms_beta), float(rms_eps),
