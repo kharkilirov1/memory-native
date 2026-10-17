@@ -174,10 +174,10 @@ inference = BinaryFactorInference(export_binary_factors(layer))
 ```sh
 PYTHONPATH=src python -m pytest -q tests/test_binary_factor.py tests/test_binary_factor_runners.py
 python scripts/binary_factor_witness.py --phase confirm --start 20 --seeds 12 --steps 600 \
-  --selection results/binary_factor_20261009/matrix_protocol.json --output /tmp/binary-new-matrices
+  --selection research/results/binary_factor_20261009/matrix_protocol.json --output /tmp/binary-new-matrices
 python scripts/binary_factor_text.py --phase teacher --root /tmp/binary-new-text --steps 1200
 python scripts/binary_factor_text.py --phase confirm --root /tmp/binary-new-text --steps 600 \
-  --start 40 --seeds 3 --selection results/binary_factor_20261009/text_protocol.json
+  --start 40 --seeds 3 --selection research/results/binary_factor_20261009/text_protocol.json
 ```
 
 Use a fresh output directory and the pinned corpus manifest for exact comparisons.
