@@ -115,11 +115,15 @@ def main(argv=None) -> int:
             layer._update_from_io(x, go)
             after = snapshot(layer)
             d = diff_counts(snap, after)
-            ok = d["state_bytes_equal"] and d["scale_bitwise_equal"] and d["v_bitwise_equal"]
-            results["checks"].append({"check": "zero_lr_is_noop", "shape": [out_f, in_f],
-                                      "tokens": ntok, **d, "passed": ok})
+            # v is a gradient RMS statistic: it updates even at lr=0 by design. The no-op
+            # contract is about the PARAMETERS (packed codes) and the group scales.
+            ok = d["state_bytes_equal"] and d["scale_bitwise_equal"]
+            results["checks"].append({"check": "zero_lr_leaves_params_unchanged",
+                                      "shape": [out_f, in_f], "tokens": ntok, **d,
+                                      "v_updated_by_design": not d["v_bitwise_equal"],
+                                      "passed": ok})
             if not ok:
-                results["failures"].append("zero_lr_is_noop")
+                results["failures"].append("zero_lr_leaves_params_unchanged")
 
             # ---- 2. decimation restricted contract -----------------------------
             for dec in (4, 8):
