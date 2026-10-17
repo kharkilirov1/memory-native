@@ -104,3 +104,44 @@ Next lever, aimed at that: make the updater **emit the dense weight itself** (it
 computes each element's new code and scale) so the per-step decode disappears. Expected
 ~3.1 ms ≈ 1.0-1.05x at 4096^2/B=512. The alternative — a faster decode — cannot go below
 its ~0.5 ms read/write floor at this size.
+
+
+## Round 3: the updater emits the dense weight, and the counter step is FASTER than AdamW
+
+Two fixes, one discovery:
+
+- `triton_group_counter_update_fused(..., dense_out=)`: the fused updater writes the
+  post-update dense weight as it goes (it already has every new code and scale in
+  registers). The per-step decode disappears: update 0.721 -> 0.856 at 4096^2/B=512 (the
+  store costs, the decode it replaces cost 0.56) and the step drops 3.862 -> 3.520.
+- **The counter updater runs INSIDE the autograd Function's backward**, so the earlier
+  harness counted it TWICE (forward -> backward(update) -> explicit `_update_from_io`).
+  The fair step is dense `fwd+bwd+opt.step()` vs counter `fwd+bwd`. Re-measured:
+
+A100, cache on, fused decode, group scope (row scope is strictly worse now):
+
+| shape | batch | dec | dense full | counter full | ratio |
+|---|---:|---:|---:|---:|---:|
+| 4096x4096 | 512 | 8 | 3.047 ms | **2.715 ms** | **0.89x** |
+| 4096x4096 | 512 | 4 | 3.047 | 2.750 | **0.90x** |
+| 4096x4096 | 512 | 1 | 3.047 | 3.425 | 1.12x |
+| 4096x4096 | 1024 | 8 | 4.823 | 4.516 | **0.94x** |
+| 2048x2048 | 256 | 4 | 0.586 | 1.075 | 1.83x |
+| 1024x1024 | 512 | 4 | 0.572 | 1.011 | 1.77x |
+| 1536x1536 | 64 | 1 | 0.585 | 0.760 | 1.30x |
+
+At the 4096^2 shapes that a 12B-class model actually uses, a counter step with decimation
+is now **faster than the dense AdamW step it replaces (0.89-0.94x)**, with fwd and grad_x
+already equal to dense (1.00x) and the updater cheaper than AdamW (0.695 vs 1.209).
+
+What is left (medium/small shapes only): the updater has a ~0.6 ms floor that does not
+scale with N*K (0.607 at 2048^2, 0.593 at 1024^2, 0.695 at 4096^2/dec8), and at those
+sizes AdamW itself is ~0.3-0.4 ms, so the ratio stays above 1. The prime suspect is
+per-call host work in the update path (a `torch.tensor([seed])` H2D copy each step plus the
+decimation index tensors rebuilt every call), not the kernel: the same kernel is 0.4 ms at
+1536^2/dec1. Next: reuse the seed buffer and per-phase decimation indices, then re-measure.
+
+Semantics: `tests/test_group_scale_kernels_cuda.py` 5 passed (bit-exact vs the torch
+oracle), `tests/test_group_scale_packed.py` 18 passed, full CPU suite 639 passed / 24
+skipped. The dense emission only writes a derived buffer; the state math (SR, carry, group
+scales) is untouched.
