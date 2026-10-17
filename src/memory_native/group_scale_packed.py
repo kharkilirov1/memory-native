@@ -163,6 +163,7 @@ class PackedGroupScaleCounterLinear(RoundingStreamMixin, nn.Module):
         self._outstanding_forward = False
         self._sr_step = 0
         self._weight_cache = None
+        self._dense_cache = None
         self._weight_cache_bytes = int(weight_cache_bytes)
 
         # Zero state packs to a CONSTANT 3-byte pattern (encode_state is
@@ -368,6 +369,19 @@ class PackedGroupScaleCounterLinear(RoundingStreamMixin, nn.Module):
                                       self.salient_val.float())
         return w if dtype is None else w.to(dtype)
 
+    def _weight_cache_key(self, dtype: torch.dtype | None):
+        return (
+            self._sr_step, dtype,
+            self.state._version, self.scale._version,
+            self.salient_idx._version, self.salient_val._version,
+        )
+
+    def _cacheable_weight(self, dtype: torch.dtype | None = None) -> bool:
+        if self._weight_cache_bytes <= 0:
+            return False
+        itemsize = 4 if dtype is None else max(1, torch.finfo(dtype).bits // 8)
+        return self.out_features * self.in_features * itemsize <= self._weight_cache_bytes
+
     def _cached_visible_weight(self, dtype: torch.dtype | None = None) -> torch.Tensor:
         """`visible_weight()` cached across one step's fwd/grad_x.
 
@@ -380,17 +394,13 @@ class PackedGroupScaleCounterLinear(RoundingStreamMixin, nn.Module):
         `out*in*4` bytes each: caching every layer of a 12B model would hold the whole
         model in fp32. Enable it per layer (or via the factories) for small models or for
         wide-layer benchmarks; `weight_cache_bytes` caps the size of a cached layer.
+
+        The group-scope fused updater can also REFRESH this cache itself
+        (`dense_out`), which removes the per-step decode entirely.
         """
-        if self._weight_cache_bytes <= 0:
+        if not self._cacheable_weight(dtype):
             return self.visible_weight(dtype=dtype)
-        itemsize = 4 if dtype is None else max(1, torch.finfo(dtype).bits // 8)
-        if self.out_features * self.in_features * itemsize > self._weight_cache_bytes:
-            return self.visible_weight(dtype=dtype)
-        key = (
-            self._sr_step, dtype,
-            self.state._version, self.scale._version,
-            self.salient_idx._version, self.salient_val._version,
-        )
+        key = self._weight_cache_key(dtype)
         cache = self._weight_cache
         if cache is not None and cache[0] == key:
             return cache[1]
@@ -558,8 +568,16 @@ class PackedGroupScaleCounterLinear(RoundingStreamMixin, nn.Module):
             active_groups=active,
         )
         if use_fused:
+            dense_out = None
+            if self._cacheable_weight(torch.float32):
+                if self._dense_cache is None:
+                    self._dense_cache = torch.empty(
+                        (self.out_features, self.in_features),
+                        device=self.state.device, dtype=torch.float32)
+                dense_out = self._dense_cache
             triton_group_counter_update_fused(
-                self.state, self.scale, self.v, x2, go2, self.perm, **upd_kw)
+                self.state, self.scale, self.v, x2, go2, self.perm,
+                dense_out=dense_out, **upd_kw)
             if self._has_salient():
                 zero_packed_codes(self.state, self._salient_perm_flat,
                                   self.in_features, self.C)
@@ -577,6 +595,14 @@ class PackedGroupScaleCounterLinear(RoundingStreamMixin, nn.Module):
         self._sr_step += 1
         self.sr_step.fill_(self._sr_step)
         self.update_events.add_(self.out_features * self.in_features)
+        if use_fused and dense_out is not None:
+            # The kernel wrote the post-update dense weight; adopt it as the cache so the
+            # next forward does not decode at all. Salient overrides are not part of the
+            # ternary base, so re-apply them exactly as visible_weight() would.
+            if self._has_salient():
+                dense_out.reshape(-1).index_copy_(
+                    0, self.salient_idx.long(), self.salient_val.float())
+            self._weight_cache = (self._weight_cache_key(torch.float32), dense_out)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if not (self.training and torch.is_grad_enabled()):
