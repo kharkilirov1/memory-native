@@ -3,7 +3,7 @@ Status: **research/ablation**, not production acceleration. 2026-10-08.
 
 ## Reproduced constraints and failure
 - Training can read `W_alpha = s*(t + alpha*c/C)`, but deployment reads `W_0=s*t`.
-- The 12B cached-KD report records warm strict aggregate log-PPL 3.2585 and step-750 11.5862; training loss alone failed to predict deployable quality. See `results/GEMMA12B_CACHED_KD.md`. The original 12B artifacts are external; this change DOES NOT reproduce that run.
+- The 12B cached-KD report records warm strict aggregate log-PPL 3.2585 and step-750 11.5862; training loss alone failed to predict deployable quality. See `research/results/GEMMA12B_CACHED_KD.md`. The original 12B artifacts are external; this change DOES NOT reproduce that run.
 - `_PackedGroupScaleFn.backward` changes state during backward. The forward-reuse guard prevents a naïve two-forward/two-backward dual-loss implementation. Such an implementation must first introduce a collection/single-commit update scheduler.
 - A formal **loss mismatch witness**: with one scalar input x=1, scale s=1, t=0, c=C-1 and target y=(C-1)/C, alpha=1 gives zero squared error and therefore no loss gradient, but the deployable alpha=0 output is zero and has squared error ((C-1)/C)^2. This is an existence counterexample to the implication L_alpha small => L_0 small, **not evidence that this exact trap caused the 12B failure**.
 
