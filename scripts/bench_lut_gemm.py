@@ -54,6 +54,11 @@ def main(argv=None) -> int:
     layer = PackedGroupScaleCounterLinear(k, n, group=args.group, C=args.C,
                                           kernel_mode="triton", lr=1e-3).cuda()
     x = torch.randn(1, k, device="cuda")
+    from memory_native.packed import pack_codes
+    levels = 3 * (2 * args.C - 1)
+    layer.state.copy_(pack_codes(torch.randint(0, levels, (n, k), dtype=torch.uint8,
+                                               device="cuda")))
+    layer.scale.fill_(0.01)
     packed_bytes = layer.state.numel()
     gbps = lambda ms: packed_bytes / (ms / 1000) / 1e9
 
@@ -77,7 +82,8 @@ def main(argv=None) -> int:
         return triton_lut_group_matmul(x, layer.state, layer.scale, layer.perm,
                                        group=args.group, C=args.C, block_n=args.block_n)
     got = lut()
-    err = float((got - ref).abs().max() / ref.abs().max())
+    denom = max(float(ref.abs().max()), 1e-12)
+    err = float((got - ref).abs().max() / denom)
     rows["LUT (build+gather)"] = _bench(lut, 10, args.run_time)
 
     print(f"layer {n}x{k} group={args.group} C={args.C} M=1  packed state {packed_bytes/2**20:.2f} MiB")
