@@ -12,13 +12,33 @@ from ..convert import CounterLinearWithBias, SwapReport
 from ..counter import C_DEFAULT
 from ..group_scale_counter import GroupScaleCounterLinear
 from ..group_scale_packed import PackedGroupScaleCounterLinear
+from .rotate import rotate_residual_stream
 
 __all__ = [
     "optimal_ternary", "gptq_ternary", "gptq_group_ternary", "residual_counter",
     "group_residual_counter", "collect_hessians", "collect_hessians_guided",
-    "quantize_dense_group_ternary",
+    "quantize_dense_group_ternary", "maybe_rotate_residual_stream",
     "ptq_warm_start", "itf_grid", "align_scales_output", "solve_group_state",
 ]
+
+
+def maybe_rotate_residual_stream(model: nn.Module, rotate: bool, seed: int = 0) -> bool:
+    """Apply the R1 residual-stream rotation (``donor/rotate.py``) before solving, if asked.
+
+    The rotation is exactly output-preserving (verified on Qwen2.5-0.5B: PPL 11.764424 ->
+    11.764425) and folds entirely into the weights, so it costs nothing at runtime; it only
+    changes the basis the quantizer sees. Measured with align/sym and salient 1% (0.5B,
+    wikitext-2): 346.9 -> 247.9 PPL, i.e. 1.40x better for +1 s of solve time. It is NOT a
+    replacement for the salient channel: without salient, rotation alone moves 1493.9 ->
+    1295.0 (1.15x) and stays 5.2x behind rotated+salient.
+
+    Returns whether the model was rotated; callers that need the inverse basis should not:
+    the transform is folded into the weights, so the model stays a valid forward graph.
+    """
+    if not rotate:
+        return False
+    rotate_residual_stream(model, seed=seed)
+    return True
 
 
 @torch.no_grad()
@@ -1011,8 +1031,10 @@ def quantize_dense_group_ternary(model: nn.Module, calib_batches, *, group: int 
                                   salient_first: float = 0.0,
                                   salient_scope: str = "row",
                                   in_sweep_refit: bool = False,
+                                  rotate: bool = False, rotate_seed: int = 0,
                                   progress: bool = True) -> None:
     skip = ["lm_head"] + (list(extra_skip) if extra_skip is not None else [])
+    maybe_rotate_residual_stream(model, rotate, rotate_seed)
     targets = _target_paths(model, skip)
     hessians = collect_hessians(model, targets, calib_batches)
     for i, path in enumerate(targets):
@@ -1231,6 +1253,8 @@ def ptq_warm_start(
     hessian_weighting: str = "none",
     loss_fn=None,
     hessian_gpu_budget_gib: float = 24.0,
+    rotate: bool = False,
+    rotate_seed: int = 0,
     progress: bool = True,
     **counter_kw,
 ) -> SwapReport:
@@ -1256,7 +1280,13 @@ def ptq_warm_start(
     ``hessian_weighting='end_loss'`` collects GuidedQuant-style loss-weighted Hessians
     (one backward per calibration batch, no weight updates; see
     ``collect_hessians_guided``). Not combinable with ``calibration='asym'`` yet.
+
+    ``rotate=True`` folds the R1 residual-stream rotation into the weights before any
+    Hessian is collected (see ``maybe_rotate_residual_stream``); measured 1.40x better PPL
+    (0.5B, align/sym, salient 1%: 346.9 -> 247.9) for ~1 s of extra solve time. The packed
+    layer layout is unaffected — only the basis the quantizer sees.
     """
+    maybe_rotate_residual_stream(model, rotate, rotate_seed)
     stacked_targets = _stacked_moe_targets(model)
     all_legacy_targets = _legacy_expert_targets(model)
     _assert_no_unhandled_moe(model, stacked_targets, all_legacy_targets)

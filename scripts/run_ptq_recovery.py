@@ -78,6 +78,13 @@ IN_SWEEP_REFIT = env_bool("IN_SWEEP_REFIT", True)
 # 65k calib, never lost -- research/results/SALIENT_REFIT_WITNESS.md). Off by default until a
 # deploy-scale warm gate.
 SALIENT_REFIT = os.environ.get("SALIENT_REFIT", "none")
+# ROTATE=1 folds the R1 residual-stream rotation (donor/rotate.py) into the weights before
+# any Hessian is collected. Exactly output-preserving (0.5B PPL 11.764424 -> 11.764425) and
+# free at runtime; measured 1.40x better PTQ PPL on 0.5B (align/sym, salient 1%: 346.9 ->
+# 247.9). It does NOT replace the salient channel (-5.2x without it). Applies to the dense
+# warm-start path only; the streaming converter materializes blocks incrementally.
+ROTATE = env_bool("ROTATE", False)
+ROTATE_SEED = int(os.environ.get("ROTATE_SEED", "0"))
 # CALIBRATION=asym switches to the GPTAQ-style cascade objective ||X_q Q - X_fp W||^2
 # (donor/asym.py): sequential per-chunk solve against quantized inputs. Costs a resident
 # fp copy of the model + 2*ceil(n_layers/ASYM_CHUNK_LAYERS) calibration passes.
@@ -309,6 +316,7 @@ if resume_payload is None:
         salient_scope=SALIENT_SCOPE,
         in_sweep_refit=IN_SWEEP_REFIT,
         salient_refit=SALIENT_REFIT,
+        rotate=ROTATE, rotate_seed=ROTATE_SEED,
         calibration=CALIBRATION, asym_chunk_layers=ASYM_CHUNK_LAYERS,
         asym_strength=ASYM_STRENGTH, asym_passes=ASYM_PASSES,
         asym_fp_device=ASYM_FP_DEVICE,
