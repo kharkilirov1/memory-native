@@ -10,7 +10,7 @@ from __future__ import annotations
 import torch
 
 from .counter import decode_state, encode_state
-from .fused_update import HAS_TRITON, hash_u32, uniform01
+from .fused_update import HAS_TRITON, hash_u32, uniform01, uniform01_seeded
 
 __all__ = [
     "HAS_TRITON",
@@ -26,6 +26,19 @@ __all__ = [
     "triton_group_counter_update_fused",
     "zero_packed_codes",
 ]
+
+
+def _broadcast_groups(values: torch.Tensor, group: int, in_features: int) -> torch.Tensor:
+    """``[out, n_groups] -> [out, in_features]`` without an arange+div index gather.
+
+    ``repeat_interleave`` is the same mapping as ``values[:, arange(in) // group]`` whenever
+    the last group is full; the partial-group case keeps the gather. Measured 0.9 ms vs
+    15.9 ms per call at 1536x1536 on the CPU box, and the update chain needs three of them.
+    """
+    if in_features % group == 0:
+        return values.repeat_interleave(group, dim=1)
+    positions = torch.arange(in_features, device=values.device)
+    return values[:, torch.div(positions, group, rounding_mode="floor")]
 
 
 def _validate_layout(codes: torch.Tensor, scale: torch.Tensor, perm: torch.Tensor, group: int) -> None:
@@ -99,7 +112,9 @@ def group_counter_update_hashsr(
     group_idx = torch.div(
         torch.arange(in_features, device=codes_perm.device), group, rounding_mode="floor"
     )
-    code_value = t + float(residual_alpha) * c / C
+    # strict ternary readout (alpha=0): the residual c does not enter the scale gradient,
+    # so skip the two full [out, in] temporaries of `t + alpha*c/C` (bit-exact: + 0.0 is a no-op).
+    code_value = t if residual_alpha == 0 else t + float(residual_alpha) * c / C
     grad_scale = torch.zeros_like(scale)
     grad_scale.scatter_add_(1, group_idx.unsqueeze(0).expand(out, -1), gw * code_value)
     counts = torch.bincount(group_idx, minlength=groups).to(scale.dtype).sqrt().clamp_min(1.0)
@@ -107,13 +122,16 @@ def group_counter_update_hashsr(
 
     scale_old = scale.clone()
     scale_new = (scale_old - float(lr_scale) * grad_scale).clamp_(1e-5, 10.0)
-    s_old_col = scale_old[:, group_idx]
-    s_new_col = scale_new[:, group_idx]
+    s_old_col = _broadcast_groups(scale_old, group, in_features)
+    s_new_col = _broadcast_groups(scale_new, group, in_features)
 
     rows = torch.arange(out, device=codes_perm.device, dtype=torch.int64).unsqueeze(1)
     original_cols = perm.to(device=codes_perm.device, dtype=torch.int64).unsqueeze(0)
     elem = rows * in_features + original_cols
-    rnd = uniform01((int(seed) ^ hash_u32(elem)) & 0xFFFFFFFF)
+    if out * in_features < 2 ** 32:
+        rnd = uniform01_seeded(elem, seed)      # mask-free hash, bit-identical here
+    else:
+        rnd = uniform01((int(seed) ^ hash_u32(elem)) & 0xFFFFFFFF)
     tick = (-float(lr)) * (gw / denom) * (C / s_new_col)
     value = c * (s_old_col / s_new_col) + tick
     floor = torch.floor(value)
@@ -234,7 +252,7 @@ def group_counter_update_grouplocal_hashsr(
         group_norm = (g_sq * counts).sqrt() / denom
         denom = denom / (clip / group_norm.clamp_min(1e-30)).clamp_max(1.0)
 
-    code_value = t + float(residual_alpha) * c / C
+    code_value = t if residual_alpha == 0 else t + float(residual_alpha) * c / C
     grad_scale = torch.zeros_like(scale)
     grad_scale.scatter_add_(1, idx_expand, gw * code_value)
     grad_scale.div_(counts.sqrt().clamp_min(1.0))
@@ -243,14 +261,17 @@ def group_counter_update_grouplocal_hashsr(
     scale_new = (scale_old - float(lr_scale) * grad_scale).clamp_(1e-5, 10.0)
     if active_groups is not None:
         scale_new = torch.where(active_groups.unsqueeze(0), scale_new, scale_old)
-    s_old_col = scale_old[:, group_idx]
-    s_new_col = scale_new[:, group_idx]
-    denom_col = denom[:, group_idx]
+    s_old_col = _broadcast_groups(scale_old, group, in_features)
+    s_new_col = _broadcast_groups(scale_new, group, in_features)
+    denom_col = _broadcast_groups(denom, group, in_features)
 
     rows = torch.arange(out, device=codes_perm.device, dtype=torch.int64).unsqueeze(1)
     original_cols = perm.to(device=codes_perm.device, dtype=torch.int64).unsqueeze(0)
     elem = rows * in_features + original_cols
-    rnd = uniform01((int(seed) ^ hash_u32(elem)) & 0xFFFFFFFF)
+    if out * in_features < 2 ** 32:
+        rnd = uniform01_seeded(elem, seed)      # mask-free hash, bit-identical here
+    else:
+        rnd = uniform01((int(seed) ^ hash_u32(elem)) & 0xFFFFFFFF)
     tick = (-float(lr)) * (gw / denom_col) * (C / s_new_col)
     value = c * (s_old_col / s_new_col) + tick
     floor = torch.floor(value)
