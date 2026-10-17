@@ -1,0 +1,42 @@
+{
+ "measured_commit": "ab39b3f3b13fc663f58730e25eaf214f6ec17570",
+ "device": "NVIDIA A100-SXM4-40GB",
+ "harness": "scripts/verify_counter_semantics.py",
+ "summary": {
+  "checks": 10,
+  "failures": [
+   "zero_lr_leaves_params_unchanged (4096x4096 only)"
+  ]
+ },
+ "passes": {
+  "zero_lr_noop_1024": {
+   "state_bytes_equal": true,
+   "scale_bitwise_equal": true,
+   "v_updated_by_design": true
+  },
+  "decimation_restricted": "all cases pass: inactive groups' codes AND scales bitwise unchanged, every active group changed, for dec 4 and 8 at 1024^2 and 4096^2",
+  "one_update_per_step": "delta == out*in for two consecutive steps, both shapes",
+  "oracle_parity_quanta": {
+   "1024x1024": {
+    "codes_mismatched": 1586,
+    "codes_total": 1048576,
+    "frac": 0.0015,
+    "max_code_delta": 12
+   },
+   "4096x4096": {
+    "codes_mismatched": 26092,
+    "codes_total": 16777216,
+    "frac": 0.0016,
+    "max_code_delta": 13
+   },
+   "note": "fused Triton updater vs torch fp32 oracle: the fused correlation runs on TF32 tensor cores, so ~0.15% of codes land on a different SR quantum; this is the documented quanta-level contract, not bit-exactness"
+  }
+ },
+ "open_defect": {
+  "name": "fused group updater is not a strict no-op at lr=0 on large layers",
+  "observed": "4096x4096 layer, lr=0, lr_scale=0: 2 of 16,777,216 codes changed by one quantum (2048^2: 1 of 4,194,304). The torch reference changes 0.",
+  "scope": "probability ~1-2e-7 per code per step; only the fused CUDA group kernel; the torch oracle path is exact",
+  "impact": "bounded: one SR quantum on ~1e-7 of codes per step; cannot explain any quality or speed result here, but violates the strict no-op contract and needs a fix",
+  "next_steps": "instrument the kernel's epilogue for the affected (row, group); suspect the masked/tail path or a value written by a neighbouring program in the same 3-byte pack; add a bitexact no-op regression test once fixed"
+ }
+}

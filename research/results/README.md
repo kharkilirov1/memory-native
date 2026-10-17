@@ -5,6 +5,31 @@ forecasts, and negative results. Evidence completeness differs by experiment: ma
 early T4 logs are committed; some later runs exist only as Markdown summaries or
 external Drive/Kaggle artifacts. A historical table is not a complete raw witness.
 
+## Compute bottleneck: full-step decomposition, the no-FP32-cache path, and a real training gate (2026-10-17/18, A100)
+
+[`compute_bottleneck_2026_10_17/REPORT.md`](compute_bottleneck_2026_10_17/REPORT.md)
+measures where a packed-counter training step actually spends its time and memory, whether
+the fp32 weight cache can be dropped without losing speed, and runs the repo's real char-LM
+gate (2 seeds, same arch/data/budget) against AdamW.
+
+Key measured rows (A100, commit `ab39b3f`):
+- 4096^2/B=512 full step: dense AdamW 3.07 ms (64 MB peak) vs packed cache dec8 **2.67 ms
+  (17 MB peak)** = 0.87x time with 3.8x less peak allocated VRAM; dense 4096^2/B=1024 is
+  4.82 vs 4.69 ms.
+- Dropping the persistent cache is a **memory regression**: decode-once per step peaks at
+  144 MB (two live decodes), and the truly fused decode-in-GEMM step is 98 ms (retuning its
+  tiles recovers 3.2x but it stays 3.6-7.8x off cuBLAS).
+- Small layers remain slower (896^2-2048^2: 1.1-1.3x at the layer level).
+- Real char-LM training: counter_rms mean val **1.9605** vs dense **2.1753** (better), with
+  **3.7x less persistent state** (3.31 vs 12.21 MiB) and 1.05x less peak VRAM (324 vs
+  342 MiB), but **~4x fewer tokens/s** and ~2.1x longer time-to-equal-quality.
+- New verification harness: decimation is bitwise-restricted to active groups, exactly one
+  update per step; found an open defect (4096^2 fused updater moves 2 of 16.8M codes at
+  lr=0, documented with reproduction).
+
+Also corrects the earlier LUT report: a [512,1024,81] FP32 LUT is 169.9 MB (162.0 MiB),
+not 682 MB, and adds the required cached-weight-index serving mode.
+
 ## LUT-GEMM multi-token scaling (2026-10-17, A100)
 
 Independent reproduction and extension of the M=1 LUT result to M=1..512 tokens, plus a

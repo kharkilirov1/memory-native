@@ -197,7 +197,7 @@ semantics for strict α=0; the loss-vs-wall-clock comparison remains open.
 |---|---:|
 | packed 6-bit state (0.75 B/param) | 12.58 MB |
 | weight-side index table `[N, K/4]` int8 | 4.19 MB |
-| LUT `[M, K/4, 81]` fp32 | M=1: 1.33 MB · M=32: 42.5 MB · M=128: 170 MB · M=512: 682 MB (not materialized in the sweep beyond what peak reports show) |
+| LUT `[M, K/4, 81]` fp32 | **512·1024·81·4 = 169.9 MB = 162.0 MiB at M=512** (M=1: 1.33 MB · M=32: 42.5 MB · M=128: 169.9 MB · M=512: 169.9 MB) |
 | measured peak, LUT total | M=1: 4.3 MB · M=32: 15.1 MB · M=128: 48.5 MB · M=512: 182 MB |
 | measured peak, LUT gather only (amortized) | output only: 8 MB at M=512 |
 | measured peak, fused decode | 8 MB at M=512 |
@@ -236,6 +236,27 @@ Negative results worth keeping:
   launch-bound, not because it is efficient.
 
 ---
+
+## 5b. Cached-weight-index serving mode (follow-up run, required correction)
+
+The first sweep only compared "LUT total" (index table rebuilt every call) with "LUT
+amortized" (gather only, everything prebuilt). The realistic serving number — weight-side
+index table cached, LUT rebuilt for every new input batch, then the gather — was added as
+`lut_cached_idx` and measured at 4096^2 with CUDA events (15 iters, 3 reps):
+
+| M | lut_total | **lut_cached_idx** | lut_amortized | peak alloc (cached_idx) |
+|---:|---:|---:|---:|---:|
+| 1 | 0.2133 ms | **0.0911 ms** | 0.0524 ms | 0.3 MiB |
+| 8 | 0.2658 | **0.1128** | 0.0649 | 2.7 MiB |
+| 64 | 0.4661 | **0.3563** | 0.3325 | 21.2 MiB |
+| 512 | 4.2935 | **4.1639** | 4.0329 | 170.0 MiB |
+
+Reading: the weight-side index table is worth 0.12–4.13 ms per call at M=512 (the gap
+between total and cached_idx), and the per-input LUT build is worth 0.04 ms at M=1 but
+grows linearly (it dominates at large M). The measured peak for `lut_cached_idx` at M=512
+is **170.0 MiB**, exactly the corrected 162.0 MiB LUT plus the 8 MB output — the earlier
+"682 MB" figure was an arithmetic slip (it multiplied the table by 4) and would have
+overstated this cost 4×.
 
 ## 6. Reproduction
 
