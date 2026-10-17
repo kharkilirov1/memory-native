@@ -656,7 +656,7 @@ if HAS_TRITON:
 
     @triton.jit
     def _group_fused_update_kernel(
-        state_ptr, scale_ptr, v_ptr, x_ptr, go_ptr, perm_ptr, seed_val, groups_ptr,
+        state_ptr, scale_ptr, v_ptr, x_ptr, go_ptr, perm_ptr, seed_ptr, groups_ptr,
         dense_ptr,
         M, N, K, G, C, group_size, lr, lr_scale, rms_beta, rms_eps, clip, residual_alpha,
         stride_sn, stride_xm, stride_xk, stride_gom, stride_gon,
@@ -681,7 +681,7 @@ if HAS_TRITON:
             grp = tl.load(groups_ptr + pid_g).to(tl.int32)
         else:
             grp = pid_g
-        seed = seed_val.to(tl.uint32)
+        seed = tl.load(seed_ptr).to(tl.uint32)
         offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
         nmask = offs_n < N
         offs_p = grp * group_size + tl.arange(0, BLOCK_K)
@@ -1173,11 +1173,7 @@ def triton_group_counter_update_fused(
         raise ValueError(f"group-local v must be [out, n_groups]={N, G}, got {tuple(v.shape)}")
     if K % 4 or G != (K + group - 1) // group or perm.numel() != K:
         raise ValueError("invalid group layout")
-    # Triton takes python ints as signed i32; re-encode so the kernel's .to(uint32)
-    # recovers the original 32-bit seed bit-for-bit.
-    seed_i = int(seed) & 0xFFFFFFFF
-    if seed_i >= 2**31:
-        seed_i -= 2**32
+    seed_t = torch.tensor([int(seed) & 0xFFFFFFFF], dtype=torch.int64, device=x2.device)
     bf16, fp16 = _dtype_flags(x2)
     perm_long = perm.to(dtype=torch.long)
     # One coalesced act-order copy of x ([M, K] or [M, K_active], input dtype -- far
@@ -1215,7 +1211,7 @@ def triton_group_counter_update_fused(
         write_dense = True
     with torch.cuda.device(x2.device):  # launch on the tensors' GPU, not the current one
         _group_fused_update_kernel[grid](
-            state, scale, v, x_perm, go2, perm, seed_i, groups_t,
+            state, scale, v, x_perm, go2, perm, seed_t, groups_t,
             dense_arg,
             M, N, K, G, C, group,
             float(lr), float(lr_scale), float(rms_beta), float(rms_eps),
