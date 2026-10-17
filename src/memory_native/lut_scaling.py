@@ -116,6 +116,7 @@ def lut_build(x_perm: torch.Tensor, *, block_p: int = 32) -> torch.Tensor:
         with torch.cuda.device(x_perm.device):
             _lut_build_kernel[grid](
                 x_perm.contiguous(), lut, m, p, BLOCK_P=block_p, LUT=LUT_ENTRIES,
+                LUT_PAD=128,
             )
         return lut
     return build_lut_blocks(x_perm)
@@ -194,12 +195,14 @@ if HAS_TRITON:  # pragma: no cover - compiled on CUDA only
         tl.store(idx_ptr + offs_n[:, None] * P + offs_p[None, :], idx.to(tl.int8), mask=mask)
 
     @triton.jit
-    def _lut_build_kernel(x_ptr, lut_ptr, M, P, BLOCK_P: tl.constexpr, LUT: tl.constexpr):
+    def _lut_build_kernel(x_ptr, lut_ptr, M, P, BLOCK_P: tl.constexpr, LUT: tl.constexpr,
+                          LUT_PAD: tl.constexpr):
         """One program per token: [4*P] activations -> [P, 81] partial sums.
 
         Entry ``i`` of the table is ``sum_k d_k(i) * x_k`` with ``d_k(i)`` the ternary
         digits of ``i`` in base 3 (digit k at 3**k), so the whole table is four broadcast
-        FMAs over the 81 digits rather than 81 dot products.
+        FMAs over the 81 digits rather than 81 dot products. ``LUT_PAD`` is the next power
+        of two above 81 (Triton ranges must be powers of two); the tail is masked out.
         """
         pid_m = tl.program_id(0)
         pid_p = tl.program_id(1)
@@ -210,15 +213,18 @@ if HAS_TRITON:  # pragma: no cover - compiled on CUDA only
         x1 = tl.load(base + 1, mask=mask_p, other=0.0)
         x2 = tl.load(base + 2, mask=mask_p, other=0.0)
         x3 = tl.load(base + 3, mask=mask_p, other=0.0)
-        d = tl.arange(0, LUT)
-        d0 = (d % 3) - 1
-        d1 = ((d // 3) % 3) - 1
-        d2 = ((d // 9) % 3) - 1
-        d3 = ((d // 27) % 3) - 1
-        acc = (x0[:, None] * d0[None, :] + x1[:, None] * d1[None, :]
-               + x2[:, None] * d2[None, :] + x3[:, None] * d3[None, :])
+        d = tl.arange(0, LUT_PAD)
+        q3 = d // 3
+        q9 = d // 9
+        q27 = d // 27
+        d0 = d - q3 * 3
+        d1 = q3 - q9 * 3
+        d2 = q9 - q27 * 3
+        d3 = q27
+        acc = (x0[:, None] * (d0[None, :] - 1) + x1[:, None] * (d1[None, :] - 1)
+               + x2[:, None] * (d2[None, :] - 1) + x3[:, None] * (d3[None, :] - 1))
         tl.store(lut_ptr + pid_m * (P * LUT) + offs_p[:, None] * LUT + d[None, :],
-                 acc, mask=mask_p[:, None])
+                 acc, mask=mask_p[:, None] & (d[None, :] < LUT))
 
     @triton.jit
     def _lut_multi_kernel(lut_ptr, idx_ptr, scale_ptr, out_ptr, M, N, P, G,
