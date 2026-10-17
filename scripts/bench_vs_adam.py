@@ -59,11 +59,12 @@ def _dense(in_features: int, out_features: int, batch: int, dev: str, run_time: 
 
 def _counter(in_features: int, out_features: int, batch: int, dev: str,
              mode: str, group: int, C: int, run_time: float,
-             stats_scope: str = "row") -> dict:
+             stats_scope: str = "row", cache_bytes: int = 0) -> dict:
     torch.manual_seed(0)
     layer = PackedGroupScaleCounterLinear(
         in_features, out_features, group=group, C=C,
-        kernel_mode=mode, lr=1e-3, stats_scope=stats_scope).to(dev)
+        kernel_mode=mode, lr=1e-3, stats_scope=stats_scope,
+        weight_cache_bytes=cache_bytes).to(dev)
     x = torch.randn(batch, in_features, device=dev)
     go = torch.randn(batch, out_features, device=dev)
 
@@ -90,6 +91,8 @@ def main(argv=None) -> int:
     ap.add_argument("--C", type=int, default=11)
     ap.add_argument("--mode", choices=["gemm", "triton", "hybrid", "both", "all"], default="all")
     ap.add_argument("--stats-scope", choices=["row", "group"], default="row")
+    ap.add_argument("--cache-bytes", type=int, default=0,
+                    help="per-layer decoded-weight cache cap (0 = off, e.g. 64<<20)")
     ap.add_argument("--run-time", type=float, default=2.0)
     args = ap.parse_args(argv)
 
@@ -106,7 +109,8 @@ def main(argv=None) -> int:
     modes = {"both": ["gemm", "triton"], "all": ["gemm", "triton", "hybrid"]}.get(
         args.mode, [args.mode])
     counter = {
-        m: _counter(I, O, B, dev, m, args.group, args.C, args.run_time, args.stats_scope)
+        m: _counter(I, O, B, dev, m, args.group, args.C, args.run_time,
+                    args.stats_scope, args.cache_bytes)
         for m in modes
     }
 
