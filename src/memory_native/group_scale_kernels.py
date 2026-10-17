@@ -1173,7 +1173,11 @@ def triton_group_counter_update_fused(
         raise ValueError(f"group-local v must be [out, n_groups]={N, G}, got {tuple(v.shape)}")
     if K % 4 or G != (K + group - 1) // group or perm.numel() != K:
         raise ValueError("invalid group layout")
+    # Triton takes python ints as signed i32; re-encode so the kernel's .to(uint32)
+    # recovers the original 32-bit seed bit-for-bit.
     seed_i = int(seed) & 0xFFFFFFFF
+    if seed_i >= 2**31:
+        seed_i -= 2**32
     bf16, fp16 = _dtype_flags(x2)
     perm_long = perm.to(dtype=torch.long)
     # One coalesced act-order copy of x ([M, K] or [M, K_active], input dtype -- far
