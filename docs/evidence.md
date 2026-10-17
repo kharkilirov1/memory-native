@@ -16,6 +16,7 @@ measured performance depends on the workload, hardware and implementation path.
 | Per-parameter bytes | [State accounting](../research/results/STATE_ACCOUNTING.md) | 0.750 B/param is the code body; 0.906 persistent / 1.002 resident measured; ~23 B/param for one pure-PyTorch step |
 | Step speed (CPU) | [Step speedup A/B](../research/results/STEP_SPEED_2026_10_17.md) | −15.5% on the pure-PyTorch step, bit-identical; the automaton chain still dominates |
 | PTQ recipe (GPU, 0.5B) | [PTQ recipe + rotation](../research/results/PTQ_RECIPE_2026_10_17.md) | align+salient+iters≥4 = 12.3× PPL vs defaults; rotation +1.40× (does not replace salient); sketching rejected |
+| LUT-GEMM (A100, M=1) | [LUT-GEMM measurement](../research/results/LUT_GEMM_2026_10_17.md) | 2.7× faster than fused decode-in-GEMM for single-token decode, exact fp32; M=1 only, no salient path, not wired into a layer |
 
 Six bits are the coefficient code size, not total training memory. Count scales, RMS
 statistics, floating-point model components, activations and temporary buffers. Kernel

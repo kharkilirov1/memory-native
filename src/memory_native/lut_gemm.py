@@ -151,10 +151,10 @@ if HAS_TRITON:  # pragma: no cover - needs CUDA to compile and run
         c1 = ((b0 >> 6) | (b1 << 2)) & 0x3F
         c2 = ((b1 >> 4) | (b2 << 4)) & 0x3F
         c3 = (b2 >> 2) & 0x3F
-        t0 = tl.floordiv(c0, TM) - 1
-        t1 = tl.floordiv(c1, TM) - 1
-        t2 = tl.floordiv(c2, TM) - 1
-        t3 = tl.floordiv(c3, TM) - 1
+        t0 = c0 // TM - 1
+        t1 = c1 // TM - 1
+        t2 = c2 // TM - 1
+        t3 = c3 // TM - 1
         idx = (t0 + 1) + 3 * (t1 + 1) + 9 * (t2 + 1) + 27 * (t3 + 1)
         vals = tl.load(lut_ptr + offs_p[None, :] * LUT + idx,
                        mask=mask_n[:, None] & mask_p[None, :], other=0.0)
