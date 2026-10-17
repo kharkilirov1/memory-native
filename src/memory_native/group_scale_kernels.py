@@ -999,8 +999,12 @@ def triton_group_counter_update_from_io(
         )
     if not HAS_TRITON:
         raise RuntimeError("triton not available")
-    x2 = x.reshape(-1, x.shape[-1]).contiguous()
-    go2 = grad_out.reshape(-1, grad_out.shape[-1]).contiguous()
+    x2 = x.reshape(-1, x.shape[-1])
+    if not x2.is_contiguous():
+        x2 = x2.contiguous()
+    go2 = grad_out.reshape(-1, grad_out.shape[-1])
+    if not go2.is_contiguous():
+        go2 = go2.contiguous()
     state = state_packed_perm
     if not all(t.is_cuda for t in (state, scale, v, x2, go2, perm)):
         raise ValueError("strict group update requires CUDA tensors")
@@ -1173,8 +1177,12 @@ def triton_group_counter_update_fused(
         )
     if not HAS_TRITON:
         raise RuntimeError("triton not available")
-    x2 = x.reshape(-1, x.shape[-1]).contiguous()
-    go2 = grad_out.reshape(-1, grad_out.shape[-1]).contiguous()
+    x2 = x.reshape(-1, x.shape[-1])
+    if not x2.is_contiguous():
+        x2 = x2.contiguous()
+    go2 = grad_out.reshape(-1, grad_out.shape[-1])
+    if not go2.is_contiguous():
+        go2 = go2.contiguous()
     state = state_packed_perm
     if not all(t.is_cuda for t in (state, scale, v, x2, go2, perm)):
         raise ValueError("fused group update requires CUDA tensors")

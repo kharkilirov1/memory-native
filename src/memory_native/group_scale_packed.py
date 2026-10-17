@@ -407,8 +407,17 @@ class PackedGroupScaleCounterLinear(RoundingStreamMixin, nn.Module):
         if cache is not None and cache[0] == key:
             return cache[1]
         w = self.visible_weight(dtype=dtype)
-        self._weight_cache = (key, w)
+        self._weight_cache = (key, w, w.t())
+        self._weight_cache_t = (key, w.t())
         return w
+
+    def _cached_visible_weight_t(self, dtype: torch.dtype | None = None) -> torch.Tensor:
+        """Transposed cached weight (the forward reads ``x @ W.T``; the view is free to keep)."""
+        w = self._cached_visible_weight(dtype=dtype)
+        cache = self._weight_cache
+        if cache is not None and len(cache) == 3 and cache[1] is w:
+            return cache[2]
+        return w.t()
 
     def _salient_sparse(self) -> torch.Tensor | None:
         """Salient overrides as a coalesced COO [out, in] fp32 (cached per device)."""
@@ -463,7 +472,7 @@ class PackedGroupScaleCounterLinear(RoundingStreamMixin, nn.Module):
                 # sparse.mm requires matching dtypes — A is fp32, activations bf16/fp16.
                 y2 = y2 + torch.sparse.mm(A, x2.t().float()).t().to(y2.dtype)
             return y2
-        return x2 @ self._cached_visible_weight(dtype=x2.dtype).t()
+        return x2 @ self._cached_visible_weight_t(dtype=x2.dtype)
 
     def _grad_x_2d(self, go2: torch.Tensor) -> torch.Tensor:
         if self._use_triton(go2):
