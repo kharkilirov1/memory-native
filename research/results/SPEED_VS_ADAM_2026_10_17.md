@@ -201,3 +201,29 @@ around the custom Function plus the small-shape kernel (0.22 ms, only 64 program
 axis or tune BLOCK_N/M), and compare a small-layer fallback path.
 
 Tests: 23 CUDA+CPU packed tests pass.
+
+
+## Round 6: the small-shape floor is the kernel itself, not the tiling
+
+Tuning the fused kernel's tile shape at the small shapes (direct kernel calls, same args,
+decimation active) moves nothing:
+
+| shape / batch / dec | best 4 tile configs (ms) |
+|---|---|
+| 1024^2 / 512 / 4 | BN32/BM64/w8 0.220, BN16/BM32/w4 0.211, BN8/BM64/w4 0.225, BN16/BM64/w4 0.216 |
+| 2048^2 / 256 / 4 | BN32/BM64/w8 **0.184**, BN16/* 0.257, BN8 0.265, BN32/BM32 0.297 |
+
+So the kernel has a ~0.2 ms floor at these shapes that ~64-256 programs cannot amortize:
+the arithmetic is microseconds; the cost is the per-program serial M-loop and epilogue.
+Anything that closes it has to change structure (split the M axis with a two-pass stats
+reduction, or move the update out of the autograd Function's backward), not the tile size.
+
+Current standing of the objective:
+- **met for 12B-class shapes**: 4096^2/B=512 full step 2.544 vs dense 3.047 = 0.83x, with
+  fwd 1.00x, grad_x 1.00x and the updater at 0.40x of AdamW;
+- **not yet met for small layers** (1024^2 1.40x, 2048^2 1.46x, 1536^2/B=64 1.25x): the
+  kernel floor above plus ~0.15 ms of autograd/dispatch around the custom Function exceed
+  what AdamW costs on a 1-2M-parameter layer.
+- semantics/quality clause is satisfied and pinned: 5 CUDA bit-exactness tests against the
+  torch oracle (SR, carry, group scales), 18 packed tests, and the dense emission only
+  writes a derived buffer, so strict-alpha=0 outputs are unchanged.
