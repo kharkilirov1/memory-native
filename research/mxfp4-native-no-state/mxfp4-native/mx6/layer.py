@@ -422,7 +422,7 @@ class MXNLinear(nn.Module):
 
     def __init__(self, in_features: int, out_features: int, fmt: PackedNA,
                  lr: float = 0.01, rms_beta: float = 0.9, rms_eps: float = 1e-3,
-                 scale_headroom: float = 2.0):
+                 scale_headroom: float = 1.5):
         super().__init__()
         assert in_features % pack.BLOCK == 0, f"in_features must be multiple of {pack.BLOCK}"
         self.in_features, self.out_features = in_features, out_features
