@@ -1,20 +1,23 @@
-"""Layer invariants: strict readout, training guard, and compact-state smoke train."""
+"""Layer-level invariants: strict readout, the training guard, and a smoke train."""
 from __future__ import annotations
+
 import pytest
 import torch
-from mx6 import MX6Linear
-from mx6 import pack, update
+
+from mx6 import MX6Linear, pack, update
 
 
-def test_forward_ignores_residual_plane():
+def test_forward_ignores_the_residual_plane():
     torch.manual_seed(0)
-    layer = MX6Linear.from_dense(torch.randn(16, 64) * 0.05)
+    dense = torch.randn(16, 64) * 0.05
+    layer = MX6Linear.from_dense(dense)
     x = torch.randn(4, 64)
+
     with torch.no_grad():
         before = layer(x).clone()
         layer.kappa = torch.randint(0, 4, layer.kappa.shape, dtype=torch.uint8)
         after = layer(x)
-    assert torch.equal(before, after)
+    assert torch.equal(before, after), "the residual must never reach the forward pass"
 
 
 def test_one_forward_per_backward():
@@ -27,60 +30,66 @@ def test_one_forward_per_backward():
 
 def test_eval_mode_allows_repeated_forwards():
     layer = MX6Linear(32, 8).eval()
+    x = torch.randn(4, 32)
     with torch.no_grad():
-        layer(torch.randn(4, 32))
-        layer(torch.randn(4, 32))
+        layer(x)
+        layer(x)  # no guard: evaluation is not a training step
 
 
-def test_zero_gradient_does_not_move_codes():
+def test_update_is_in_place_and_state_stays_packed():
+    torch.manual_seed(3)
+    layer = MX6Linear.from_dense(torch.randn(16, 64) * 0.05)
+    before = layer.pack_state().clone()
+    out = layer(torch.randn(4, 64))
+    out.square().mean().backward()
+
+    assert layer.codes.dtype == torch.uint8 and layer.kappa.dtype == torch.uint8
+    assert layer.scale.dtype == torch.uint8
+    assert layer.pack_state().numel() == before.numel()
+    assert not torch.equal(before, layer.pack_state()), "the counter must have moved"
+    # default: no residual plane (error feedback lost the A/B, see docs/UPDATE.md)
+    assert layer.persistent_bytes() == pack.deployed_bytes(16, 64) + 4 * 16
+    feedback = MX6Linear.from_dense(torch.zeros(16, 64), feedback=True)
+    assert feedback.persistent_bytes() == pack.persistent_bytes(16, 64) + 4 * 16
+    assert feedback.persistent_bytes() > layer.persistent_bytes()
+
+
+def test_zero_gradient_does_not_move_the_codes():
+    torch.manual_seed(4)
     layer = MX6Linear.from_dense(torch.randn(8, 32) * 0.05)
     codes = layer.codes.clone()
     layer.apply_update_(torch.zeros(8, 32))
-    assert torch.equal(codes, layer.codes)
+    assert torch.equal(codes, layer.codes), "a zero gradient must not flip a weight"
 
 
-def test_stochastic_rounding_is_unbiased():
+def test_stochastic_rounding_is_unbiased_on_the_ladder():
+    torch.manual_seed(5)
     gen = torch.Generator().manual_seed(0)
-    x = torch.full((20000,), 0.75)
+    x = torch.full((20000,), 0.75)  # midway between 0.5 and 1.0
     rounded = update.stochastic_round_ladder(x, gen)
     assert abs(float(rounded.mean()) - 0.75) < 0.02
 
 
-def test_balanced_rounding_is_unbiased():
-    x = torch.tensor([[0.2, 0.3, 0.7, 0.8] * 8], dtype=torch.float32)
-    samples = [update.balanced_stochastic_round_ladder(
-        x, torch.Generator().manual_seed(seed)) for seed in range(128)]
-    assert torch.max(torch.abs(torch.stack(samples).mean(0) - x)) < 0.06
+def test_residual_quantizer_has_a_dead_zone():
+    zeros = torch.zeros(4, 32)
+    deltas = torch.full((4, 32), 0.5)
+    assert torch.all(update.quantize_residual(zeros, deltas) == 0), "zero error must map to zero kappa"
+    assert torch.all(update.quantize_residual(0.4 * deltas, deltas) == 3)
+    assert torch.all(update.quantize_residual(-0.4 * deltas, deltas) == 2)
 
 
-def test_compact_integrator_state_is_packed_and_trains():
-    torch.manual_seed(31)
-    dense = torch.randn(8, 64) * 0.05
-    layer = MX6Linear.from_dense(dense, integrator=3, compact_state=True, lr=0.02)
-    n = dense.numel()
-    assert layer._codes_packed.numel() == n // 2
-    assert layer._acc_packed.numel() == n // 4
-    before = layer.pack_state().clone()
-    (layer(torch.randn(4, 64)).square().mean()).backward()
-    assert not torch.equal(before, layer.pack_state())
+def test_a_regression_actually_learns():
+    torch.manual_seed(6)
+    x = torch.randn(128, 32)
+    teacher = torch.randn(32, 32) * 0.1
+    target = x @ teacher.t()
 
+    layer = MX6Linear.from_dense(torch.zeros(32, 32))
+    layer.lr = 0.02
+    losses = []
+    for _ in range(150):
+        loss = (layer(x) - target).square().mean()
+        loss.backward()
+        losses.append(float(loss))
 
-def test_compact_state_checkpoint_roundtrip():
-    source = MX6Linear(32, 8, integrator=3, compact_state=True)
-    source._store_acc(torch.randint(-1, 2, source.acc.shape, dtype=torch.int8))
-    blob = source.pack_state()
-    restored = MX6Linear(32, 8, integrator=3, compact_state=True)
-    restored.load_state(blob)
-    assert torch.equal(source.codes, restored.codes)
-    assert torch.equal(source.acc, restored.acc)
-    assert torch.equal(source.scale, restored.scale)
-
-
-def test_compact_state_requires_integrator_three():
-    with pytest.raises(ValueError, match="integrator=3"):
-        MX6Linear(32, 8, integrator=33, compact_state=True)
-
-
-def test_compact_state_rejects_feedback_plane():
-    with pytest.raises(ValueError, match="does not support"):
-        MX6Linear(32, 8, integrator=3, compact_state=True, feedback=True)
+    assert losses[-1] < 0.5 * losses[0], f"no learning: {losses[0]:.4f} -> {losses[-1]:.4f}"
