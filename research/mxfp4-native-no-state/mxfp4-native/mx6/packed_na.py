@@ -112,7 +112,7 @@ class PackedNA:
 
     # ── quantize / dequantize ─────────────────────────────────────────────────
 
-    def quantize(self, w: torch.Tensor, headroom: float = 2.0
+    def quantize(self, w: torch.Tensor, headroom: float = 1.5
                  ) -> tuple[torch.Tensor, torch.Tensor]:
         sb = self.scale_bytes(w, headroom)
         s = self.scale_floats(sb).repeat_interleave(BLOCK, dim=1)
@@ -169,8 +169,10 @@ class PackedNA:
 
 # ── production configurations ─────────────────────────────────────────────────
 
-#: 5-bit format: 5 values, 5 acc levels (C=3), 25 codes → 5 bits
-PackedNA5 = PackedNA(mags_unsigned=[0.0, 0.5, 2.0], C=3)
+#: 5-bit format: 5 values, 5 acc levels (C=3), 25 codes -> 5 bits
+#: Magnitudes {0, 0.5, 3.0} -> {-3, -0.5, 0, 0.5, 3} ("wide" — best in sweep)
+PackedNA5 = PackedNA(mags_unsigned=[0.0, 0.5, 3.0], C=3)
 
-#: 6-bit format: 7 values, 9 acc levels (C=5), 63 codes → 6 bits
-PackedNA6 = PackedNA(mags_unsigned=[0.0, 0.5, 2.0, 4.0], C=5)
+#: 6-bit format: 7 values, 9 acc levels (C=5), 63 codes -> 6 bits
+#: Magnitudes {0, 0.5, 1.0, 6.0} -> {-6, -1, -0.5, 0, 0.5, 1, 6} ("e2m1" — best in sweep)
+PackedNA6 = PackedNA(mags_unsigned=[0.0, 0.5, 1.0, 6.0], C=5)
