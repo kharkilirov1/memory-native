@@ -241,3 +241,140 @@ class MX6Linear(nn.Module):
     def extra_repr(self) -> str:
         return (f"in_features={self.in_features}, out_features={self.out_features}, "
                 f"lr={self.lr}, residual={self.residual_mode}")
+
+
+# ── block-shared accumulator layer (see docs/BLOCK_ACCUMULATOR.md) ─────────────
+
+class _MX6BlockFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x: torch.Tensor, module: "MX6BlockLinear", token: torch.Tensor) -> torch.Tensor:
+        weight = module.weight()
+        ctx.save_for_backward(x, weight, module.codes)
+        ctx.module = module
+        return x @ weight.t()
+
+    @staticmethod
+    def backward(ctx, grad_out: torch.Tensor):
+        x, weight, codes_before = ctx.saved_tensors
+        module = ctx.module
+        grad_x = grad_out @ weight
+        grad_w = grad_out.t() @ x
+        if not torch.equal(codes_before, module.codes):
+            raise RuntimeError("weights changed between forward and backward")
+        with torch.no_grad():
+            module.apply_update_(grad_w)
+        module._pending = False
+        return grad_x, None, None
+
+
+class MX6BlockLinear(nn.Module):
+    """MXFP4 values + 11-bit block-shared accumulator. 4.50 bits/param total.
+
+    The scale byte is split into 5-bit exponent + 3-bit acc-high.  A separate
+    acc-low byte (1 per 32-param block) completes the 11-bit unsigned block
+    accumulator.  The forward pass sees only the 5-bit exponent (standard MXFP4);
+    the accumulator is invisible to inference.
+
+    See ``docs/BLOCK_ACCUMULATOR.md`` for the full design.
+    """
+
+    def __init__(self, in_features: int, out_features: int, lr: float = 0.01,
+                 rms_beta: float = 0.9, rms_eps: float = 1e-3,
+                 C_block: int = 32, scale_headroom: float = 6.0):
+        super().__init__()
+        blocks = pack.check_shape(in_features, out_features)
+        self.in_features, self.out_features = in_features, out_features
+        self.lr, self.rms_beta, self.rms_eps = lr, rms_beta, rms_eps
+        self.C_block = C_block
+        self.scale_headroom = scale_headroom
+
+        init = torch.empty(out_features, in_features).uniform_(
+            -1.0 / in_features ** 0.5, 1.0 / in_features ** 0.5)
+        codes, scale_byte = pack.quantize_split(init, headroom=scale_headroom)
+        self.register_buffer("_codes", codes)
+        self.register_buffer("_scale_byte", scale_byte)          # 5-bit exp | 3-bit acc-high
+        self.register_buffer("_acc_low", torch.zeros(out_features, blocks, dtype=torch.uint8))
+        self.register_buffer("v_rms", torch.full((out_features, 1), rms_eps, dtype=torch.float32))
+        self._token = torch.zeros(0, requires_grad=True)
+        self._pending = False
+
+    @property
+    def codes(self) -> torch.Tensor:
+        return self._codes
+
+    @property
+    def scale_byte(self) -> torch.Tensor:
+        return self._scale_byte
+
+    @property
+    def acc_low(self) -> torch.Tensor:
+        return self._acc_low
+
+    def weight(self) -> torch.Tensor:
+        """Visible weight (float); accumulator is invisible to forward."""
+        return pack.dequantize_split(self._codes, self._scale_byte)
+
+    def latent_weight(self) -> torch.Tensor:
+        """Visible weight + pending block pressure, for analysis only."""
+        w = self.weight()
+        s = pack.scale_floats_split(self._scale_byte).repeat_interleave(pack.BLOCK, dim=1)
+        d = update.delta(self._codes, "rel") * s
+        acc_high = pack.acc_high_get(self._scale_byte)
+        acc = pack.block_acc_combine(acc_high, self._acc_low)
+        # distribute block pressure equally (diagnostic approximation)
+        pressure = acc.to(torch.float32) / self.C_block
+        return w + pressure.repeat_interleave(pack.BLOCK, dim=1) * d / pack.BLOCK
+
+    @classmethod
+    def from_dense(cls, weight: torch.Tensor, **kwargs) -> "MX6BlockLinear":
+        layer = cls(weight.shape[1], weight.shape[0], **kwargs)
+        with torch.no_grad():
+            codes, scale_byte = pack.quantize_split(
+                weight.detach().float(),
+                headroom=kwargs.get("scale_headroom", 6.0))
+            layer._codes.copy_(codes)
+            layer._scale_byte.copy_(scale_byte)
+            layer._acc_low.zero_()
+        return layer
+
+    def persistent_bytes(self) -> int:
+        """Conceptual packed bytes (what a fused kernel would use, not dense tensors)."""
+        blocks = self.in_features // pack.BLOCK
+        code_bytes = self.out_features * self.in_features // 2   # nibble-packed 4-bit
+        block_bytes = self.out_features * blocks * 2              # scale+acc-high + acc-low
+        rms_bytes = self.out_features * 4                          # per-row float32
+        return code_bytes + block_bytes + rms_bytes
+
+    def bits_per_param(self) -> float:
+        return self.persistent_bytes() * 8.0 / (self.out_features * self.in_features)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.shape[-1] != self.in_features:
+            raise ValueError(f"expected last dim {self.in_features}, got {x.shape[-1]}")
+        shape = x.shape
+        if torch.is_grad_enabled() and self.training:
+            if self._pending:
+                raise RuntimeError(
+                    "MX6BlockLinear was forwarded twice before backward; exactly one "
+                    "forward per backward is required")
+            self._pending = True
+            flat = x.reshape(-1, shape[-1])
+            out = _MX6BlockFunction.apply(flat, self, self._token)
+            return out.reshape(*shape[:-1], self.out_features)
+        return x @ self.weight().t()
+
+    def apply_update_(self, grad_w: torch.Tensor) -> None:
+        """Block-accumulator update, called from backward."""
+        self.v_rms, grad_hat = update.rms_update(
+            grad_w.detach().float(), self.v_rms, self.rms_beta, self.rms_eps)
+        new_codes, new_scale, new_acc_low = update.step_with_block_integrator(
+            self._codes, self._scale_byte, self._acc_low,
+            grad_hat, self.lr, C_block=self.C_block,
+            headroom=self.scale_headroom)
+        self._codes.copy_(new_codes)
+        self._scale_byte.copy_(new_scale)
+        self._acc_low.copy_(new_acc_low)
+
+    def extra_repr(self) -> str:
+        return (f"in_features={self.in_features}, out_features={self.out_features}, "
+                f"lr={self.lr}, C_block={self.C_block}")
