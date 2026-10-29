@@ -439,14 +439,18 @@ class MXNLinear(nn.Module):
         self.register_buffer("v_rms", torch.full((out_features, 1), rms_eps))
         self._token = torch.zeros(0, requires_grad=True)
         self._pending = False
+        self._weight_cache: torch.Tensor | None = None
 
     @property
     def codes(self) -> torch.Tensor:
         return self._codes
 
     def weight(self) -> torch.Tensor:
-        """Visible weight (float); accumulator is invisible to forward."""
-        return self.fmt.dequantize(self._codes, self._scale)
+        """Visible weight (float); accumulator is invisible to forward.
+        Cached — re-decodes only after codes change (apply_update_)."""
+        if self._weight_cache is None:
+            self._weight_cache = self.fmt.dequantize_fast(self._codes, self._scale)
+        return self._weight_cache
 
     def persistent_bytes(self) -> int:
         return self.fmt.persistent_bytes(self.out_features, self.in_features)
@@ -485,6 +489,7 @@ class MXNLinear(nn.Module):
             self._codes, self._acc, self._scale, grad_hat, self.lr)
         self._codes.copy_(new_codes)
         self._acc.copy_(new_acc)
+        self._weight_cache = None  # invalidate: codes changed
         # scale is frozen (headroom is an init choice, not an invariant)
 
     def extra_repr(self) -> str:

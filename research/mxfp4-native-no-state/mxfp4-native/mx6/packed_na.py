@@ -126,6 +126,14 @@ class PackedNA:
         mag_idx = (codes.to(torch.long) // self.acc_levels).clamp(0, self.n_vals - 1)
         return self.signed.to(codes.device)[mag_idx] * s
 
+    def dequantize_fast(self, codes: torch.Tensor, sb: torch.Tensor) -> torch.Tensor:
+        """Fused decode: single index_select + multiply (fewer kernel launches)."""
+        s = self.scale_floats(sb).repeat_interleave(BLOCK, dim=1)
+        mag_idx = (codes.to(torch.long) // self.acc_levels).clamp(0, self.n_vals - 1)
+        # index_select is a single fused kernel vs fancy indexing
+        vals = torch.index_select(self.signed.to(codes.device), 0, mag_idx.reshape(-1))
+        return vals.reshape_as(s) * s
+
     # ── update ────────────────────────────────────────────────────────────────
 
     @staticmethod
