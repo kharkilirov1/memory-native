@@ -138,13 +138,14 @@ NA6 beats 9-state at d=1024 (2.4674 vs 2.4676). Advantage holds at scale.
 Flat: all within 0.0008. lr=0.01 (current default) is in the optimal range.
 No sensitive lr tuning needed — the format is robust.
 
-### Speed measurement (d=512, 200 timed steps, G4 RTX PRO 6000)
+### Speed measurement (d=512, 500 timed steps, G4 RTX PRO 6000)
 
 | arm | tok/s | vs BF16 |
 |---|---:|---|
-| BF16 + AdamW | 3116K | 1.00x |
-| NA6-e2m1 (eager) | 1831K | 0.59x |
+| BF16 + AdamW | 3104K | 1.00x |
+| NA6-e2m1 (cached decode) | 1911K | 0.62x |
 
-The 0.59x ratio is from eager decode (codes → dense FP32 for matmul).
-torch.compile is not straightforward on the custom autograd Function.
-A Triton fused kernel is the proper path to close the speed gap.
+Weight cache + index_select decode: 0.59x → 0.62x (+5%).
+Main bottleneck: update in backward (many small tensor ops).
+A Triton fused kernel (decode+matmul in forward, fused update in backward)
+is the path to ~1.0x BF16.
