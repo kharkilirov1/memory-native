@@ -120,6 +120,31 @@ NA6 beats 9-state at d=1024 (2.4674 vs 2.4676). Advantage holds at scale.
 
 ## Remaining optimization
 
-1. **Fused kernel** — eliminate eager decode (speed 0.62x → ~1.0x BF16, peak VRAM → persistent)
-2. **Learning rate sweep** — lr=0.01 may not be optimal
-3. **d=2048+** — test at production-relevant widths
+1. **Fused kernel** — eliminate eager decode (speed 0.59x → ~1.0x BF16, peak VRAM → persistent)
+2. **d=2048+** — test at production-relevant widths
+
+## Round 3: lr sweep + speed measurement
+
+### Learning rate sweep (NA6-e2m1, d=512, 3000 steps, 1 seed)
+
+| lr | val |
+|---:|---:|
+| 0.003 | 2.4408 |
+| 0.005 | 2.4405 |
+| 0.010 | 2.4412 |
+| **0.020** | **2.4404** |
+| 0.030 | 2.4410 |
+
+Flat: all within 0.0008. lr=0.01 (current default) is in the optimal range.
+No sensitive lr tuning needed — the format is robust.
+
+### Speed measurement (d=512, 200 timed steps, G4 RTX PRO 6000)
+
+| arm | tok/s | vs BF16 |
+|---|---:|---|
+| BF16 + AdamW | 3116K | 1.00x |
+| NA6-e2m1 (eager) | 1831K | 0.59x |
+
+The 0.59x ratio is from eager decode (codes → dense FP32 for matmul).
+torch.compile is not straightforward on the custom autograd Function.
+A Triton fused kernel is the proper path to close the speed gap.
