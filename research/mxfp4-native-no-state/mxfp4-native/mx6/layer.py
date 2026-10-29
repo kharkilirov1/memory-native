@@ -378,3 +378,115 @@ class MX6BlockLinear(nn.Module):
     def extra_repr(self) -> str:
         return (f"in_features={self.in_features}, out_features={self.out_features}, "
                 f"lr={self.lr}, C_block={self.C_block}")
+
+
+# ── packed (value, accumulator) layer — 5-bit and 6-bit formats ───────────────
+# See mx6/packed_na.py for the format spec.
+
+from .packed_na import PackedNA, PackedNA5, PackedNA6
+
+
+class _MXNFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, module, weight, token):
+        ctx.save_for_backward(x, weight, module._codes)
+        ctx.module = module
+        return x @ weight.t()
+
+    @staticmethod
+    def backward(ctx, grad_out):
+        x, weight, codes_before = ctx.saved_tensors
+        module = ctx.module
+        grad_x = grad_out @ weight
+        grad_w = grad_out.t() @ x
+        if not torch.equal(codes_before, module._codes):
+            raise RuntimeError("weights changed between forward and backward")
+        with torch.no_grad():
+            module.apply_update_(grad_w)
+        module._pending = False
+        return grad_x, None, None, None
+
+
+class MXNLinear(nn.Module):
+    """Packed (value, accumulator) linear layer — per-param momentum in one word.
+
+    The value and accumulator are packed into a single code word (like the
+    ternary counter on ``main``), so there is no separate accumulator buffer.
+    The forward pass reads only the value; the accumulator is invisible to
+    inference.
+
+    Args:
+        fmt: a ``PackedNA`` instance (``PackedNA5`` for 5-bit, ``PackedNA6``
+            for 6-bit).
+    """
+
+    def __init__(self, in_features: int, out_features: int, fmt: PackedNA,
+                 lr: float = 0.01, rms_beta: float = 0.9, rms_eps: float = 1e-3,
+                 scale_headroom: float = 2.0):
+        super().__init__()
+        assert in_features % pack.BLOCK == 0, f"in_features must be multiple of {pack.BLOCK}"
+        self.in_features, self.out_features = in_features, out_features
+        self.lr, self.rms_beta, self.rms_eps = lr, rms_beta, rms_eps
+        self.fmt = fmt
+        self.scale_headroom = scale_headroom
+
+        init = torch.empty(out_features, in_features).uniform_(
+            -1.0 / in_features ** 0.5, 1.0 / in_features ** 0.5)
+        codes, sb = fmt.quantize(init, headroom=scale_headroom)
+        self.register_buffer("_codes", codes)
+        self.register_buffer("_scale", sb)
+        self.register_buffer("_acc", torch.zeros(out_features, in_features, dtype=torch.int8))
+        self.register_buffer("v_rms", torch.full((out_features, 1), rms_eps))
+        self._token = torch.zeros(0, requires_grad=True)
+        self._pending = False
+
+    @property
+    def codes(self) -> torch.Tensor:
+        return self._codes
+
+    def weight(self) -> torch.Tensor:
+        """Visible weight (float); accumulator is invisible to forward."""
+        return self.fmt.dequantize(self._codes, self._scale)
+
+    def persistent_bytes(self) -> int:
+        return self.fmt.persistent_bytes(self.out_features, self.in_features)
+
+    def bits_per_param(self) -> float:
+        return self.persistent_bytes() * 8.0 / (self.out_features * self.in_features)
+
+    @classmethod
+    def from_dense(cls, weight: torch.Tensor, fmt: PackedNA, **kwargs) -> "MXNLinear":
+        layer = cls(weight.shape[1], weight.shape[0], fmt, **kwargs)
+        with torch.no_grad():
+            codes, sb = fmt.quantize(weight.detach().float(),
+                                     headroom=kwargs.get("scale_headroom", 2.0))
+            layer._codes.copy_(codes)
+            layer._scale.copy_(sb)
+            layer._acc.zero_()
+        return layer
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.shape[-1] != self.in_features:
+            raise ValueError(f"expected {self.in_features}, got {x.shape[-1]}")
+        shape = x.shape
+        if torch.is_grad_enabled() and self.training:
+            if self._pending:
+                raise RuntimeError("MXNLinear forwarded twice before backward")
+            self._pending = True
+            out = _MXNFunction.apply(x.reshape(-1, shape[-1]), self, self.weight(), self._token)
+            return out.reshape(*shape[:-1], self.out_features)
+        return x @ self.weight().t()
+
+    def apply_update_(self, grad_w: torch.Tensor) -> None:
+        """Per-param integrator update, called from backward."""
+        self.v_rms, grad_hat = update.rms_update(
+            grad_w.detach().float(), self.v_rms, self.rms_beta, self.rms_eps)
+        new_codes, new_acc = self.fmt.step(
+            self._codes, self._acc, self._scale, grad_hat, self.lr)
+        self._codes.copy_(new_codes)
+        self._acc.copy_(new_acc)
+        # scale is frozen (headroom is an init choice, not an invariant)
+
+    def extra_repr(self) -> str:
+        return (f"in_features={self.in_features}, out_features={self.out_features}, "
+                f"lr={self.lr}, fmt={self.fmt.bits}bit/{self.fmt.n_codes}codes")
