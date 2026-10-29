@@ -193,6 +193,92 @@ def scale_bytes_mse(w: torch.Tensor, headroom: float = 2.0, reference: torch.Ten
     keep = (amax <= headroom * s_ref) & (amax >= 0.5 * headroom * s_ref)
     return torch.where(keep, reference, candidate)
 
+# ── block-accumulator: split scale byte (5-bit exp + 3-bit acc-high) ──────────
+# See docs/BLOCK_ACCUMULATOR.md for the full design.
+
+SCALE_BITS = 5
+ACC_HIGH_BITS = 3
+SCALE_BIAS = 15
+ACC_HIGH_MASK = (1 << ACC_HIGH_BITS) - 1   # 0x07
+SCALE_SHIFT = ACC_HIGH_BITS                 # 3
+
+BLOCK_ACC_BYTES = 2  # scale+acc-high byte + acc-low byte per 32-param block
+
+
+def scale_bytes_split(w: torch.Tensor, headroom: float = 6.0,
+                      reference: torch.Tensor | None = None) -> torch.Tensor:
+    """Per-block scale packed into 5 bits with 3-bit acc-high zeroed.
+
+    Returns a uint8 tensor [out, blocks] where bits [7:3] are the 5-bit exponent
+    (bias ``SCALE_BIAS``) and bits [2:0] are zero (reserved for acc-high).
+    The scale is sticky like ``scale_bytes``: kept while the block fits.
+    """
+    out_features, in_features = w.shape
+    blocks = w.reshape(out_features, in_features // BLOCK, BLOCK)
+    amax = blocks.abs().amax(dim=-1).clamp_min(1e-30)
+    exponent = ceil_log2(amax / headroom)
+    exp5 = (exponent + SCALE_BIAS).clamp(0, (1 << SCALE_BITS) - 1)
+    candidate = (exp5 << SCALE_SHIFT).to(torch.uint8)
+    if reference is None:
+        return candidate
+    ref_exp = reference >> SCALE_SHIFT
+    ref_exp16 = ref_exp.to(torch.int16)
+    cand_exp = exp5.to(torch.int16).clamp(ref_exp16 - 1, ref_exp16 + 1)
+    candidate = (cand_exp << SCALE_SHIFT).to(torch.uint8)
+    s_ref = scale_floats_split(reference)
+    keep = (amax <= headroom * s_ref) & (amax >= 0.5 * headroom * s_ref)
+    # preserve acc-high bits from reference when keeping
+    return torch.where(keep, reference, candidate)
+
+
+def scale_floats_split(scale_byte: torch.Tensor) -> torch.Tensor:
+    """Extract the 5-bit exponent from a split scale byte and return float scales."""
+    exp = (scale_byte >> SCALE_SHIFT).to(torch.float32)
+    return torch.pow(2.0, exp - SCALE_BIAS)
+
+
+def acc_high_get(scale_byte: torch.Tensor) -> torch.Tensor:
+    """Extract the 3-bit acc-high field from a split scale byte."""
+    return (scale_byte & ACC_HIGH_MASK).to(torch.int32)
+
+
+def acc_high_set(scale_byte: torch.Tensor, acc_high: torch.Tensor) -> torch.Tensor:
+    """Write the 3-bit acc-high field into a split scale byte (preserves exponent)."""
+    exp = scale_byte & ~ACC_HIGH_MASK
+    return (exp | (acc_high.to(torch.int32) & ACC_HIGH_MASK)).to(torch.uint8)
+
+
+def block_acc_combine(acc_high: torch.Tensor, acc_low: torch.Tensor) -> torch.Tensor:
+    """Combine 3-bit acc-high and 8-bit acc-low into an 11-bit unsigned accumulator."""
+    return (acc_high.to(torch.int32) << 8) | acc_low.to(torch.int32)
+
+
+def block_acc_split(acc: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Split an 11-bit unsigned accumulator into 3-bit acc-high and 8-bit acc-low."""
+    acc = acc.to(torch.int32)
+    return ((acc >> 8) & ACC_HIGH_MASK).to(torch.uint8), (acc & 0xFF).to(torch.uint8)
+
+
+def quantize_split(w: torch.Tensor, headroom: float = 6.0
+                   ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Full quantisation with split scale: (codes, scale_byte with acc-high=0)."""
+    s = scale_bytes_split(w, headroom=headroom)
+    s_expanded = scale_floats_split(s).repeat_interleave(BLOCK, dim=1)
+    codes = value_codes(w / s_expanded)
+    return codes, s
+
+
+def dequantize_split(codes: torch.Tensor, scale_byte: torch.Tensor) -> torch.Tensor:
+    """(codes, split scale bytes) -> float weight (acc-high bits ignored)."""
+    return value_floats(codes) * scale_floats_split(scale_byte).repeat_interleave(BLOCK, dim=1)
+
+
+def persistent_bytes_block(out_features: int, in_features: int) -> int:
+    """Bytes of training state for a block-acc layer (codes + 2 bytes/block)."""
+    blocks = check_shape(in_features, out_features)
+    return out_features * in_features // 2 + out_features * blocks * BLOCK_ACC_BYTES
+
+
 def scale_bytes_auto(w: torch.Tensor, reference: torch.Tensor | None = None,
                      h_min: float = 1.5, h_max: float = 6.0, flush: float = 4.0
                      ) -> torch.Tensor:

@@ -1,4 +1,4 @@
-﻿"""The update: stochastic rounding on the E2M1 ladder + 2-bit error feedback.
+"""The update: stochastic rounding on the E2M1 ladder + 2-bit error feedback.
 
 Framework-free maths (docs/UPDATE.md). No autograd, no modules РІР‚вЂќ just tensors in,
 tensors out, so the same functions can be tested on CPU and called from a kernel
@@ -257,3 +257,74 @@ def rms_update_layer(grad: torch.Tensor, v_byte: torch.Tensor, beta: float, eps:
     new_byte = encode_fp8(v_new.reshape(1))
     denom = decode_fp8(new_byte).sqrt().clamp_min(eps)
     return new_byte, grad / denom
+
+
+# ── block-shared accumulator (see docs/BLOCK_ACCUMULATOR.md) ──────────────────
+
+def step_with_block_integrator(
+    codes: torch.Tensor,
+    scale_byte: torch.Tensor,
+    acc_low: torch.Tensor,
+    grad_hat: torch.Tensor,
+    lr: float,
+    C_block: int = 32,
+    headroom: float = 6.0,
+    generator: torch.Generator | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Block-shared accumulator update: 11-bit momentum at 4.50 bits/param.
+
+    The block accumulator (3 bits stolen from the scale byte + 8 bits in a
+    separate byte) integrates the average gradient *magnitude*.  When it
+    crosses ``C_block`` every weight in the block steps one rung on the E2M1
+    ladder, each in the direction of its own gradient sign.
+
+    Returns ``(new_codes, new_scale_byte, new_acc_low)``.
+    """
+    from . import pack
+
+    out_features, in_features = codes.shape
+    blocks = in_features // pack.BLOCK
+
+    # --- unpack current state ------------------------------------------------
+    s = pack.scale_floats_split(scale_byte).repeat_interleave(pack.BLOCK, dim=1)
+    acc_high = pack.acc_high_get(scale_byte)
+    acc = pack.block_acc_combine(acc_high, acc_low)          # [out, blocks], int32
+
+    # --- per-weight tick (signed) -------------------------------------------
+    d = delta(codes, "rel") * s                               # local ladder gap
+    ticks = (-lr * grad_hat) / d * C_block                   # signed, per-weight
+
+    # --- block-level integration of average |tick| --------------------------
+    ticks_blocks = ticks.reshape(out_features, blocks, pack.BLOCK)
+    avg_abs_tick = ticks_blocks.abs().mean(dim=-1)            # [out, blocks]
+    # stochastic round the average (keeps the integrator unbiased)
+    sr = stochastic_round_int(avg_abs_tick, generator)
+    acc = acc + sr.to(torch.int32)
+
+    # --- carry: step every weight when pressure crosses threshold -----------
+    carry_count = acc // C_block                              # how many steps
+    acc = acc - carry_count * C_block                         # remainder
+    carry_count = carry_count.to(torch.int16)
+
+    # broadcast carry to each weight, multiply by per-weight sign
+    carry_per_weight = carry_count.repeat_interleave(pack.BLOCK, dim=1)
+    direction = torch.sign(ticks).to(torch.int16)             # -1, 0, +1
+    steps = carry_per_weight * direction                       # signed steps per weight
+
+    # move on the signed ladder index
+    index = signed_index(codes)                               # [-7, 7]
+    new_index = (index + steps).clamp(-7, 7)
+    blocked = (index + steps) != new_index
+    new_codes = code_from_index(new_index)
+
+    # blocked weights don't consume their carry (pressure stays for next step)
+    # but we already subtracted it; accept the small leak — it only means a
+    # railed weight steps slightly less often, which is correct behaviour.
+
+    # --- repack state -------------------------------------------------------
+    acc = acc.clamp(0, (1 << 11) - 1)                         # 11-bit unsigned
+    new_acc_high, new_acc_low = pack.block_acc_split(acc)
+    new_scale_byte = pack.acc_high_set(scale_byte, new_acc_high)
+
+    # scale is frozen (headroom is an init choice, not an invariant — PHASE2 R5)
+    return new_codes, new_scale_byte, new_acc_low
