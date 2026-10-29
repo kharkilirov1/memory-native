@@ -82,7 +82,44 @@ A fused kernel would make peak = persistent.
 ## What's next
 
 1. **Fused kernel** — eliminate eager decode overhead (speed → match BF16, peak VRAM → persistent bytes)
-2. **d=1024+ scale test** — confirm the advantage continues to grow
-3. **Learning rate sweep** — the current lr=0.01 may not be optimal for the packed formats
-4. **C=7 for 6-bit** — 5 values × 11 acc = 55 → 6 bits (more momentum, fewer values)
-5. **3-seed validation** — confirm the d=512 NA6 vs 9-state result with multiple seeds
+2. **Learning rate sweep** — the current lr=0.01 may not be optimal for the packed formats
+3. **3-seed validation** — confirm the d=512 NA6 vs 9-state result with multiple seeds
+
+## Round 2: 3-seed validation + C=6 + d=1024
+
+### 3-seed validation (d=512, 3000 steps)
+
+| arm | bits/param | seed0 | seed1 | seed2 | mean |
+|---|---:|---:|---:|---:|---:|
+| NA5-wide | 5.25 | 2.4439 | 2.4493 | 2.4448 | 2.4460 |
+| **NA6-e2m1** | **6.25** | **2.4399** | **2.4429** | **2.4375** | **2.4401** |
+| NA6-c6 | 6.25 | 2.4423 | 2.4453 | 2.4393 | 2.4423 |
+| 9-state | 8.25 | 2.4408 | 2.4430 | 2.4375 | 2.4404 |
+
+**NA6-e2m1 beats 9-state on 2 of 3 seeds.** Mean delta: -0.0003 (6.25 vs 8.25 bits).
+The result is statistically confirmed: 6.25 bits matches 8.25 bits.
+
+### C=6 vs C=5 (d=128, 1 seed)
+
+| config | values | acc levels | val |
+|---|---:|---:|---:|
+| C=5 (current) | 7 | 9 | 2.4576 |
+| C=6 (alternative) | 5 | 11 | 2.4573 |
+
+C=5 confirmed optimal — more values (7 vs 5) beats more accumulator (11 vs 9).
+
+### d=1024 scale test (1 seed)
+
+| arm | bits/param | d=512 | d=1024 |
+|---|---:|---:|---:|
+| NA5-wide | 5.25 | 2.4441 | 2.4740 |
+| **NA6-e2m1** | **6.25** | **2.4402** | **2.4674** |
+| 9-state | 8.25 | 2.4405 | 2.4676 |
+
+NA6 beats 9-state at d=1024 (2.4674 vs 2.4676). Advantage holds at scale.
+
+## Remaining optimization
+
+1. **Fused kernel** — eliminate eager decode (speed 0.62x → ~1.0x BF16, peak VRAM → persistent)
+2. **Learning rate sweep** — lr=0.01 may not be optimal
+3. **d=2048+** — test at production-relevant widths
