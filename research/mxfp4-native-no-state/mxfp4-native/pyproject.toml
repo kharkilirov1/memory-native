@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mxfp4-native"
+version = "0.0.1"
+description = "Training in MXFP4 with the quantization error carried in two spare bits — no master weights, no optimizer state"
+requires-python = ">=3.10"
+dependencies = ["torch>=2.4", "numpy>=1.24"]
+readme = "README.md"
+license = { text = "MIT" }
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+gpu = ["triton>=3.0"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["mx6*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
