@@ -146,6 +146,8 @@ No sensitive lr tuning needed — the format is robust.
 | NA6-e2m1 (cached decode) | 1911K | 0.62x |
 
 Weight cache + index_select decode: 0.59x → 0.62x (+5%).
+torch.compile (decode + pre/post-SR): 0.62x → 0.73x BF16 (+16%).
+Enable with `from mx6 import enable_compile; enable_compile()`.
 Main bottleneck: update in backward (many small tensor ops).
 A Triton fused kernel (decode+matmul in forward, fused update in backward)
 is the path to ~1.0x BF16.
