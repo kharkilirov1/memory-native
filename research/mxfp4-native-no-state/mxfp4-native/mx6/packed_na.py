@@ -70,6 +70,12 @@ class PackedNA:
             gaps.append(min(adj) if adj else 1.0)
         self._gaps = torch.tensor(gaps)
         self._mid_idx = self.n_vals // 2  # index of 0.0
+        # Precompute code -> value lookup table (avoids integer division in kernels)
+        code_to_val = torch.zeros(self.n_codes)
+        for c in range(self.n_codes):
+            mi = c // self.acc_levels
+            code_to_val[c] = self.signed[mi].item()
+        self._code_to_value = code_to_val
 
     # ── encode / decode ──────────────────────────────────────────────────────
 
@@ -181,6 +187,11 @@ class PackedNA:
     def bits_per_param(self) -> float:
         """Code bits + E8M0 scale (0.25) + per-row RMS (negligible at scale)."""
         return float(self.bits) + 0.25
+
+    @property
+    def code_to_value(self) -> torch.Tensor:
+        """Precomputed lookup table: code -> signed magnitude (for Triton kernel)."""
+        return self._code_to_value
 
     def persistent_bytes(self, out_f: int, in_f: int) -> int:
         blocks = in_f // BLOCK
