@@ -299,3 +299,40 @@ def scale_bytes_auto(w: torch.Tensor, reference: torch.Tensor | None = None,
     headroom = spread.clamp(h_min, h_max)
     exponent = ceil_log2(amax / headroom)
     return (exponent + 127).clamp(0, 254).to(torch.uint8)
+
+
+# ── nibble / 2-bit storage (compact_state) ────────────────────────────────────
+# The compact_state path referenced these helpers before they existed, so it
+# raised AttributeError on construction and was never exercised.
+
+def pack_nibbles(codes: torch.Tensor) -> torch.Tensor:
+    """[out, in] uint8 codes in [0, 15] -> [out, in // 2] uint8 (low nibble first)."""
+    out_f, in_f = codes.shape
+    if in_f % 2:
+        raise ValueError("nibble packing needs an even in_features")
+    c = codes.reshape(out_f, in_f // 2, 2).to(torch.int32)
+    return ((c[..., 0] & 0x0F) | ((c[..., 1] & 0x0F) << 4)).to(torch.uint8)
+
+
+def unpack_nibbles(packed: torch.Tensor, shape: tuple[int, int]) -> torch.Tensor:
+    out_f, in_f = shape
+    p = packed.to(torch.int32)
+    lo = p & 0x0F
+    hi = (p >> 4) & 0x0F
+    return torch.stack((lo, hi), dim=-1).reshape(out_f, in_f).to(torch.uint8)
+
+
+def pack_2bit_signed(acc: torch.Tensor) -> torch.Tensor:
+    """[out, in] int8 in [-2, 1] -> [out, in // 4] uint8, biased by +2."""
+    out_f, in_f = acc.shape
+    if in_f % 4:
+        raise ValueError("2-bit packing needs in_features divisible by 4")
+    a = (acc.to(torch.int32) + 2).clamp(0, 3).reshape(out_f, in_f // 4, 4)
+    return (a[..., 0] | (a[..., 1] << 2) | (a[..., 2] << 4) | (a[..., 3] << 6)).to(torch.uint8)
+
+
+def unpack_2bit_signed(packed: torch.Tensor, shape: tuple[int, int]) -> torch.Tensor:
+    out_f, in_f = shape
+    p = packed.to(torch.int32)
+    parts = [((p >> (2 * i)) & 0x03) - 2 for i in range(4)]
+    return torch.stack(parts, dim=-1).reshape(out_f, in_f).to(torch.int8)

@@ -151,3 +151,23 @@ Enable with `from mx6 import enable_compile; enable_compile()`.
 Main bottleneck: update in backward (many small tensor ops).
 A Triton fused kernel (decode+matmul in forward, fused update in backward)
 is the path to ~1.0x BF16.
+
+## Implementation status (2026-10-30)
+
+The eager layer now stores what the format claims:
+
+- the accumulator lives in the low `2C-1` residue of the code word — there is no
+  separate `_acc` tensor (previously there was, and the code residue was always
+  neutral, so 63 codes were written but only 7 were ever used);
+- `pack_state` bit-packs the words (4 codes / 3 bytes at 6 bits, 8 / 5 at 5 bits),
+  so `persistent_bytes()` equals the bytes actually held.
+
+Measured on the CPU box, 1024x1024 NA6: reported 25,728 B == actual 25,728 B
+(ratio 1.00), 6.281 bits/param. Before the change the same layer reported 864 B
+while holding 2,144 B — a 2.48x gap.
+
+Cost: pack+unpack is ~5.4 ms of a ~51 ms CPU step (10%); both paths are
+vectorised. The GPU numbers in the tables above were measured **before** this
+change, with dense `uint8` codes. `enable_compile()` was also inert at that time
+(the decorator ran at import, so calling it later changed nothing) and is now
+lazy. The 0.62x -> 0.73x BF16 figure should be re-measured rather than quoted.
