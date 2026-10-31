@@ -408,7 +408,9 @@ class _MXNFunction(torch.autograd.Function):
                       (module.fused == "auto" and x.shape[0] <= 8)))
         if ctx.fused:
             return packed_matmul(x, codes, module._scale,
-                                 module.fmt.code_to_value.to(x.device))
+                                 module.fmt.code_to_value.to(x.device),
+                                 block=module.fmt.block, scale_format=module.fmt.scale_format,
+                                 tensor_scale=module._tscale)
         out = x @ module.weight().t()
         if module.weight_cache == "none":
             module._weight_cache = None  # re-decoded in backward; frees L x 32 bits/param
@@ -422,7 +424,10 @@ class _MXNFunction(torch.autograd.Function):
             raise RuntimeError("weights changed between forward and backward")
         if ctx.fused:
             grad_x = packed_matmul_dx(grad_out, codes_before, module._scale,
-                                      module.fmt.code_to_value.to(x.device))
+                                      module.fmt.code_to_value.to(x.device),
+                                      block=module.fmt.block,
+                                      scale_format=module.fmt.scale_format,
+                                      tensor_scale=module._tscale)
         else:
             grad_x = grad_out @ module.weight()
         grad_w = grad_out.t() @ x
@@ -449,16 +454,83 @@ class MXNLinear(nn.Module):
                  lr: float = 0.01, rms_beta: float = 0.9, rms_eps: float = 1e-3,
                  scale_headroom: float = 1.5, fused: str = "off",
                  weight_cache: str = "step", rescale_every: int = 0,
-                 scale_mode: str = "headroom", clip_frac: float = 0.0):
+                 scale_mode: str = "headroom", clip_frac: float = 0.0,
+                 headroom_mode: str = "absolute", scale_growth: str = "off",
+                 growth_tau: float = 1.0 / 16, track_clip: bool = False,
+                 weight_decay: float = 0.0, scale_lr: float = 0.0, scale_eps: float = 1e-12):
+        """New opt-in args (defaults reproduce the old behaviour exactly):
+
+        weight_decay: lambda >= 0, a restoring force. After the RMS normalisation
+            g_hat <- g_hat + lambda * (w / s), where w / s is the DIMENSIONLESS ladder value of
+            each weight (decoded value / its block scale, i.e. fmt.signed[rung], in
+            {0, +-0.5, +-1, +-6} for "e2m1"). It is decoupled from the gradient scale (g_hat has
+            unit RMS per row), so lambda = 0.03 means "a pull of 3 % of a typical normalised
+            gradient per unit of ladder value". 0 (default) does not enter the code path:
+            bit-identical to before. The mx6 counters otherwise have NO restoring force, so the
+            weights diffuse (noise-driven, ~uniform over the ladder).
+        scale_lr: opt-in learnable block scale (nvfp4 only; needs scale_growth == "off" and
+            rescale_every == 0, which rewrite the same byte). Per block, the gradient wrt
+            u = ln(s) is g_u = sum_block(grad_w * w) (since w = v * s * tscale, dw/du = w); it is
+            RMS-normalised per row exactly like the weights (v_scale, `rms_update`, beta =
+            rms_beta, eps = scale_eps), and the E4M3 byte moves by SR(-scale_lr * g_u_hat / ln-gap)
+            code steps (`PackedNA.scale_code_step_rebasing`), re-encoding the block value-
+            preservingly. A block that would step past E4M3's 448 (the init puts the largest block
+            there) first doubles the per-tensor scale (`rebase_tscale`, counted in `total_rebased`),
+            so the scale can grow without a ceiling; shrinking never needs a rebase (E4M3's relative
+            precision is flat over its 15 octaves, a down-rebase would only add ping-pong).
+            Costs one fp32 per row (v_scale), counted in persistent_bytes. 0 (default) = off.
+
+        headroom_mode: "absolute" (legacy: `scale_headroom` is the target amax/s, e.g. 1.5)
+            | "ladder" (`scale_headroom` is h relative to the ladder max L: the target is
+            amax/s = L/h, so h=1 maps the block amax exactly onto the outer rung).
+            For nvfp4 the amax->L rule is already ladder-aware; "ladder" with h != 1 sets
+            its target to L/h, "absolute" keeps target L.
+        scale_growth: "off" | "pressure": a block whose accumulated clip count (updates
+            clipped at an outer rung since its scale last changed) exceeds
+            `growth_tau * block` gets its scale bumped one step (E4M3 code for nvfp4,
+            x2 for e8m0) and is re-encoded in place (PackedNA.grow_scale). Needs clip
+            tracking, which it switches on. Shrinking is not implemented (future work).
+        track_clip: keep per-step saturation telemetry (`last_clip_frac`,
+            `last_clip_blocks`); numerics are unaffected.
+        """
         super().__init__()
-        assert in_features % pack.BLOCK == 0, f"in_features must be multiple of {pack.BLOCK}"
+        assert in_features % fmt.block == 0, f"in_features must be multiple of {fmt.block}"
+        assert headroom_mode in ("absolute", "ladder"), headroom_mode
+        assert scale_growth in ("off", "pressure"), scale_growth
+        self.headroom_mode = headroom_mode
+        self.scale_growth = scale_growth
+        self.growth_tau = float(growth_tau)
+        self.track_clip = bool(track_clip) or scale_growth != "off"
+        self.last_clip_frac: torch.Tensor | None = None     # 0-dim: fraction of weights clipped
+        self.last_clip_blocks: torch.Tensor | None = None   # [out, nb] int32: clips this step
+        self.last_grown: int = 0                            # blocks bumped by the last step
+        self.total_grown: int = 0
+        self.total_rebased: int = 0                         # nvfp4: per-tensor scale doublings
         self.in_features, self.out_features = in_features, out_features
         self.lr, self.rms_beta, self.rms_eps = lr, rms_beta, rms_eps
         self.fmt = fmt
         self.scale_headroom = scale_headroom
+        if weight_decay < 0.0:
+            raise ValueError("weight_decay must be >= 0")
+        self.weight_decay = float(weight_decay)
+        if scale_lr < 0.0:
+            raise ValueError("scale_lr must be >= 0")
+        if scale_lr > 0.0 and not fmt.nvfp4:
+            raise ValueError("scale_lr needs scale_format='nvfp4' (an E8M0 step would be x2)")
+        if scale_lr > 0.0 and (scale_growth != "off" or rescale_every):
+            raise ValueError("scale_lr does not compose with scale_growth / rescale_every "
+                             "(they rewrite the same scale byte)")
+        self.scale_lr_base = float(scale_lr)     # peak; the harness schedule scales `scale_lr`
+        self.scale_lr = float(scale_lr)
+        self.scale_eps = float(scale_eps)
+        self.total_scale_moves: int = 0          # E4M3 bytes moved by scale_lr (telemetry)
         # Fused decode-in-GEMM avoids the dense weight but re-decodes per tile.
         # Measured on A100 (1024->4096, batch 1..128): it never wins — 7.8 vs 5.4 ms
         # at M=1 and 24.9 vs 5.8 ms at M=128. Default off; kept for small-VRAM inference.
+        if fused != "off" and fmt.code_dtype != torch.uint8:
+            raise ValueError(
+                f"fused={fused!r}: the Triton decode-in-GEMM kernel reads uint8 codes, but this "
+                f"format has {fmt.n_codes} codes (> 256) stored as {fmt.code_dtype}; use fused='off'")
         self.fused = fused
         # "step": keep the decoded dense weight until this layer's backward frees it.
         #   Fast, but on a deep stack every layer's fp32 weight is live at the end of
@@ -480,14 +552,38 @@ class MXNLinear(nn.Module):
 
         init = torch.empty(out_features, in_features).uniform_(
             -1.0 / in_features ** 0.5, 1.0 / in_features ** 0.5)
-        codes, sb = fmt.quantize(init, headroom=scale_headroom)
+        if fmt.nvfp4 and scale_mode != "headroom":
+            raise NotImplementedError("scale_mode='mse' is E8M0-only; nvfp4 uses the amax rule")
+        codes, sb, tscale = fmt.quantize_scaled(init, headroom=self._eff_headroom(),
+                                                nvfp4_target=self._nvfp4_target())
         self.register_buffer("_state", fmt.pack_state(codes))
         self.register_buffer("_scale", sb)
+        # clip counts per block since that block's scale last changed (only when tracking)
+        self.register_buffer("_clip_acc", torch.zeros(out_features, in_features // fmt.block,
+                                                      dtype=torch.int32) if self.track_clip else None)
+        # NVFP4 only: fp32 per-tensor scale (0-dim). None for E8M0, so its state_dict is unchanged.
+        self.register_buffer("_tscale", tscale)
         self.register_buffer("v_rms", torch.full((out_features, 1), rms_eps))
+        # per-row second moment of the block-scale gradient (scale_lr > 0 only; None otherwise,
+        # so the default state_dict is unchanged). Starts at 0: the first step is then normalised
+        # by sqrt(0.1) * |g_u| (rms_update), the same warm-up shape as the weights'.
+        self.register_buffer("v_scale", torch.zeros(out_features, 1) if scale_lr > 0.0 else None)
         self._codes_cache: torch.Tensor | None = None
         self._token = torch.zeros(0, requires_grad=True)
         self._pending = False
         self._weight_cache: torch.Tensor | None = None
+
+    def _eff_headroom(self) -> float:
+        """Target amax/s handed to the E8M0 fitters (legacy: scale_headroom as is)."""
+        if self.headroom_mode == "ladder":
+            return self.fmt.ladder_max / self.scale_headroom
+        return self.scale_headroom
+
+    def _nvfp4_target(self):
+        """NVFP4 target amax/s: None -> ladder max L (default), or L/h in ladder mode."""
+        if self.headroom_mode == "ladder":
+            return self.fmt.ladder_max / self.scale_headroom
+        return None
 
     @property
     def codes(self) -> torch.Tensor:
@@ -500,11 +596,12 @@ class MXNLinear(nn.Module):
         """Visible weight (float); accumulator is invisible to forward.
         Cached — re-decodes only after codes change (apply_update_)."""
         if self._weight_cache is None:
-            self._weight_cache = self.fmt.dequantize_fast(self.codes, self._scale)
+            self._weight_cache = self.fmt.dequantize_fast(self.codes, self._scale, self._tscale)
         return self._weight_cache
 
     def persistent_bytes(self) -> int:
-        return self.fmt.persistent_bytes(self.out_features, self.in_features)
+        extra = self.out_features * 4 if self.v_scale is not None else 0   # scale-grad RMS (fp32/row)
+        return self.fmt.persistent_bytes(self.out_features, self.in_features) + extra
 
     def bits_per_param(self) -> float:
         return self.persistent_bytes() * 8.0 / (self.out_features * self.in_features)
@@ -513,10 +610,14 @@ class MXNLinear(nn.Module):
     def from_dense(cls, weight: torch.Tensor, fmt: PackedNA, **kwargs) -> "MXNLinear":
         layer = cls(weight.shape[1], weight.shape[0], fmt, **kwargs)
         with torch.no_grad():
-            codes, sb = fmt.quantize(weight.detach().float(),
-                                     headroom=kwargs.get("scale_headroom", 2.0))
+            hr = (layer._eff_headroom() if layer.headroom_mode == "ladder"
+                  else kwargs.get("scale_headroom", 2.0))      # legacy default kept
+            codes, sb, tscale = fmt.quantize_scaled(
+                weight.detach().float(), headroom=hr, nvfp4_target=layer._nvfp4_target())
             layer._state.copy_(fmt.pack_state(codes))
             layer._scale.copy_(sb)
+            if tscale is not None:
+                layer._tscale.copy_(tscale)
             layer._codes_cache = None
             layer._weight_cache = None
         return layer
@@ -537,7 +638,54 @@ class MXNLinear(nn.Module):
         """Per-param integrator update, called from backward."""
         self.v_rms, grad_hat = update.rms_update(
             grad_w.detach().float(), self.v_rms, self.rms_beta, self.rms_eps)
-        new_codes = self.fmt.step(self.codes, self._scale, grad_hat, self.lr)
+        if self.weight_decay > 0.0:
+            # restoring force toward 0, in ladder units (dimensionless): w/s == fmt.signed[rung]
+            grad_hat = grad_hat + self.weight_decay * self.fmt.value_float(self.codes)
+        if self.scale_lr > 0.0:
+            # d loss / d ln(s_block) = sum_block(grad_w * w): needs the weight BEFORE this step
+            nb = self.in_features // self.fmt.block
+            g_u = (grad_w.detach().float() * self.weight()).reshape(
+                self.out_features, nb, self.fmt.block).sum(-1)
+            self.v_scale, g_u_hat = update.rms_update(g_u, self.v_scale, self.rms_beta,
+                                                      self.scale_eps)
+        res = self.fmt.step(self.codes, self._scale, grad_hat, self.lr, tscale=self._tscale,
+                            return_clip=self.track_clip)
+        if self.track_clip:
+            new_codes, clip = res
+            nb = self.in_features // self.fmt.block
+            self.last_clip_blocks = clip.reshape(self.out_features, nb, self.fmt.block).sum(-1).int()
+            self.last_clip_frac = clip.float().mean()
+            self._clip_acc += self.last_clip_blocks
+        else:
+            new_codes = res
+        if self.scale_growth == "pressure":
+            hot = self._clip_acc > self.growth_tau * self.fmt.block
+            sb0, ts0 = self._scale, self._tscale
+            if self.fmt.nvfp4 and bool((hot & (sb0 >= 126)).any()):
+                # a block already sits on E4M3's 448: only the per-tensor scale has room
+                new_codes, sb0, ts0 = self.fmt.rebase_tscale(new_codes, sb0, ts0)
+                self.total_rebased += 1
+            new_codes, new_sb = self.fmt.grow_scale(new_codes, sb0, hot, ts0)
+            grown = new_sb != sb0
+            self.last_grown = int(grown.sum())
+            self.total_grown += self.last_grown
+            self._scale.copy_(new_sb)
+            if ts0 is not self._tscale:
+                self._tscale.copy_(ts0)
+            if self.last_grown:
+                self._clip_acc[grown] = 0
+        if self.scale_lr > 0.0:
+            # a block that would step past E4M3's 448 first doubles the per-tensor scale
+            # (value-preserving, every byte -8): the init puts the largest block exactly on 448
+            new_codes, new_sb, new_ts, moved, rebased = self.fmt.scale_code_step_rebasing(
+                new_codes, self._scale, -self.scale_lr * g_u_hat, self._tscale)
+            self._scale.copy_(new_sb)
+            if rebased:
+                self._tscale.copy_(new_ts)
+                self.total_rebased += 1
+            if self._clip_acc is not None:
+                self._clip_acc[moved] = 0
+            self.total_scale_moves += int(moved.sum())
         self._state.copy_(self.fmt.pack_state(new_codes))
         self._codes_cache = None  # invalidate unpacked view
         self._weight_cache = None  # invalidate: codes changed
@@ -558,16 +706,18 @@ class MXNLinear(nn.Module):
         the rescale. Without this the scale stays at its init value while the weights
         grow, and the mass drifts onto the outermost rung.
         """
-        w = self.fmt.dequantize(self.codes, self._scale)
-        if self.scale_mode == "mse":
-            new_sb = self.fmt.scale_bytes_mse(w, self.scale_headroom, self.clip_frac)
-        else:
-            new_sb = self.fmt.scale_bytes(w, self.scale_headroom)
-        s_new = self.fmt.scale_floats(new_sb).repeat_interleave(_NA_BLOCK, dim=1)
-        mag = torch.bucketize(w / s_new, self.fmt.mids.to(w.device)).clamp(0, self.fmt.n_vals - 1)
+        w = self.fmt.dequantize(self.codes, self._scale, self._tscale)
+        new_sb, new_ts = self.fmt.fit_scale(w, self._eff_headroom(), self.scale_mode,
+                                            self.clip_frac, self._nvfp4_target())
+        s_new = self.fmt.expand_scale(new_sb, new_ts)
+        mag = self.fmt.round_idx(w / s_new)   # ties away from zero (odd map)
         acc = (self.codes.to(torch.long) % self.fmt.acc_levels) - (self.fmt.C - 1)
         self._state.copy_(self.fmt.pack_state(self.fmt.encode(mag, acc)))
         self._scale.copy_(new_sb)
+        if new_ts is not None:
+            self._tscale.copy_(new_ts)
+        if self._clip_acc is not None:
+            self._clip_acc.zero_()        # every block scale may have changed
         self._codes_cache = None
         self._weight_cache = None
 

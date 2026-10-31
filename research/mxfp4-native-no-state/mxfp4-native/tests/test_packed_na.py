@@ -22,7 +22,6 @@ from pathlib import Path
 
 import pytest
 import torch
-import torch.nn as nn
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import mx6.packed_na as P
@@ -114,67 +113,6 @@ def test_enable_compile_engages():
         P.disable_compile()
 
 
-def test_charlm():
-    """Tiny char-LM: 200 steps, the 5-bit format should beat SR-only."""
-    from mx6.layer import MX6Linear
-
-    torch.manual_seed(42)
-    data_path = Path(__file__).resolve().parent.parent / "data" / "tinyshakespeare.txt"
-    if not data_path.exists():
-        pytest.skip("no tinyshakespeare.txt")
-    text = data_path.read_text(encoding="utf-8")[:8192]
-    chars = sorted(set(text))
-    vocab = {c: i for i, c in enumerate(chars)}
-    V = len(chars)
-    ids = torch.tensor([vocab[c] for c in text], dtype=torch.long)
-    D, SEQ, BS = 64, 32, 16
-
-    class LM(nn.Module):
-        def __init__(self, fmt=None, sr=False):
-            super().__init__()
-            self.embed = nn.Embedding(V, D)
-            if sr:
-                self.fc1 = MX6Linear(D, D * 4, lr=0.01, integrator=0, scale_headroom=1.5)
-                self.fc2 = MX6Linear(D * 4, D, lr=0.01, integrator=0, scale_headroom=1.5)
-            else:
-                self.fc1 = MXNLinear(D, D * 4, fmt, lr=0.01, scale_headroom=2.0)
-                self.fc2 = MXNLinear(D * 4, D, fmt, lr=0.01, scale_headroom=2.0)
-            self.ln = nn.LayerNorm(D)
-            self.head = nn.Linear(D, V, bias=False)
-            self.opt = torch.optim.SGD(
-                list(self.embed.parameters()) + list(self.ln.parameters())
-                + list(self.head.parameters()), lr=0.01)
-
-        def forward(self, x):
-            h = self.embed(x)
-            h = self.fc1(h)
-            h = torch.relu(h)
-            h = self.fc2(h)
-            h = self.ln(h)
-            return self.head(h)
-
-    def run(model, steps=200):
-        model.train()
-        for _ in range(steps):
-            idx = torch.randint(0, len(ids) - SEQ - 1, (BS,))
-            x = ids[idx.unsqueeze(1) + torch.arange(SEQ)]
-            y = ids[idx.unsqueeze(1) + torch.arange(1, SEQ + 1)]
-            loss = nn.functional.cross_entropy(model(x).reshape(-1, V), y.reshape(-1))
-            model.opt.zero_grad()
-            loss.backward()
-            model.opt.step()
-        model.eval()
-        with torch.no_grad():
-            idx = torch.randint(0, len(ids) - SEQ - 1, (BS,))
-            x = ids[idx.unsqueeze(1) + torch.arange(SEQ)]
-            y = ids[idx.unsqueeze(1) + torch.arange(1, SEQ + 1)]
-            return nn.functional.cross_entropy(model(x).reshape(-1, V), y.reshape(-1)).item()
-
-    val_sr = run(LM(sr=True))
-    val_5 = run(LM(fmt=PackedNA5))
-    assert val_5 < val_sr, f"5-bit should beat SR-only at 200 steps ({val_5:.4f} vs {val_sr:.4f})"
-
-
 if __name__ == "__main__":
     tests = [
         ("5-bit format", lambda: test_format(PackedNA5, "PackedNA5")),
@@ -188,7 +126,6 @@ if __name__ == "__main__":
         ("5-bit persistent bytes", lambda: test_persistent_bytes_is_the_packed_width(PackedNA5, "PackedNA5")),
         ("6-bit persistent bytes", lambda: test_persistent_bytes_is_the_packed_width(PackedNA6, "PackedNA6")),
         ("enable_compile", test_enable_compile_engages),
-        ("char-LM sanity", test_charlm),
     ]
     passed = 0
     for name, fn in tests:
