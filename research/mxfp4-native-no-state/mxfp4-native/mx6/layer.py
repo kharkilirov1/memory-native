@@ -59,8 +59,9 @@ class MX6Linear(nn.Module):
         self.scale_mode = scale_mode
         self.lr_mode = lr_mode
         self.compact_state = bool(compact_state)
-        if self.compact_state and self.integrator != 3:
-            raise ValueError("compact_state currently requires integrator=3 (signed 2-bit remainder)")
+        if self.compact_state and self.integrator not in (0, 3):
+            raise ValueError("compact_state supports integrator=0 (stateless) and integrator=3 "
+                             "(signed 2-bit remainder); the code must fit in 4 bits")
         if self.compact_state and self.feedback:
             raise ValueError("compact_state does not support the separate 2-bit error-feedback plane")
         init = torch.empty(out_features, in_features).uniform_(
@@ -70,8 +71,11 @@ class MX6Linear(nn.Module):
             if codes.numel() % 4:
                 raise ValueError("compact_state requires parameter count divisible by 4")
             self.register_buffer("_codes_packed", pack.pack_nibbles(codes))
-            self.register_buffer("_acc_packed", pack.pack_2bit_signed(
-                torch.zeros(out_features, in_features, dtype=torch.int8)))
+            if self.integrator > 1:
+                self.register_buffer("_acc_packed", pack.pack_2bit_signed(
+                    torch.zeros(out_features, in_features, dtype=torch.int8)))
+            else:
+                self.register_buffer("_acc_packed", torch.empty(0, dtype=torch.uint8))
         else:
             self.register_buffer("_codes_dense", codes)
             if self.integrator > 1:
@@ -103,6 +107,8 @@ class MX6Linear(nn.Module):
     @property
     def acc(self) -> torch.Tensor:
         if self.compact_state:
+            if self._acc_packed.numel() == 0:
+                return torch.empty(0, dtype=torch.int8)
             return pack.unpack_2bit_signed(self._acc_packed, (self.out_features, self.in_features))
         return self._acc_dense
 
@@ -114,6 +120,8 @@ class MX6Linear(nn.Module):
 
     def _store_acc(self, acc: torch.Tensor) -> None:
         if self.compact_state:
+            if self._acc_packed.numel() == 0:
+                return  # stateless integrator: no accumulator plane to write
             self._acc_packed.copy_(pack.pack_2bit_signed(acc))
         else:
             self._acc_dense.copy_(acc)
@@ -384,27 +392,44 @@ class MX6BlockLinear(nn.Module):
 # See mx6/packed_na.py for the format spec.
 
 from .packed_na import PackedNA, PackedNA5, PackedNA6
+from .packed_na import BLOCK as _NA_BLOCK
+from .triton_kernel import HAS_TRITON, packed_matmul, packed_matmul_dx
 
 
 class _MXNFunction(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x, module, weight, token):
-        ctx.save_for_backward(x, weight, module._codes)
+    def forward(ctx, x, module, token):
+        codes = module.codes
+        ctx.save_for_backward(x, codes)
         ctx.module = module
-        return x @ weight.t()
+        # Fused path decodes inside the GEMM, so no dense weight is materialised.
+        ctx.fused = (x.is_cuda and HAS_TRITON and
+                     (module.fused == "on" or
+                      (module.fused == "auto" and x.shape[0] <= 8)))
+        if ctx.fused:
+            return packed_matmul(x, codes, module._scale,
+                                 module.fmt.code_to_value.to(x.device))
+        out = x @ module.weight().t()
+        if module.weight_cache == "none":
+            module._weight_cache = None  # re-decoded in backward; frees L x 32 bits/param
+        return out
 
     @staticmethod
     def backward(ctx, grad_out):
-        x, weight, codes_before = ctx.saved_tensors
+        x, codes_before = ctx.saved_tensors
         module = ctx.module
-        grad_x = grad_out @ weight
-        grad_w = grad_out.t() @ x
-        if not torch.equal(codes_before, module._codes):
+        if not torch.equal(codes_before, module.codes):
             raise RuntimeError("weights changed between forward and backward")
+        if ctx.fused:
+            grad_x = packed_matmul_dx(grad_out, codes_before, module._scale,
+                                      module.fmt.code_to_value.to(x.device))
+        else:
+            grad_x = grad_out @ module.weight()
+        grad_w = grad_out.t() @ x
         with torch.no_grad():
             module.apply_update_(grad_w)
         module._pending = False
-        return grad_x, None, None, None
+        return grad_x, None, None
 
 
 class MXNLinear(nn.Module):
@@ -422,34 +447,60 @@ class MXNLinear(nn.Module):
 
     def __init__(self, in_features: int, out_features: int, fmt: PackedNA,
                  lr: float = 0.01, rms_beta: float = 0.9, rms_eps: float = 1e-3,
-                 scale_headroom: float = 1.5):
+                 scale_headroom: float = 1.5, fused: str = "off",
+                 weight_cache: str = "step", rescale_every: int = 0,
+                 scale_mode: str = "headroom", clip_frac: float = 0.0):
         super().__init__()
         assert in_features % pack.BLOCK == 0, f"in_features must be multiple of {pack.BLOCK}"
         self.in_features, self.out_features = in_features, out_features
         self.lr, self.rms_beta, self.rms_eps = lr, rms_beta, rms_eps
         self.fmt = fmt
         self.scale_headroom = scale_headroom
+        # Fused decode-in-GEMM avoids the dense weight but re-decodes per tile.
+        # Measured on A100 (1024->4096, batch 1..128): it never wins — 7.8 vs 5.4 ms
+        # at M=1 and 24.9 vs 5.8 ms at M=128. Default off; kept for small-VRAM inference.
+        self.fused = fused
+        # "step": keep the decoded dense weight until this layer's backward frees it.
+        #   Fast, but on a deep stack every layer's fp32 weight is live at the end of
+        #   forward (measured: 32 bits/param x L, the main reason peak exceeds dense).
+        # "none": drop it right after the forward GEMM and re-decode in backward
+        #   (costs ~0.36 ms per 1024->4096 layer, saves 32 bits/param per layer).
+        assert weight_cache in ("step", "none")
+        self.weight_cache = weight_cache
+        # 0 = frozen scale (historical behaviour, and the bug this parameter exists to fix):
+        # weights grow during training, the E8M0 block scale does not follow, and the mass
+        # drifts onto the outermost rung. >0 refreshes the scale every N updates.
+        self.rescale_every = int(rescale_every)
+        self._steps_since_rescale = 0
+        # "headroom" reproduces the historical max-rule; "mse" searches adjacent octaves
+        # for the exponent that minimises block reconstruction error (outlier-robust).
+        assert scale_mode in ("headroom", "mse")
+        self.scale_mode = scale_mode
+        self.clip_frac = float(clip_frac)
 
         init = torch.empty(out_features, in_features).uniform_(
             -1.0 / in_features ** 0.5, 1.0 / in_features ** 0.5)
         codes, sb = fmt.quantize(init, headroom=scale_headroom)
-        self.register_buffer("_codes", codes)
+        self.register_buffer("_state", fmt.pack_state(codes))
         self.register_buffer("_scale", sb)
-        self.register_buffer("_acc", torch.zeros(out_features, in_features, dtype=torch.int8))
         self.register_buffer("v_rms", torch.full((out_features, 1), rms_eps))
+        self._codes_cache: torch.Tensor | None = None
         self._token = torch.zeros(0, requires_grad=True)
         self._pending = False
         self._weight_cache: torch.Tensor | None = None
 
     @property
     def codes(self) -> torch.Tensor:
-        return self._codes
+        """Unpacked code words (value + accumulator in one word)."""
+        if self._codes_cache is None:
+            self._codes_cache = self.fmt.unpack_state(self._state, self.in_features)
+        return self._codes_cache
 
     def weight(self) -> torch.Tensor:
         """Visible weight (float); accumulator is invisible to forward.
         Cached — re-decodes only after codes change (apply_update_)."""
         if self._weight_cache is None:
-            self._weight_cache = self.fmt.dequantize_fast(self._codes, self._scale)
+            self._weight_cache = self.fmt.dequantize_fast(self.codes, self._scale)
         return self._weight_cache
 
     def persistent_bytes(self) -> int:
@@ -464,9 +515,10 @@ class MXNLinear(nn.Module):
         with torch.no_grad():
             codes, sb = fmt.quantize(weight.detach().float(),
                                      headroom=kwargs.get("scale_headroom", 2.0))
-            layer._codes.copy_(codes)
+            layer._state.copy_(fmt.pack_state(codes))
             layer._scale.copy_(sb)
-            layer._acc.zero_()
+            layer._codes_cache = None
+            layer._weight_cache = None
         return layer
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -477,7 +529,7 @@ class MXNLinear(nn.Module):
             if self._pending:
                 raise RuntimeError("MXNLinear forwarded twice before backward")
             self._pending = True
-            out = _MXNFunction.apply(x.reshape(-1, shape[-1]), self, self.weight(), self._token)
+            out = _MXNFunction.apply(x.reshape(-1, shape[-1]), self, self._token)
             return out.reshape(*shape[:-1], self.out_features)
         return x @ self.weight().t()
 
@@ -485,12 +537,39 @@ class MXNLinear(nn.Module):
         """Per-param integrator update, called from backward."""
         self.v_rms, grad_hat = update.rms_update(
             grad_w.detach().float(), self.v_rms, self.rms_beta, self.rms_eps)
-        new_codes, new_acc = self.fmt.step(
-            self._codes, self._acc, self._scale, grad_hat, self.lr)
-        self._codes.copy_(new_codes)
-        self._acc.copy_(new_acc)
+        new_codes = self.fmt.step(self.codes, self._scale, grad_hat, self.lr)
+        self._state.copy_(self.fmt.pack_state(new_codes))
+        self._codes_cache = None  # invalidate unpacked view
         self._weight_cache = None  # invalidate: codes changed
-        # scale is frozen (headroom is an init choice, not an invariant)
+        if self.rescale_every:
+            self._steps_since_rescale += 1
+            if self._steps_since_rescale >= self.rescale_every:
+                self._steps_since_rescale = 0
+                self.refresh_scale_()
+        # scale otherwise stays frozen (headroom is an init choice, not an invariant)
+
+    @torch.no_grad()
+    def refresh_scale_(self) -> None:
+        """Re-fit the E8M0 block scale to the current weights, keeping the accumulator.
+
+        The weight is decoded with the old scale, a new scale is fitted to it with the
+        same headroom rule, and only the magnitude index is re-quantised. The
+        accumulator residue is carried over untouched, so the optimizer state survives
+        the rescale. Without this the scale stays at its init value while the weights
+        grow, and the mass drifts onto the outermost rung.
+        """
+        w = self.fmt.dequantize(self.codes, self._scale)
+        if self.scale_mode == "mse":
+            new_sb = self.fmt.scale_bytes_mse(w, self.scale_headroom, self.clip_frac)
+        else:
+            new_sb = self.fmt.scale_bytes(w, self.scale_headroom)
+        s_new = self.fmt.scale_floats(new_sb).repeat_interleave(_NA_BLOCK, dim=1)
+        mag = torch.bucketize(w / s_new, self.fmt.mids.to(w.device)).clamp(0, self.fmt.n_vals - 1)
+        acc = (self.codes.to(torch.long) % self.fmt.acc_levels) - (self.fmt.C - 1)
+        self._state.copy_(self.fmt.pack_state(self.fmt.encode(mag, acc)))
+        self._scale.copy_(new_sb)
+        self._codes_cache = None
+        self._weight_cache = None
 
     def extra_repr(self) -> str:
         return (f"in_features={self.in_features}, out_features={self.out_features}, "

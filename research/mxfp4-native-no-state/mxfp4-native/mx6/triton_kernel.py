@@ -28,7 +28,17 @@ except Exception:
 BLOCK = 32
 
 
-@triton.jit
+def _jit(fn):
+    """``triton.jit`` when available, else a passthrough.
+
+    Without this the module could not even be imported on a CPU box: the
+    decorator is evaluated at import time, so ``triton`` being ``None`` raised
+    ``AttributeError`` before ``packed_matmul``'s own HAS_TRITON check ran.
+    """
+    return triton.jit(fn) if HAS_TRITON else fn
+
+
+@_jit
 def _packed_matmul_kernel(
     x_ptr,          # [M, K] float32
     codes_ptr,      # [N, K] uint8
@@ -40,6 +50,7 @@ def _packed_matmul_kernel(
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,   # must be multiple of BLOCK (32)
     BLOCK: tl.constexpr,
+    INPUT_PRECISION: tl.constexpr,
 ):
     """Fused decode + matmul: out = x @ decode(codes, scale).T"""
     pid_m = tl.program_id(0)
@@ -82,15 +93,64 @@ def _packed_matmul_kernel(
         w_tile = val_tile * scale_f  # [BLOCK_N, BLOCK_K]
 
         # acc += x_tile @ w_tile.T  →  [BLOCK_M, BLOCK_N]
-        acc += tl.dot(x_tile, tl.trans(w_tile))
+        # input_precision defaults to "ieee": Triton's own default is TF32 on
+        # Ampere+, which would silently disagree with the fp32 torch reference.
+        acc += tl.dot(x_tile, tl.trans(w_tile), input_precision=INPUT_PRECISION)
 
     # Store output
     out_ptrs = out_ptr + offs_m[:, None] * N + offs_n[None, :]
     tl.store(out_ptrs, acc, mask=mask_m[:, None] & mask_n[None, :])
 
 
+@_jit
+def _packed_matmul_dx_kernel(
+    go_ptr,         # [M, N] float32 — upstream gradient
+    codes_ptr,      # [N, K] uint8
+    scale_ptr,      # [N, K // BLOCK] uint8
+    lut_ptr,        # [n_codes] float32
+    out_ptr,        # [M, K] float32
+    M, N, K,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    BLOCK: tl.constexpr,
+    INPUT_PRECISION: tl.constexpr,
+):
+    """Fused decode + grad_x: out = go @ decode(codes, scale)."""
+    pid_m = tl.program_id(0)
+    pid_k = tl.program_id(1)
+
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_k = pid_k * BLOCK_K + tl.arange(0, BLOCK_K)
+    mask_m = offs_m < M
+    mask_k = offs_k < K
+
+    acc = tl.zeros((BLOCK_M, BLOCK_K), dtype=tl.float32)
+    block_idx = offs_k // BLOCK
+
+    for n_start in range(0, N, BLOCK_N):
+        n = n_start + tl.arange(0, BLOCK_N)
+        mask_n = n < N
+
+        go_tile = tl.load(go_ptr + offs_m[:, None] * N + n[None, :],
+                          mask=mask_m[:, None] & mask_n[None, :], other=0.0)
+        code_tile = tl.load(codes_ptr + n[:, None] * K + offs_k[None, :],
+                            mask=mask_n[:, None] & mask_k[None, :], other=0)
+        val_tile = tl.load(lut_ptr + code_tile.to(tl.int64),
+                           mask=mask_n[:, None] & mask_k[None, :], other=0.0)
+        scale_byte = tl.load(scale_ptr + n[:, None] * (K // BLOCK) + block_idx[None, :],
+                             mask=mask_n[:, None] & mask_k[None, :], other=127)
+        w_tile = val_tile * tl.exp2(scale_byte.to(tl.float32) - 127.0)
+
+        acc += tl.dot(go_tile, w_tile, input_precision=INPUT_PRECISION)
+
+    tl.store(out_ptr + offs_m[:, None] * K + offs_k[None, :], acc,
+             mask=mask_m[:, None] & mask_k[None, :])
+
+
 def packed_matmul(x: torch.Tensor, codes: torch.Tensor, scale: torch.Tensor,
-                  code_to_value: torch.Tensor, block: int = BLOCK) -> torch.Tensor:
+                  code_to_value: torch.Tensor, block: int = BLOCK,
+                  input_precision: str = "ieee") -> torch.Tensor:
     """Fused decode + matmul: out = x @ decode(codes, scale).T
 
     Args:
@@ -128,5 +188,38 @@ def packed_matmul(x: torch.Tensor, codes: torch.Tensor, scale: torch.Tensor,
         x, codes, scale, code_to_value, out,
         M, N, K,
         BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K, BLOCK=block,
+        INPUT_PRECISION=input_precision,
+    )
+    return out
+
+
+def packed_matmul_dx(grad_out: torch.Tensor, codes: torch.Tensor, scale: torch.Tensor,
+                     code_to_value: torch.Tensor, block: int = BLOCK,
+                     input_precision: str = "ieee") -> torch.Tensor:
+    """Fused decode + grad_x: out = grad_out @ decode(codes, scale)."""
+    if not HAS_TRITON:
+        raise RuntimeError("Triton not available")
+    M, N = grad_out.shape
+    N2, K = codes.shape
+    assert N == N2, f"N mismatch: grad_out has {N}, codes has {N2}"
+    assert K % block == 0
+    assert scale.shape == (N, K // block)
+
+    grad_out = grad_out.contiguous()
+    codes = codes.contiguous()
+    scale = scale.contiguous()
+    code_to_value = code_to_value.contiguous()
+
+    out = torch.empty(M, K, device=grad_out.device, dtype=torch.float32)
+
+    BLOCK_M = 64 if M >= 64 else 16
+    BLOCK_K = 64 if K >= 64 else 32
+    BLOCK_N = 64
+    grid = (triton.cdiv(M, BLOCK_M), triton.cdiv(K, BLOCK_K))
+    _packed_matmul_dx_kernel[grid](
+        grad_out, codes, scale, code_to_value, out,
+        M, N, K,
+        BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K, BLOCK=block,
+        INPUT_PRECISION=input_precision,
     )
     return out
