@@ -1,0 +1,17 @@
+device=NVIDIA RTX PRO 6000 Blackwell Server Edition d=128 steps=6000 batch=32 seq=128 vocab=65 tokens=1115394 train_tokens=1003854 val_tokens=111540 val_frac=0.1 epochs=24.48 (loss in bits/char) sched=cosine(warmup=0.02 min=0.1) lr=0.01 adam_lr=0.003 eval_every=500 scale_format=e8m0
+tern arms: memory_native=/content/mx/src/memory_native/__init__.py tern_lr=0.003 C=11 lr_scale=0.0002 rms_beta=0.9 rms_eps=0.001
+  tern_counter      seed=0 bits=6.562 val=2.6407 train=2.4059 gap=+0.2348 best=2.6407 clip=nan% flip%(start/mid/end)=14.99/19.23/6.26 edge=74.12% grown=0 (111s)
+      curve: 500:3.562 1000:3.161 1500:2.942 2000:2.809 2500:2.751 3000:2.687 3500:2.679 4000:2.661 4500:2.647 5000:2.650 5500:2.641 6000:2.641
+      magnitudes: -1:37.0%  +0:25.9%  +1:37.1%
+  tern_counter      seed=1 bits=6.562 val=2.6131 train=2.3907 gap=+0.2224 best=2.6131 clip=nan% flip%(start/mid/end)=15.45/19.33/6.49 edge=74.51% grown=0 (80s)
+      curve: 500:3.536 1000:3.043 1500:2.860 2000:2.776 2500:2.732 3000:2.681 3500:2.678 4000:2.655 4500:2.630 5000:2.627 5500:2.619 6000:2.613
+      magnitudes: -1:37.3%  +0:25.5%  +1:37.2%
+  tern_counter      seed=2 bits=6.562 val=2.6180 train=2.3834 gap=+0.2345 best=2.6180 clip=nan% flip%(start/mid/end)=14.38/19.85/6.59 edge=74.43% grown=0 (80s)
+      curve: 500:3.568 1000:3.079 1500:2.876 2000:2.777 2500:2.728 3000:2.695 3500:2.669 4000:2.653 4500:2.639 5000:2.633 5500:2.631 6000:2.618
+      magnitudes: -1:37.1%  +0:25.6%  +1:37.3%
+  tern_counter      seed=3 bits=6.562 val=2.7200 train=2.4866 gap=+0.2334 best=2.7200 clip=nan% flip%(start/mid/end)=15.25/19.24/6.35 edge=74.05% grown=0 (103s)
+      curve: 500:3.530 1000:3.139 1500:2.967 2000:2.882 2500:2.820 3000:2.775 3500:2.750 4000:2.736 4500:2.729 5000:2.721 5500:2.721 6000:2.720
+      magnitudes: -1:37.0%  +0:26.0%  +1:37.1%
+
+arm                 bits  mean val   train     gap      sd  clip%    best  flip%e  edge%  seeds
+tern_counter       6.562    2.6479  2.4166 +0.2313  0.0495    nan  2.6479    6.42  74.28  [2.6407, 2.6131, 2.618, 2.72]

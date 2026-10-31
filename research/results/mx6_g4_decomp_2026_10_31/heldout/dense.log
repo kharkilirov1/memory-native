@@ -1,0 +1,16 @@
+device=NVIDIA RTX PRO 6000 Blackwell Server Edition d=128 steps=6000 batch=32 seq=128 vocab=65 tokens=1115394 train_tokens=1003854 val_tokens=111540 val_frac=0.1 epochs=24.48 (loss in bits/char) sched=cosine(warmup=0.02 min=0.1) lr=0.01 adam_lr=0.003 eval_every=500 scale_format=e8m0
+  dense_bf16        seed=0 bits=96.000 val=2.2883 train=1.9259 gap=+0.3624 best=2.2883 clip=nan% flip%(start/mid/end)=nan/nan/nan edge=nan% grown=0 (14s)
+      curve: 500:2.859 1000:2.619 1500:2.518 2000:2.445 2500:2.398 3000:2.366 3500:2.346 4000:2.338 4500:2.312 5000:2.302 5500:2.293 6000:2.288
+      magnitudes: (no counter layers)
+  dense_bf16        seed=1 bits=96.000 val=2.2994 train=1.9302 gap=+0.3691 best=2.2994 clip=nan% flip%(start/mid/end)=nan/nan/nan edge=nan% grown=0 (14s)
+      curve: 500:2.813 1000:2.571 1500:2.490 2000:2.457 2500:2.403 3000:2.379 3500:2.353 4000:2.332 4500:2.322 5000:2.306 5500:2.305 6000:2.299
+      magnitudes: (no counter layers)
+  dense_bf16        seed=2 bits=96.000 val=2.2733 train=1.9234 gap=+0.3499 best=2.2733 clip=nan% flip%(start/mid/end)=nan/nan/nan edge=nan% grown=0 (14s)
+      curve: 500:2.859 1000:2.622 1500:2.491 2000:2.430 2500:2.388 3000:2.362 3500:2.338 4000:2.321 4500:2.298 5000:2.289 5500:2.283 6000:2.273
+      magnitudes: (no counter layers)
+  dense_bf16        seed=3 bits=96.000 val=2.2845 train=1.9239 gap=+0.3606 best=2.2825 clip=nan% flip%(start/mid/end)=nan/nan/nan edge=nan% grown=0 (14s)
+      curve: 500:2.840 1000:2.581 1500:2.484 2000:2.438 2500:2.405 3000:2.350 3500:2.336 4000:2.319 4500:2.314 5000:2.295 5500:2.283 6000:2.285
+      magnitudes: (no counter layers)
+
+arm                 bits  mean val   train     gap      sd  clip%    best  flip%e  edge%  seeds
+dense_bf16        96.000    2.2864  1.9259 +0.3605  0.0108    nan  2.2859     nan    nan  [2.2883, 2.2994, 2.2733, 2.2845]
