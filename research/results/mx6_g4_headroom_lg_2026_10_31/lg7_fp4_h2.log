@@ -1,0 +1,17 @@
+lg_ab: lg7_fp4_h2 -> LatentGridLinear k=7 m=9 grid_points=127/128 headroom=2.0 init=fine bits=k+0.5+32/in+32/numel
+device=NVIDIA RTX PRO 6000 Blackwell Server Edition d=128 steps=6000 batch=32 seq=128 vocab=65 tokens=1115394 train_tokens=1003854 val_tokens=111540 val_frac=0.1 epochs=24.48 (loss in bits/char) sched=cosine(warmup=0.02 min=0.1) lr=0.01 adam_lr=0.003 eval_every=500 scale_format=nvfp4
+  lg7_fp4_h2        seed=0 bits=7.688 val=2.3586 train=2.0513 gap=+0.3072 best=2.3586 clip=1.82% flip%(start/mid/end)=87.16/63.62/55.96 edge=18.89% grown=0 (70s)
+      weights: kurt=1.96 tail3=0.00% zero=3.3%
+      curve: 500:3.039 1000:2.774 1500:2.628 2000:2.577 2500:2.510 3000:2.483 3500:2.453 4000:2.439 4500:2.394 5000:2.393 5500:2.364 6000:2.359
+      magnitudes: -6:9.4%  -4:13.0%  -3:8.4%  -2:5.8%  -1.5:4.5%  -1:3.8%  -0.5:3.4%  +0:3.3%  +0.5:3.4%  +1:3.7%  +1.5:4.5%  +2:5.8%  +3:8.5%  +4:13.0%  +6:9.5%
+  lg7_fp4_h2        seed=1 bits=7.688 val=2.3440 train=2.0483 gap=+0.2957 best=2.3440 clip=1.85% flip%(start/mid/end)=87.57/63.86/56.13 edge=19.05% grown=0 (69s)
+      weights: kurt=1.96 tail3=0.00% zero=3.3%
+      curve: 500:3.067 1000:2.742 1500:2.644 2000:2.571 2500:2.506 3000:2.487 3500:2.439 4000:2.399 4500:2.384 5000:2.368 5500:2.346 6000:2.344
+      magnitudes: -6:9.5%  -4:13.0%  -3:8.4%  -2:5.8%  -1.5:4.5%  -1:3.7%  -0.5:3.4%  +0:3.3%  +0.5:3.4%  +1:3.7%  +1.5:4.5%  +2:5.7%  +3:8.4%  +4:13.1%  +6:9.5%
+
+arm                 bits  mean val   train     gap      sd  clip%    best  flip%e  edge%  seeds
+lg7_fp4_h2         7.688    2.3513  2.0498 +0.3015  0.0103   1.83  2.3513   56.04  18.97  [2.3586, 2.344]
+
+deployed weights of the 4 block linears (pooled over rows & layers; mean over seeds): kurt = E[w^4]/E[w^2]^2 per row (Gaussian 3, uniform 1.8); tail3 = frac |w| > 3*rms_row (Gaussian 0.27%); zero = frac exactly 0
+arm                  kurt  tail3%  zero%
+lg7_fp4_h2           1.96    0.00    3.3

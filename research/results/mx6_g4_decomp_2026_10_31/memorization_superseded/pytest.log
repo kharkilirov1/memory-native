@@ -1,0 +1,113 @@
+..........FF............................................................ [ 21%]
+........................................................................ [ 43%]
+........................................................................ [ 64%]
+........................................................................ [ 86%]
+.............................................                            [100%]
+=================================== FAILURES ===================================
+_____________________ test_run_arm_const_and_cosine_curves _____________________
+
+    def test_run_arm_const_and_cosine_curves():
+>       r = _run("const")
+            ^^^^^^^^^^^^^
+
+tests/test_e1_schedule.py:91: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/test_e1_schedule.py:86: in _run
+    return e1.run_arm(arm, 0, D, steps, 4, 32, ids, VOCAB, lr=0.01, adam_lr=3e-3,
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+arm = 'na_wide_c3', seed = 0, d = 64, steps = 4, batch = 4, seq = 32
+ids = tensor([ 1, 15,  1,  ...,  3, 18, 14]), vocab = 24, lr = 0.01
+adam_lr = 0.003, sched = 'const', warmup_frac = 0.02, lr_min_frac = 0.1
+eval_every = 2
+
+    def run_arm(arm: str, seed: int, d: int, steps: int, batch: int, seq: int,
+                ids: torch.Tensor, vocab: int, lr: float, adam_lr: float,
+                sched: str = "const", warmup_frac: float = 0.02, lr_min_frac: float = 0.1,
+                eval_every: int = 100) -> dict:
+        torch.manual_seed(seed)
+        model = CharLM(arm, vocab, d=d, lr=lr).to(DEV)
+        bits = measured_bits(model, arm)
+        want = expected_bits(model, arm)
+        if abs(bits - want) > 0.02:
+            raise AssertionError(f"{arm}: measured {bits:.3f} bits != expected {want:.3f}")
+    
+        opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=adam_lr)
+        model.train()
+        t0 = time.time()
+        clips = []
+        # One schedule shape for everything: counter lr and the AdamW group (dense arm: all
+        # weights; quantized arms: embeddings / LN / head).
+        prev = snapshot_values(model)
+        curve = []                       # (step, val, lr, flip_rate, edge, clip) per eval
+        for step in range(steps):
+            cur_lr = sched_lr(sched, lr, step, steps, warmup_frac, lr_min_frac)
+            cur_adam = sched_lr(sched, adam_lr, step, steps, warmup_frac, lr_min_frac)
+            set_counter_lr(model, cur_lr)
+            for g in opt.param_groups:
+                g["lr"] = cur_adam
+            idx = torch.randint(0, len(ids) - seq - 1, (batch,), device=DEV)
+>           x = ids[idx.unsqueeze(1) + torch.arange(seq, device=DEV)]
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           RuntimeError: indices should be either on cpu or on the same device as the indexed tensor (cpu)
+
+probes/e1_quality.py:324: RuntimeError
+_____________________ test_dense_arm_has_no_flip_telemetry _____________________
+
+    def test_dense_arm_has_no_flip_telemetry():
+>       r = _run("cosine", arm="dense_bf16")
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/test_e1_schedule.py:100: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/test_e1_schedule.py:86: in _run
+    return e1.run_arm(arm, 0, D, steps, 4, 32, ids, VOCAB, lr=0.01, adam_lr=3e-3,
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+arm = 'dense_bf16', seed = 0, d = 64, steps = 4, batch = 4, seq = 32
+ids = tensor([17, 19, 17,  ...,  8, 20,  3]), vocab = 24, lr = 0.01
+adam_lr = 0.003, sched = 'cosine', warmup_frac = 0.02, lr_min_frac = 0.1
+eval_every = 2
+
+    def run_arm(arm: str, seed: int, d: int, steps: int, batch: int, seq: int,
+                ids: torch.Tensor, vocab: int, lr: float, adam_lr: float,
+                sched: str = "const", warmup_frac: float = 0.02, lr_min_frac: float = 0.1,
+                eval_every: int = 100) -> dict:
+        torch.manual_seed(seed)
+        model = CharLM(arm, vocab, d=d, lr=lr).to(DEV)
+        bits = measured_bits(model, arm)
+        want = expected_bits(model, arm)
+        if abs(bits - want) > 0.02:
+            raise AssertionError(f"{arm}: measured {bits:.3f} bits != expected {want:.3f}")
+    
+        opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=adam_lr)
+        model.train()
+        t0 = time.time()
+        clips = []
+        # One schedule shape for everything: counter lr and the AdamW group (dense arm: all
+        # weights; quantized arms: embeddings / LN / head).
+        prev = snapshot_values(model)
+        curve = []                       # (step, val, lr, flip_rate, edge, clip) per eval
+        for step in range(steps):
+            cur_lr = sched_lr(sched, lr, step, steps, warmup_frac, lr_min_frac)
+            cur_adam = sched_lr(sched, adam_lr, step, steps, warmup_frac, lr_min_frac)
+            set_counter_lr(model, cur_lr)
+            for g in opt.param_groups:
+                g["lr"] = cur_adam
+            idx = torch.randint(0, len(ids) - seq - 1, (batch,), device=DEV)
+>           x = ids[idx.unsqueeze(1) + torch.arange(seq, device=DEV)]
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           RuntimeError: indices should be either on cpu or on the same device as the indexed tensor (cpu)
+
+probes/e1_quality.py:324: RuntimeError
+=============================== warnings summary ===============================
+tests/test_layer.py::test_a_regression_actually_learns
+  /content/mx/mxfp4-native/tests/test_layer.py:96: UserWarning: Converting a tensor with requires_grad=True to a scalar may lead to unexpected behavior.
+  Consider using tensor.detach() first. (Triggered internally at /pytorch/torch/csrc/autograd/generated/python_variable_methods.cpp:836.)
+    losses.append(float(loss))
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/test_e1_schedule.py::test_run_arm_const_and_cosine_curves - Runt...
+FAILED tests/test_e1_schedule.py::test_dense_arm_has_no_flip_telemetry - Runt...
+2 failed, 331 passed, 1 warning in 649.55s (0:10:49)

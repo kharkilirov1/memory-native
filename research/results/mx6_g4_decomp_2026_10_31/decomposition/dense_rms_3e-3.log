@@ -1,0 +1,25 @@
+device=NVIDIA RTX PRO 6000 Blackwell Server Edition d=128 steps=6000 batch=32 seq=128 vocab=65 tokens=1115394 train_tokens=1003854 val_tokens=111540 val_frac=0.1 epochs=24.48 (loss in bits/char) sched=cosine(warmup=0.02 min=0.1) lr=0.01 adam_lr=0.003 eval_every=500 scale_format=e8m0
+gap arms: dense_rms_lr=0.003
+  dense_rms         seed=0 bits=32.188 val=2.2982 train=1.9490 gap=+0.3492 best=2.2964 clip=nan% flip%(start/mid/end)=nan/nan/nan edge=nan% grown=0 (54s)
+      weights: kurt=2.85 tail3=0.25% zero=0.0%
+      curve: 500:3.126 1000:2.928 1500:2.635 2000:2.511 2500:2.447 3000:2.402 3500:2.371 4000:2.346 4500:2.330 5000:2.314 5500:2.296 6000:2.298
+      magnitudes: (no counter layers)
+  dense_rms         seed=1 bits=32.188 val=2.2964 train=1.9528 gap=+0.3435 best=2.2964 clip=nan% flip%(start/mid/end)=nan/nan/nan edge=nan% grown=0 (52s)
+      weights: kurt=2.84 tail3=0.24% zero=0.0%
+      curve: 500:3.150 1000:2.839 1500:2.638 2000:2.525 2500:2.465 3000:2.417 3500:2.379 4000:2.345 4500:2.329 5000:2.310 5500:2.301 6000:2.296
+      magnitudes: (no counter layers)
+  dense_rms         seed=2 bits=32.188 val=2.2900 train=1.9355 gap=+0.3544 best=2.2900 clip=nan% flip%(start/mid/end)=nan/nan/nan edge=nan% grown=0 (52s)
+      weights: kurt=2.85 tail3=0.24% zero=0.0%
+      curve: 500:3.196 1000:2.827 1500:2.617 2000:2.518 2500:2.458 3000:2.400 3500:2.351 4000:2.343 4500:2.320 5000:2.309 5500:2.297 6000:2.290
+      magnitudes: (no counter layers)
+  dense_rms         seed=3 bits=32.188 val=2.3049 train=1.9475 gap=+0.3575 best=2.3049 clip=nan% flip%(start/mid/end)=nan/nan/nan edge=nan% grown=0 (49s)
+      weights: kurt=2.85 tail3=0.24% zero=0.0%
+      curve: 500:3.125 1000:2.842 1500:2.630 2000:2.553 2500:2.462 3000:2.414 3500:2.374 4000:2.349 4500:2.341 5000:2.324 5500:2.305 6000:2.305
+      magnitudes: (no counter layers)
+
+arm                 bits  mean val   train     gap      sd  clip%    best  flip%e  edge%  seeds
+dense_rms         32.188    2.2974  1.9462 +0.3511  0.0062    nan  2.2969     nan    nan  [2.2982, 2.2964, 2.29, 2.3049]
+
+deployed weights of the 4 block linears (pooled over rows & layers; mean over seeds): kurt = E[w^4]/E[w^2]^2 per row (Gaussian 3, uniform 1.8); tail3 = frac |w| > 3*rms_row (Gaussian 0.27%); zero = frac exactly 0
+arm                  kurt  tail3%  zero%
+dense_rms            2.85    0.24    0.0

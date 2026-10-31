@@ -1,0 +1,17 @@
+device=NVIDIA RTX PRO 6000 Blackwell Server Edition d=128 steps=6000 batch=32 seq=128 vocab=65 tokens=1115394 train_tokens=1003854 val_tokens=111540 val_frac=0.1 epochs=24.48 (loss in bits/char) sched=cosine(warmup=0.02 min=0.1) lr=0.01 adam_lr=0.003 eval_every=500 scale_format=nvfp4
+gap arms: counter_wd=0 scale_lr=0
+  na_fp4_c4         seed=0 bits=7.688 val=2.3867 train=2.0671 gap=+0.3195 best=2.3800 clip=0.03% flip%(start/mid/end)=88.42/75.78/68.66 edge=18.60% grown=0 (285s)
+      weights: kurt=2.25 tail3=0.00% zero=4.7%
+      curve: 500:3.099 1000:2.793 1500:2.663 2000:2.580 2500:2.516 3000:2.504 3500:2.430 4000:2.440 4500:2.393 5000:2.397 5500:2.380 6000:2.387
+      magnitudes: -6:9.3%  -4:8.8%  -3:7.5%  -2:6.4%  -1.5:5.7%  -1:5.2%  -0.5:4.8%  +0:4.7%  +0.5:4.8%  +1:5.1%  +1.5:5.7%  +2:6.4%  +3:7.6%  +4:8.7%  +6:9.3%
+  na_fp4_c4         seed=1 bits=7.688 val=2.3804 train=2.0861 gap=+0.2942 best=2.3776 clip=0.03% flip%(start/mid/end)=88.69/75.83/68.82 edge=18.55% grown=0 (283s)
+      weights: kurt=2.26 tail3=0.00% zero=4.7%
+      curve: 500:2.978 1000:2.738 1500:2.606 2000:2.558 2500:2.518 3000:2.475 3500:2.429 4000:2.399 4500:2.393 5000:2.400 5500:2.378 6000:2.380
+      magnitudes: -6:9.3%  -4:8.5%  -3:7.4%  -2:6.5%  -1.5:5.8%  -1:5.2%  -0.5:4.9%  +0:4.7%  +0.5:4.9%  +1:5.2%  +1.5:5.8%  +2:6.4%  +3:7.5%  +4:8.7%  +6:9.3%
+
+arm                 bits  mean val   train     gap      sd  clip%    best  flip%e  edge%  seeds
+na_fp4_c4          7.688    2.3835  2.0766 +0.3069  0.0045   0.03  2.3788   68.74  18.58  [2.3867, 2.3804]
+
+deployed weights of the 4 block linears (pooled over rows & layers; mean over seeds): kurt = E[w^4]/E[w^2]^2 per row (Gaussian 3, uniform 1.8); tail3 = frac |w| > 3*rms_row (Gaussian 0.27%); zero = frac exactly 0
+arm                  kurt  tail3%  zero%
+na_fp4_c4            2.26    0.00    4.7

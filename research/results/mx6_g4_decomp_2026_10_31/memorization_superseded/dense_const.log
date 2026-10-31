@@ -1,0 +1,16 @@
+device=NVIDIA RTX PRO 6000 Blackwell Server Edition d=128 steps=6000 batch=32 seq=128 vocab=62 tokens=200000 (loss in bits/char) sched=const lr=0.01 adam_lr=0.003 eval_every=250 scale_format=e8m0
+  dense_bf16  seed=0 bits=96.000 val=1.5771 best=1.5771 clip=nan% flip%(start/mid/end)=nan/nan/nan edge=nan% grown=0 (20s)
+      curve: 250:2.772 500:2.395 750:2.257 1000:2.166 1250:2.090 1500:2.040 1750:1.997 2000:1.956 2250:1.914 2500:1.887 2750:1.868 3000:1.823 3250:1.810 3500:1.785 3750:1.742 4000:1.736 4250:1.721 4500:1.697 4750:1.669 5000:1.641 5250:1.632 5500:1.608 5750:1.595 6000:1.577
+      magnitudes: (no counter layers)
+  dense_bf16  seed=1 bits=96.000 val=1.5764 best=1.5734 clip=nan% flip%(start/mid/end)=nan/nan/nan edge=nan% grown=0 (21s)
+      curve: 250:2.809 500:2.436 750:2.264 1000:2.159 1250:2.095 1500:2.039 1750:1.990 2000:1.966 2250:1.918 2500:1.892 2750:1.839 3000:1.830 3250:1.804 3500:1.776 3750:1.750 4000:1.721 4250:1.709 4500:1.684 4750:1.663 5000:1.648 5250:1.630 5500:1.585 5750:1.573 6000:1.576
+      magnitudes: (no counter layers)
+  dense_bf16  seed=2 bits=96.000 val=1.5675 best=1.5675 clip=nan% flip%(start/mid/end)=nan/nan/nan edge=nan% grown=0 (23s)
+      curve: 250:2.778 500:2.419 750:2.257 1000:2.158 1250:2.077 1500:2.028 1750:1.993 2000:1.956 2250:1.913 2500:1.879 2750:1.858 3000:1.827 3250:1.804 3500:1.768 3750:1.737 4000:1.722 4250:1.696 4500:1.668 4750:1.649 5000:1.627 5250:1.609 5500:1.603 5750:1.579 6000:1.568
+      magnitudes: (no counter layers)
+  dense_bf16  seed=3 bits=96.000 val=1.5697 best=1.5662 clip=nan% flip%(start/mid/end)=nan/nan/nan edge=nan% grown=0 (21s)
+      curve: 250:2.783 500:2.452 750:2.267 1000:2.165 1250:2.089 1500:2.026 1750:1.982 2000:1.945 2250:1.897 2500:1.873 2750:1.832 3000:1.811 3250:1.783 3500:1.760 3750:1.741 4000:1.722 4250:1.695 4500:1.687 4750:1.656 5000:1.638 5250:1.613 5500:1.602 5750:1.566 6000:1.570
+      magnitudes: (no counter layers)
+
+arm           bits  mean val      sd  clip%    best  flip%e  edge%  seeds
+dense_bf16  96.000    1.5727  0.0048    nan  1.5711     nan    nan  [1.5771, 1.5764, 1.5675, 1.5697]

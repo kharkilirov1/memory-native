@@ -1,0 +1,61 @@
+device=NVIDIA RTX PRO 6000 Blackwell Server Edition d=128 steps=6000 batch=32 seq=128 vocab=65 tokens=1115394 train_tokens=1003854 val_tokens=111540 val_frac=0.1 epochs=24.48 (loss in bits/char) sched=cosine(warmup=0.02 min=0.1) lr=0.01 adam_lr=0.003 eval_every=500 scale_format=e8m0
+gap arms: qat_lr=0.01
+  qat_tern          seed=0 bits=96.000 val=2.4146 train=2.1441 gap=+0.2705 best=2.4146 clip=nan% flip%(start/mid/end)=nan/nan/nan edge=nan% grown=0 (57s)
+      weights: kurt=1.52 tail3=0.00% zero=34.3%
+      curve: 500:2.988 1000:2.755 1500:2.660 2000:2.576 2500:2.571 3000:2.540 3500:2.510 4000:2.490 4500:2.465 5000:2.447 5500:2.427 6000:2.415
+      magnitudes: (no counter layers)
+  qat_tern          seed=1 bits=96.000 val=2.4435 train=2.1508 gap=+0.2926 best=2.4368 clip=nan% flip%(start/mid/end)=nan/nan/nan edge=nan% grown=0 (55s)
+      weights: kurt=1.52 tail3=0.00% zero=34.3%
+      curve: 500:2.964 1000:2.738 1500:2.672 2000:2.619 2500:2.565 3000:2.553 3500:2.530 4000:2.497 4500:2.481 5000:2.448 5500:2.437 6000:2.443
+      magnitudes: (no counter layers)
+  qat_tern          seed=2 bits=96.000 val=2.4189 train=2.1586 gap=+0.2603 best=2.4189 clip=nan% flip%(start/mid/end)=nan/nan/nan edge=nan% grown=0 (55s)
+      weights: kurt=1.53 tail3=0.00% zero=34.3%
+      curve: 500:2.970 1000:2.764 1500:2.673 2000:2.603 2500:2.572 3000:2.545 3500:2.503 4000:2.494 4500:2.468 5000:2.456 5500:2.449 6000:2.419
+      magnitudes: (no counter layers)
+  qat_tern          seed=3 bits=96.000 val=2.4487 train=2.1651 gap=+0.2836 best=2.4487 clip=nan% flip%(start/mid/end)=nan/nan/nan edge=nan% grown=0 (44s)
+      weights: kurt=1.52 tail3=0.00% zero=34.2%
+      curve: 500:3.003 1000:2.780 1500:2.682 2000:2.659 2500:2.597 3000:2.547 3500:2.538 4000:2.509 4500:2.490 5000:2.483 5500:2.452 6000:2.449
+      magnitudes: (no counter layers)
+  qat_fp4           seed=0 bits=96.000 val=2.5382 train=2.2588 gap=+0.2793 best=2.5382 clip=nan% flip%(start/mid/end)=nan/nan/nan edge=nan% grown=0 (127s)
+      weights: kurt=3.41 tail3=0.42% zero=7.2%
+      curve: 500:3.053 1000:2.994 1500:2.975 2000:2.882 2500:2.816 3000:2.730 3500:2.660 4000:2.615 4500:2.589 5000:2.558 5500:2.545 6000:2.538
+      magnitudes: (no counter layers)
+  qat_fp4           seed=1 bits=96.000 val=2.3422 train=1.9876 gap=+0.3546 best=2.3420 clip=nan% flip%(start/mid/end)=nan/nan/nan edge=nan% grown=0 (127s)
+      weights: kurt=3.29 tail3=0.37% zero=7.1%
+      curve: 500:2.972 1000:2.698 1500:2.589 2000:2.531 2500:2.487 3000:2.436 3500:2.426 4000:2.394 4500:2.370 5000:2.346 5500:2.342 6000:2.342
+      magnitudes: (no counter layers)
+  qat_fp4           seed=2 bits=96.000 val=2.3177 train=1.9768 gap=+0.3408 best=2.3177 clip=nan% flip%(start/mid/end)=nan/nan/nan edge=nan% grown=0 (127s)
+      weights: kurt=3.34 tail3=0.39% zero=7.2%
+      curve: 500:2.966 1000:2.722 1500:2.592 2000:2.511 2500:2.463 3000:2.419 3500:2.388 4000:2.365 4500:2.337 5000:2.330 5500:2.319 6000:2.318
+      magnitudes: (no counter layers)
+  qat_fp4           seed=3 bits=96.000 val=2.5819 train=2.3157 gap=+0.2661 best=2.5819 clip=nan% flip%(start/mid/end)=nan/nan/nan edge=nan% grown=0 (127s)
+      weights: kurt=3.27 tail3=0.45% zero=7.2%
+      curve: 500:3.055 1000:2.994 1500:2.959 2000:2.978 2500:2.924 3000:2.835 3500:2.770 4000:2.704 4500:2.661 5000:2.618 5500:2.596 6000:2.582
+      magnitudes: (no counter layers)
+  qat_e2m1lad       seed=0 bits=96.000 val=2.4642 train=2.1899 gap=+0.2742 best=2.4642 clip=nan% flip%(start/mid/end)=nan/nan/nan edge=nan% grown=0 (127s)
+      weights: kurt=4.62 tail3=0.51% zero=7.3%
+      curve: 500:3.058 1000:2.974 1500:2.850 2000:2.722 2500:2.656 3000:2.609 3500:2.579 4000:2.529 4500:2.507 5000:2.482 5500:2.467 6000:2.464
+      magnitudes: (no counter layers)
+  qat_e2m1lad       seed=1 bits=96.000 val=2.4507 train=2.1723 gap=+0.2784 best=2.4507 clip=nan% flip%(start/mid/end)=nan/nan/nan edge=nan% grown=0 (106s)
+      weights: kurt=4.49 tail3=0.52% zero=7.2%
+      curve: 500:3.009 1000:2.807 1500:2.702 2000:2.667 2500:2.618 3000:2.615 3500:2.579 4000:2.535 4500:2.501 5000:2.480 5500:2.470 6000:2.451
+      magnitudes: (no counter layers)
+  qat_e2m1lad       seed=2 bits=96.000 val=2.4446 train=2.1690 gap=+0.2756 best=2.4446 clip=nan% flip%(start/mid/end)=nan/nan/nan edge=nan% grown=0 (74s)
+      weights: kurt=4.52 tail3=0.51% zero=7.2%
+      curve: 500:2.986 1000:2.832 1500:2.703 2000:2.636 2500:2.593 3000:2.566 3500:2.524 4000:2.502 4500:2.487 5000:2.462 5500:2.445 6000:2.445
+      magnitudes: (no counter layers)
+  qat_e2m1lad       seed=3 bits=96.000 val=2.4525 train=2.1663 gap=+0.2861 best=2.4496 clip=nan% flip%(start/mid/end)=nan/nan/nan edge=nan% grown=0 (103s)
+      weights: kurt=4.50 tail3=0.51% zero=7.2%
+      curve: 500:3.043 1000:2.909 1500:2.773 2000:2.697 2500:2.625 3000:2.561 3500:2.548 4000:2.502 4500:2.497 5000:2.475 5500:2.450 6000:2.452
+      magnitudes: (no counter layers)
+
+arm                 bits  mean val   train     gap      sd  clip%    best  flip%e  edge%  seeds
+qat_tern          96.000    2.4314  2.1547 +0.2768  0.0172    nan  2.4298     nan    nan  [2.4146, 2.4435, 2.4189, 2.4487]
+qat_fp4           96.000    2.4450  2.1348 +0.3102  0.1344    nan  2.4449     nan    nan  [2.5382, 2.3422, 2.3177, 2.5819]
+qat_e2m1lad       96.000    2.4530  2.1744 +0.2786  0.0082    nan  2.4523     nan    nan  [2.4642, 2.4507, 2.4446, 2.4525]
+
+deployed weights of the 4 block linears (pooled over rows & layers; mean over seeds): kurt = E[w^4]/E[w^2]^2 per row (Gaussian 3, uniform 1.8); tail3 = frac |w| > 3*rms_row (Gaussian 0.27%); zero = frac exactly 0
+arm                  kurt  tail3%  zero%
+qat_tern             1.52    0.00   34.3
+qat_fp4              3.33    0.41    7.2
+qat_e2m1lad          4.53    0.51    7.2

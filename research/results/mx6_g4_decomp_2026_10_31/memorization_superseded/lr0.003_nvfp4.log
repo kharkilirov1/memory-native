@@ -1,0 +1,4 @@
+device=NVIDIA RTX PRO 6000 Blackwell Server Edition d=128 steps=6000 batch=32 seq=128 vocab=62 tokens=200000 (loss in bits/char) sched=cosine(warmup=0.02 min=0.05) lr=0.003 adam_lr=0.003 eval_every=250 scale_format=nvfp4
+  na_e2m1_c5  seed=0 bits=6.688 val=2.1769 best=2.1748 clip=0.01% flip%(start/mid/end)=41.81/55.96/30.91 edge=36.55% grown=0 (182s)
+      curve: 250:3.509 500:3.124 750:2.880 1000:2.667 1250:2.558 1500:2.502 1750:2.419 2000:2.380 2250:2.334 2500:2.321 2750:2.300 3000:2.272 3250:2.267 3500:2.243 3750:2.237 4000:2.221 4250:2.207 4500:2.204 4750:2.189 5000:2.186 5250:2.180 5500:2.178 5750:2.175 6000:2.177
+      magnitudes: -6:18.3%  -1:15.1%  -0.5:11.3%  +0:10.5%  +0.5:11.4%  +1:15.1%  +6:18.2%
