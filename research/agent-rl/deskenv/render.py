@@ -1,4 +1,4 @@
-"""Render an accessibility tree as indented text for the LLM."""
+"""Render an accessibility tree as indented text for the LLM, and menu path helpers."""
 
 from __future__ import annotations
 
@@ -38,7 +38,7 @@ def _name_str(name: str | None, max_name: int) -> str:
         return ""
     stripped = name.rstrip()
     if len(stripped) > max_name:
-        stripped = stripped[: max_name - 1] + "…"
+        stripped = stripped[: max_name - 1] + "\u2026"
     return f' "{stripped}"'
 
 
@@ -106,18 +106,18 @@ def render(
     max_name: int = 60,
     open_menus: tuple[str, ...] = (),
 ) -> tuple[str, dict[int, str]]:
-    """Produce indented text and a short-id → ref_id map.
+    """Produce indented text and a short-id to ref_id map.
 
     Parameters
     ----------
     tree:
         Root accessibility node.
     max_lines:
-        Maximum output lines; excess is truncated with ``… (N more)``.
+        Maximum output lines; excess is truncated.
     max_name:
         Maximum displayed name length.
     open_menus:
-        ``ref_id`` s of menus whose children should be shown.
+        ``ref_id``s of menus whose children should be shown.
 
     Returns
     -------
@@ -140,13 +140,12 @@ def render(
         actions = node.get("available_actions") or []
         states = node.get("states") or []
 
-        # Collapsed menu summary
         coll_count = node.get("_collapsed_count")
         if coll_count is not None:
             short_id += 1
             indent = "  " * depth
             name_display = _name_str(name, max_name)
-            body = f'[short_id={short_id}] {role}{name_display} (+{coll_count} items, use open_menu)'
+            body = f"[short_id={short_id}] {role}{name_display} (+{coll_count} items, use open_menu)"
             lines.append(f"{indent}{body}")
             if ref:
                 refmap[short_id] = ref
@@ -169,6 +168,58 @@ def render(
     if len(lines) > max_lines:
         extra = len(lines) - max_lines
         lines = lines[:max_lines]
-        lines.append(f"… ({extra} more)")
+        lines.append(f"\u2026 ({extra} more)")
 
     return "\n".join(lines), refmap
+
+
+# ---------------------------------------------------------------------------
+# Menu name-path helpers  (cross-snapshot stable)
+# ---------------------------------------------------------------------------
+
+
+def resolve_menu_name_path(
+    tree: dict[str, Any], path: tuple[str, ...]
+) -> str | None:
+    """Walk *tree* following *path* and return the ref_id of the deepest node.
+
+    *path* is a sequence of stripped menu names, e.g. ``("File",)`` or
+    ``("Edit", "Convert")``.  Returns ``None`` if any step is not found.
+    """
+    current = tree
+    for name in path:
+        found: dict[str, Any] | None = None
+        for child in current.get("children") or []:
+            if child.get("name", "").rstrip() == name:
+                found = child
+                break
+        if found is None:
+            return None
+        current = found
+    return current.get("ref_id")
+
+
+def find_menu_name_path(
+    tree: dict[str, Any], target_ref_id: str
+) -> tuple[str, ...] | None:
+    """Walk *tree* depth-first and return the name-path to the node with ref_id.
+
+    Returns ``()`` for the root node, ``("File",)`` for a top-level menu,
+    ``("Edit", "Convert")`` for a submenu, or ``None`` when not found.
+    Non-string names are skipped (the path segment is an empty string).
+    """
+    return _find_path_dfs(tree, target_ref_id, ())
+
+
+def _find_path_dfs(
+    node: dict[str, Any], target: str, cur_path: tuple[str, ...]
+) -> tuple[str, ...] | None:
+    if node.get("ref_id") == target:
+        return cur_path
+    for child in node.get("children") or []:
+        child_name = (child.get("name") or "").rstrip()
+        next_path = cur_path + (child_name,) if child_name else cur_path
+        result = _find_path_dfs(child, target, next_path)
+        if result is not None:
+            return result
+    return None

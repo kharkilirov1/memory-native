@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass, fields
 from typing import Any
 
@@ -29,6 +28,7 @@ _OPS_REQUIRED: dict[str, set[str]] = {
     "select": {"id"},
     "press": {"keys"},
     "open_menu": {"id"},
+    "close_menu": {"id"},
     "done": set(),
 }
 
@@ -43,7 +43,7 @@ def parse_action(text: str, refmap: dict[int, str]) -> Action | str:
     text:
         Model reply.  The action line must be the very last line.
     refmap:
-        Current short-id → full-ref-id mapping from ``render()``.
+        Current short-id to full-ref-id mapping from ``render()``.
 
     Returns
     -------
@@ -62,7 +62,7 @@ def parse_action(text: str, refmap: dict[int, str]) -> Action | str:
             break
 
     if action_line is None:
-        return 'no ACTION: line found — end your reply with `ACTION: {"op": "..."}`'
+        return 'no ACTION: line found \u2014 end your reply with `ACTION: {"op": "..."}`'
 
     # Parse JSON
     try:
@@ -85,7 +85,7 @@ def parse_action(text: str, refmap: dict[int, str]) -> Action | str:
     if missing:
         return f"op {op!r} missing required field(s): {', '.join(sorted(missing))}"
 
-    # For ops that take an id, map short id → full ref
+    # For ops that take an id, map short id to full ref
     id_field = "id" if "id" in required else None
     resolved_id: str | None = None
     if id_field is not None:
@@ -105,7 +105,7 @@ def parse_action(text: str, refmap: dict[int, str]) -> Action | str:
     kw.pop("op", None)
     if resolved_id is not None:
         kw["id"] = resolved_id
-    # Extra keys not in Action fields → ignore silently
+    # Extra keys not in Action fields are silently ignored
     valid_field_names = {f.name for f in fields(Action)}
     kw = {k: v for k, v in kw.items() if k in valid_field_names}
     return Action(op=op, **kw)
