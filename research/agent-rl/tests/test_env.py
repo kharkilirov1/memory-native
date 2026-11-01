@@ -221,68 +221,84 @@ def test_env_max_steps(tmp_path):
     assert info.get("done_reason") == "max_steps"
 
 
+def _menu_open_snap(base_tree: dict, menu_ref: str, title: str = "note.txt") -> dict:
+    """Return a snapshot where the named menu is open: state=selected, items onscreen."""
+    import copy
+    tree = copy.deepcopy(base_tree)
+
+    def _open_menu(node: dict):
+        if node.get("ref_id") == menu_ref:
+            node.setdefault("states", []).append("selected")
+        for child in node.get("children", []):
+            _open_menu(child)
+        # Remove offscreen from all descendants of the open menu
+        if "states" in node and "offscreen" in node["states"]:
+            node["states"] = [s for s in node["states"] if s != "offscreen"]
+
+    _open_menu(tree)
+    return _snap_ok(tree, title=title)
+
+
 def test_env_open_menu(tmp_path):
-    """open_menu re-renders with the menu expanded."""
-    snap = _snap_ok(MENU_TREE)
+    """open_menu is now a REAL GUI click; menu items appear because GTK shows them."""
+    snap_closed = _snap_ok(MENU_TREE)
+    snap_open = _menu_open_snap(MENU_TREE, "@s1:m1")
     ad = FakeAD([
-        _ScriptedStep(snapshot=snap),
-        _ScriptedStep(snapshot=snap),
+        _ScriptedStep(snapshot=snap_closed),  # 0: reset
+        _ScriptedStep(act=_act_ok()),          # 1: click menu (real GUI)
+        _ScriptedStep(snapshot=snap_open),     # 2: snapshot shows menu open
     ])
     env = DesktopEnv(ad, _task(tmp_path), workdir=tmp_path)
     env.reset()
     obs, reward, done, info = env.step('ACTION: {"op": "open_menu", "id": 2}')
     assert done is False
-    # open_menu stores the name path ("File",)
-    assert ("File",) in env._open_menu_paths
+    # The menu items appear because _menu_is_open detects states=["selected"] + onscreen children
+    assert "Save" in obs
 
 
 def test_env_close_menu(tmp_path):
-    """close_menu removes the name path from open menus."""
-    snap = _snap_ok(MENU_TREE)
+    """close_menu is now press escape; menu collapses in snapshot."""
+    snap_closed = _snap_ok(MENU_TREE)
+    snap_open = _menu_open_snap(MENU_TREE, "@s1:m1")
     ad = FakeAD([
-        _ScriptedStep(snapshot=snap),
-        _ScriptedStep(snapshot=snap),  # open
-        _ScriptedStep(snapshot=snap),  # close
+        _ScriptedStep(snapshot=snap_closed),  # 0: reset
+        _ScriptedStep(act=_act_ok()),          # 1: click File (open)
+        _ScriptedStep(snapshot=snap_open),     # 2: snapshot shows menu open
+        _ScriptedStep(act=_act_ok()),          # 3: press escape (close)
+        _ScriptedStep(snapshot=snap_closed),   # 4: snapshot shows menu closed
     ])
     env = DesktopEnv(ad, _task(tmp_path), workdir=tmp_path)
     env.reset()
     env.step('ACTION: {"op": "open_menu", "id": 2}')
-    assert ("File",) in env._open_menu_paths
+    # After press escape the menu collapses
     obs, reward, done, info = env.step('ACTION: {"op": "close_menu", "id": 2}')
-    assert ("File",) not in env._open_menu_paths
+    assert "Save" not in obs
 
 
 def test_env_submenu_persists_across_snapshots(tmp_path):
-    """Menu expanded by name-path stays open after a snapshot with different ids."""
-    snap_a = _snap_ok(MENU_TREE, title="*note.txt")
-    # Simulate a second snapshot with a different snapshot_id but same names
+    """Menu opened by real click stays open after snapshot_id changes (detected by GTK state)."""
     tree_b = MENU_TREE.copy()
     tree_b["ref_id"] = "@s2:w1"
     for c in tree_b["children"]:
         _bump_ids(c)
-    snap_b = _snap_ok(tree_b, title="note.txt")
+
+    snap_closed = _snap_ok(MENU_TREE, title="*note.txt")
+    snap_open_a = _menu_open_snap(MENU_TREE, "@s1:m1", title="*note.txt")
+    snap_open_b = _menu_open_snap(tree_b, "@s2:m1", title="note.txt")
 
     ad = FakeAD([
-        _ScriptedStep(snapshot=snap_a),   # 0: reset
-        _ScriptedStep(snapshot=snap_a),   # 1: open_menu File
-        _ScriptedStep(snapshot=snap_b),   # 2: open_menu Edit (new snap)
-        _ScriptedStep(snapshot=snap_b),   # 3: open_menu Convert
-        _ScriptedStep(act=_act_ok()),     # 4: press (GUI)
-        _ScriptedStep(snapshot=snap_b),   # 5: _take_snapshot after press
+        _ScriptedStep(snapshot=snap_closed),  # 0: reset
+        _ScriptedStep(act=_act_ok()),          # 1: click File
+        _ScriptedStep(snapshot=snap_open_a),   # 2: File open (a ids)
+        _ScriptedStep(act=_act_ok()),          # 3: press ctrl+s
+        _ScriptedStep(snapshot=snap_open_b),   # 4: new snapshot, different ids, File still open
     ])
     env = DesktopEnv(ad, _task(tmp_path), workdir=tmp_path)
     env.reset()
-    # Open Edit>Convert submenu
-    env.step('ACTION: {"op": "open_menu", "id": 2}')  # File (id=2, collapsed)
-    env.step('ACTION: {"op": "open_menu", "id": 4}')  # Edit (id=4 after File expanded)
-    # submenu Convert should also be open (id=6: 1-window, 2-File, 3-Save, 4-Edit, 5-SelectAll, 6-Convert)
-    env.step('ACTION: {"op": "open_menu", "id": 6}')  # Convert
-    assert ("Edit", "Convert") in env._open_menu_paths
-    # Now a press action triggers a new snapshot with different ids
+    env.step('ACTION: {"op": "open_menu", "id": 2}')
     obs, reward, done, info = env.step('ACTION: {"op": "press", "keys": "ctrl+s"}')
-    assert ("Edit", "Convert") in env._open_menu_paths
-    # The rendered tree should still show Convert expanded
-    assert "To Uppercase" in obs
+    # After snapshot_id change, _menu_is_open detects the open state via GTK states
+    assert "Save" in obs
 
 
 def _bump_ids(node: dict):
@@ -421,30 +437,29 @@ def test_bug4_reward_at_malformed_limit(tmp_path):
 
 
 def test_bug5_open_menu_by_name_path(tmp_path):
-    """Bug 5: open_menu must survive snapshot_id changes by using name paths."""
+    """open_menu survives snapshot_id changes: _menu_is_open detects GTK state."""
     tree_a = MENU_TREE
     tree_b = MENU_TREE.copy()
     tree_b["ref_id"] = "@s2:w1"
     for c in tree_b["children"]:
         _bump_ids(c)
-    snap_a = _snap_ok(tree_a)
-    snap_b = _snap_ok(tree_b)
+    snap_closed = _snap_ok(tree_a)
+    snap_open_a = _menu_open_snap(tree_a, "@s1:m1")
+    snap_open_b = _menu_open_snap(tree_b, "@s2:m1")
 
     ad = FakeAD([
-        _ScriptedStep(snapshot=snap_a),
-        _ScriptedStep(snapshot=snap_a),  # open_menu
-        _ScriptedStep(act=_act_ok()),    # click on something
-        _ScriptedStep(snapshot=snap_b),  # new snapshot, different ids
+        _ScriptedStep(snapshot=snap_closed),  # 0: reset
+        _ScriptedStep(act=_act_ok()),          # 1: click File (open)
+        _ScriptedStep(snapshot=snap_open_a),   # 2: File open in snap_a
+        _ScriptedStep(act=_act_ok()),          # 3: click on textfield
+        _ScriptedStep(snapshot=snap_open_b),   # 4: new snapshot (different ids), File still open
     ])
     env = DesktopEnv(ad, _task(tmp_path), workdir=tmp_path)
     env.reset()
     env.step('ACTION: {"op": "open_menu", "id": 2}')
-    assert ("File",) in env._open_menu_paths
-    # After a GUI action with a new snapshot, File should still be open
-    # (The menu has id 2 in both trees because it's the 2nd short_id)
     obs, reward, done, info = env.step('ACTION: {"op": "click", "id": 1}')
-    assert ("File",) in env._open_menu_paths  # still open
-    assert "Save" in obs  # menu items still visible
+    # _menu_is_open detects the open GTK state regardless of snapshot ids
+    assert "Save" in obs
 
 
 def test_bug6_no_double_obs_wrap(tmp_path):

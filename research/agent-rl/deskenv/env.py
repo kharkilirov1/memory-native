@@ -90,8 +90,13 @@ class DesktopEnv:
         self._consecutive_malformed = 0
 
         # ── env-only: open_menu / close_menu ───────────────────────────
-        if parsed.op in ("open_menu", "close_menu"):
-            return self._handle_menu_op(parsed, info)
+        # Menus are opened FOR REAL: items of a closed GTK menu are offscreen and agent-desktop
+        # refuses to click them ("not actionable: visible"). open_menu = click on the menu (the
+        # app shows it, its items become onscreen and render shows them); close_menu = escape.
+        if parsed.op == "open_menu":
+            parsed.op = "click"
+        elif parsed.op == "close_menu":
+            parsed.op, parsed.keys, parsed.id = "press", "escape", None
 
         # ── done ────────────────────────────────────────────────────────
         if parsed.op == "done":
@@ -153,15 +158,19 @@ class DesktopEnv:
         self, act: Action, info: dict[str, Any]
     ) -> tuple[str, float, bool, dict[str, Any]]:
         assert act.id is not None
+        # resolve the menu in the tree the agent SAW: a fresh snapshot has a new snapshot_id,
+        # so act.id (a full ref of the previous snapshot) would not be found in it
+        seen = getattr(self, "_last_tree", None) or {}
+        path_seen = find_menu_name_path(seen, act.id)
         tree, title = self._take_snapshot()
 
         if act.op == "open_menu":
-            path = find_menu_name_path(tree, act.id)
+            path = path_seen
             if path is not None and path not in self._open_menu_paths:
                 self._open_menu_paths.append(path)
             self._last_result = f"ok: menu expanded {path}"
         else:  # close_menu
-            path = find_menu_name_path(tree, act.id)
+            path = path_seen
             if path is not None and path in self._open_menu_paths:
                 self._open_menu_paths.remove(path)
             self._last_result = f"ok: menu collapsed {path}"
@@ -193,6 +202,7 @@ class DesktopEnv:
         data = snap.get("data", {})
         tree = data.get("tree", snap)
         title = data.get("window", {}).get("title", "")
+        self._last_tree = tree   # the tree the agent's short ids refer to (refs are per-snapshot)
         return tree, title
 
     def _resolve_open_menus(self, tree: dict) -> tuple[str, ...]:

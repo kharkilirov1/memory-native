@@ -88,6 +88,15 @@ def _has_actionable_descendant(node: dict[str, Any]) -> bool:
 _FLATTEN_ROLES = frozenset({"group", "scrollarea", "scrollbar"})
 
 
+def _menu_is_open(node: dict[str, Any]) -> bool:
+    """A menu the app actually shows (GTK marks the open menu `selected`/`expanded`) and whose
+    items are onscreen; a closed menu's items are `offscreen` and cannot be clicked."""
+    states = node.get("states") or []
+    if "selected" not in states and "expanded" not in states:
+        return False
+    return any("offscreen" not in (c.get("states") or []) for c in node.get("children") or [])
+
+
 def _should_skip_offscreen(node: dict[str, Any]) -> bool:
     """Skip nodes that are offscreen and have no actionable children.
 
@@ -130,7 +139,7 @@ def _flatten(
         return rows
 
     # ── named menu collapsing ────────────────────────────────────────────
-    if role == "menu" and ref not in open_menus:
+    if role == "menu" and ref not in open_menus and not _menu_is_open(node):
         count = _count_descendants(node)
         collapsed = dict(node)
         collapsed["_collapsed_count"] = count
@@ -247,16 +256,24 @@ def resolve_menu_name_path(
     *path* is a sequence of stripped menu names, e.g. ``("File",)`` or
     ``("Edit", "Convert")``.  Returns ``None`` if any step is not found.
     """
-    current = tree
+    def find_named(node: dict[str, Any], name: str) -> dict[str, Any] | None:
+        # mirror find_menu_name_path: unnamed nodes do not add a path segment, so search
+        # through them (breadth-first) for the first descendant with this name
+        queue = list(node.get("children") or [])
+        while queue:
+            child = queue.pop(0)
+            cname = (child.get("name") or "").rstrip()
+            if cname == name:
+                return child
+            if not cname:
+                queue.extend(child.get("children") or [])
+        return None
+
+    current: dict[str, Any] | None = tree
     for name in path:
-        found: dict[str, Any] | None = None
-        for child in current.get("children") or []:
-            if child.get("name", "").rstrip() == name:
-                found = child
-                break
-        if found is None:
+        current = find_named(current, name)
+        if current is None:
             return None
-        current = found
     return current.get("ref_id")
 
 

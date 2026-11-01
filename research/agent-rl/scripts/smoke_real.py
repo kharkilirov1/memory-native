@@ -12,6 +12,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sys
 from pathlib import Path
@@ -82,95 +83,81 @@ class _BasePolicy:
         raise NotImplementedError
 
 
-class _WriteSavePolicy(_BasePolicy):
+def _act(op: str, **kw) -> str:
+    return "ACTION: " + json.dumps({"op": op, **kw})
+
+
+class _PlanPolicy(_BasePolicy):
+    """Runs a fixed plan of steps; each step is (op, finder, extra) resolved against the CURRENT observation
+    (ids change every snapshot), then 'done'. finder: ("role", name|None) or None for ops without an id."""
+
+    plan: list = []
+
+    def _act(self, obs: str) -> str:
+        i = self._step - 1
+        if i >= len(self.plan):
+            return _act("done")
+        op, finder, extra = self.plan[i]
+        if finder is None:
+            return _act(op, **extra)
+        role, name = finder
+        k = _find_by_role(obs, role) if name is None else _find_by_role_and_name(obs, role, name)
+        if k is None:
+            return _act("done")          # element missing: end the episode (reward tells the story)
+        return _act(op, id=k, **extra)
+
+
+def _content(task: Task) -> list[str]:
+    path = Path(task.launch_cmd[1])
+    return path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+
+
+class _WriteSavePolicy(_PlanPolicy):
     """Type the sentence, ctrl+s, done."""
 
-    def _act(self, obs: str) -> str:
-        # 1: find textfield and type
-        tf = _find_by_role(obs, "textfield")
-        if tf is not None:
-            m = re.search(r'type exactly:\s+"(.+?)"', self.task.instruction)
-            sentence = m.group(1) if m else "hello world"
-            return f'ACTION: {{"op": "type", "id": {tf}, "text": "{sentence}"}}'
-        # 2: save
-        return 'ACTION: {"op": "press", "keys": "ctrl+s"}'
+    def __init__(self, task: Task):
+        super().__init__(task)
+        m = re.search(r'type exactly:\s+"(.+?)"', task.instruction)
+        self.plan = [("type", ("textfield", None), {"text": m.group(1) if m else ""}),
+                     ("press", None, {"keys": "ctrl+s"})]
 
 
-class _UppercaseSavePolicy(_BasePolicy):
-    """Menu path: Edit > Select All → Edit > Convert > To Uppercase → save.
+class _UppercaseSavePolicy(_PlanPolicy):
+    """Menu path (exercises open_menu): Edit > Select All, Edit > Convert > To Uppercase, ctrl+s."""
 
-    Fallback: ``set_value`` with the uppercased text.
-    """
-
-    def _act(self, obs: str) -> str:
-        # Open Edit menu if collapsed
-        edit = _find_by_role_and_name(obs, "menu", "Edit")
-        if edit is not None and _is_collapsed(obs, edit):
-            return f'ACTION: {{"op": "open_menu", "id": {edit}}}'
-
-        # Open Convert submenu if collapsed
-        convert = _find_by_role_and_name(obs, "menu", "Convert")
-        if convert is not None and _is_collapsed(obs, convert):
-            return f'ACTION: {{"op": "open_menu", "id": {convert}}}'
-
-        # Click "Select All"
-        select_all = _find_by_role_and_name(obs, "menuitem", "Select All")
-        if select_all is not None:
-            return f'ACTION: {{"op": "click", "id": {select_all}}}'
-
-        # Click "To Uppercase"
-        upper = _find_by_role_and_name(obs, "menuitem", "To Uppercase")
-        if upper is not None:
-            return f'ACTION: {{"op": "click", "id": {upper}}}'
-
-        # Save
-        return 'ACTION: {"op": "press", "keys": "ctrl+s"}'
+    def __init__(self, task: Task):
+        super().__init__(task)
+        self.plan = [("open_menu", ("menu", "Edit"), {}),
+                     ("click", ("menuitem", "Select All"), {}),
+                     ("open_menu", ("menu", "Convert"), {}),
+                     ("click", ("menuitem", "To Uppercase"), {}),
+                     # after menu use the menubar keeps focus and swallows ctrl+s: save via the menu
+                     ("open_menu", ("menu", "File"), {}),
+                     ("click", ("menuitem", "Save"), {})]
 
 
-class _AppendLinePolicy(_BasePolicy):
-    """set_value the full content, ctrl+s, done."""
+class _AppendLinePolicy(_PlanPolicy):
+    """set_value the full target content (read ONCE at construction), ctrl+s, done."""
 
-    def _act(self, obs: str) -> str:
-        # Read the original file content from the workdir
-        import os
-        workdir = os.path.dirname(self.task.launch_cmd[1]) if len(self.task.launch_cmd) > 1 else "/tmp"
-        path = Path(workdir) / "note.txt"
-        if path.exists():
-            orig = path.read_text(encoding="utf-8")
-        else:
-            orig = ""
-        # Append the extra line from the instruction
-        m = re.search(r"Append the following line at the end and save:\s*(.+)$", self.task.instruction)
+    def __init__(self, task: Task):
+        super().__init__(task)
+        m = re.search(r"(?:line|text)[^:]*:\s*\"?(.+?)\"?\s*$", task.instruction)
         extra = m.group(1) if m else ""
-        target = orig.rstrip("\n") + "\n" + extra + "\n" if extra else orig
-
-        tf = _find_by_role(obs, "textfield")
-        if tf is not None:
-            return f'ACTION: {{"op": "set_value", "id": {tf}, "value": "{target}"}}'
-        return 'ACTION: {"op": "press", "keys": "ctrl+s"}'
+        target = "\n".join(_content(task) + [extra]) + "\n"
+        self.plan = [("set_value", ("textfield", None), {"value": target}),
+                     ("press", None, {"keys": "ctrl+s"})]
 
 
-class _DeleteLinePolicy(_BasePolicy):
-    """set_value the file content minus the deleted line, ctrl+s, done."""
+class _DeleteLinePolicy(_PlanPolicy):
+    """set_value the content minus line k (read ONCE), ctrl+s, done."""
 
-    def _act(self, obs: str) -> str:
-        import os
-        workdir = os.path.dirname(self.task.launch_cmd[1]) if len(self.task.launch_cmd) > 1 else "/tmp"
-        path = Path(workdir) / "note.txt"
-        if path.exists():
-            lines = path.read_text(encoding="utf-8").splitlines()
-        else:
-            lines = []
-        # Parse which line to delete from instruction
-        m = re.search(r"Delete line (\d+)", self.task.instruction)
+    def __init__(self, task: Task):
+        super().__init__(task)
+        m = re.search(r"[Dd]elete line (?:number )?(\d+)", task.instruction)
         k = int(m.group(1)) if m else 1
-        target_lines = [l for i, l in enumerate(lines, 1) if i != k]
-        target = "\n".join(target_lines) + ("\n" if lines else "")
-
-        tf = _find_by_role(obs, "textfield")
-        if tf is not None:
-            return f'ACTION: {{"op": "set_value", "id": {tf}, "value": "{target}"}}'
-        return 'ACTION: {"op": "press", "keys": "ctrl+s"}'
+        lines = [l for i, l in enumerate(_content(task), 1) if i != k]
+        self.plan = [("set_value", ("textfield", None), {"value": "\n".join(lines) + "\n"}),
+                     ("press", None, {"keys": "ctrl+s"})]
 
 
 _POLICY_CLASSES = {
