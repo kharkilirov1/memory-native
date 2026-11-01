@@ -156,10 +156,18 @@ if HAS_TRITON:
 
     @triton.jit
     def _lg_update_kernel(g_ptr, idx_ptr, sb_ptr, ts_ptr, v_ptr, clip_ptr,
-                          cols, nb, lr, beta, eps, wd, seed,
+                          cols, nb, lr, beta, eps, wd, seed, lr_ptr, wd_ptr,
                           M: tl.constexpr, TOP: tl.constexpr, BLOCK_C: tl.constexpr,
-                          HAS_WD: tl.constexpr, TRACK: tl.constexpr):
+                          HAS_WD: tl.constexpr, TRACK: tl.constexpr, TENSOR_HP: tl.constexpr):
         row = tl.program_id(0)
+        # TENSOR_HP: lr / wd come from 0-dim fp32 device tensors (read at run time => a scheduled lr never changes the
+        # launch signature, so torch.compile / CUDA graphs see no new constant); else they are the scalar arguments.
+        if TENSOR_HP:
+            lr_v = tl.load(lr_ptr)
+            wd_v = tl.load(wd_ptr)
+        else:
+            lr_v = lr
+            wd_v = wd
         base = row * cols                                   # int32; host asserts numel < 2^31
         offs0 = tl.arange(0, BLOCK_C)
         acc = tl.zeros([BLOCK_C], dtype=tl.float32)
@@ -184,8 +192,8 @@ if HAS_TRITON:
             w0 = _grid_value(i, M)
             g_hat = g / denom
             if HAS_WD:
-                g_hat = g_hat + wd * w0
-            delta = (-lr * g_hat) / s
+                g_hat = g_hat + wd_v * w0
+            delta = (-lr_v * g_hat) / s
             delta = tl.where(delta != delta, 0.0, delta)
             delta = tl.minimum(tl.maximum(delta, -16.0), 16.0)
             u = i.to(tl.float32) + (_u_map(w0 + delta, M) - _u_map(w0, M))
@@ -253,10 +261,13 @@ def _pow2_ge(n: int, cap: int) -> int:
 
 
 def lg_update_(grad: torch.Tensor, idx: torch.Tensor, scale_bytes: torch.Tensor, tscale: torch.Tensor,
-               v_rms: torch.Tensor, *, lr: float, beta: float, eps: float, weight_decay: float, m: int, seed: int,
-               track_clip: bool = True, block_c: int | None = None, num_warps: int | None = None):
+               v_rms: torch.Tensor, *, lr, beta: float, eps: float, weight_decay, m: int, seed: int,
+               track_clip: bool = True, block_c: int | None = None, num_warps: int | None = None,
+               has_wd: bool | None = None):
     """In-place fused update of idx [rows, cols] and v_rms [rows, 1]. grad: bf16/fp16/fp32 contiguous [rows, cols].
-    One kernel launch. -> int32 [rows] per-row count of requests beyond the grid (None if track_clip=False)."""
+    One kernel launch. -> int32 [rows] per-row count of requests beyond the grid (None if track_clip=False).
+    lr / weight_decay: python floats (baked into the launch) OR 0-dim fp32 CUDA tensors (read by pointer inside the
+    kernel; then pass has_wd = whether the weight-decay term is compiled in)."""
     if not HAS_TRITON:
         raise RuntimeError("Triton is not available")
     rows, cols = idx.shape
@@ -276,10 +287,23 @@ def lg_update_(grad: torch.Tensor, idx: torch.Tensor, scale_bytes: torch.Tensor,
     bc = block_c or _pow2_ge(cols, 2048)
     nw = num_warps or (8 if bc >= 2048 else 4 if bc >= 512 else 2)
     clip = torch.empty(rows, dtype=torch.int32, device=idx.device) if track_clip else idx   # dummy ptr when off
+    tensor_hp = isinstance(lr, torch.Tensor)
+    if tensor_hp:
+        if not (isinstance(weight_decay, torch.Tensor) and lr.is_cuda and weight_decay.is_cuda
+                and lr.numel() == 1 and weight_decay.numel() == 1 and lr.dtype == weight_decay.dtype == torch.float32):
+            raise ValueError("tensor lr / weight_decay must both be 0-dim fp32 CUDA tensors")
+        lr_f = wd_f = 0.0
+        lr_p, wd_p = lr, weight_decay
+        use_wd = bool(has_wd)
+    else:
+        lr_f, wd_f = float(lr), float(weight_decay)
+        lr_p = wd_p = tscale                                  # dummy pointers, never read (TENSOR_HP=False)
+        use_wd = wd_f > 0.0 if has_wd is None else bool(has_wd)
     _lg_update_kernel[(rows,)](
         grad, idx, scale_bytes, tscale, v_rms, clip, cols, cols // NVFP4_BLOCK,
-        float(lr), float(beta), float(eps), float(weight_decay), int(seed) & 0x7FFFFFFF,
-        M=int(m), TOP=float(14 * m), BLOCK_C=bc, HAS_WD=weight_decay > 0.0, TRACK=bool(track_clip), num_warps=nw)
+        lr_f, float(beta), float(eps), wd_f, int(seed) & 0x7FFFFFFF, lr_p, wd_p,
+        M=int(m), TOP=float(14 * m), BLOCK_C=bc, HAS_WD=use_wd, TRACK=bool(track_clip), TENSOR_HP=tensor_hp,
+        num_warps=nw)
     return clip if track_clip else None
 
 

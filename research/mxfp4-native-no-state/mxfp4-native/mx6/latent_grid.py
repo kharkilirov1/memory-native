@@ -249,14 +249,18 @@ class _LGNativeFunction(torch.autograd.Function):
 # backward op declares `Tensor(a!) idx, v_rms, clip_buf` as mutated, so dynamo / AOTAutograd see an opaque node with a
 # declared side effect: no graph break, the surrounding LN / attention / GELU / residual code fuses normally, and the
 # update runs exactly once per backward execution (it lives in the backward graph, never re-traced at run time).
-# State the ops do NOT see: the RNG (the Philox seed is drawn from the global CPU RNG inside the op body, i.e. at run
-# time), `module.generator` (ops path requires generator=None), `save_weight` (always re-decodes in backward), and
+# lr / weight_decay are NOT schema constants: they are 0-dim fp32 buffers of the module (`_lr_t`, `_wd_t`, set in place by
+# the `lr` / `weight_decay` properties, i.e. by e1_quality.set_counter_lr) read by the update kernel by pointer, so a
+# cosine schedule never recompiles. Only `has_wd` (bool, wd > 0) is a guard. Checkpoint-safe: the forward op has no side
+# effect, the update lives only in the backward op (executed once per backward), so a non-reentrant torch.utils.checkpoint
+# recompute of the forward is harmless. State the ops do NOT see: the RNG (the Philox seed is drawn from the global CPU
+# RNG inside the op body, i.e. at run time), `module.generator` (ops path requires generator=None), `save_weight` (always re-decodes in backward), and
 # `fp4_fallbacks` (counted in the module-level FP4_FALLBACKS instead). Defined via torch.library.Library (explicit
 # schema strings: this file has `from __future__ import annotations`, which torch.library.custom_op cannot infer from).
 
 FP4_FALLBACKS = {"n": 0}
-_CFG_SCHEMA = ("int k, int m, str gemm, str dx_gemm, bool triton_on, str umode, float lr, float beta, float eps, "
-               "float wd, bool track_clip")
+_CFG_SCHEMA = ("int k, int m, str gemm, str dx_gemm, bool triton_on, str umode, float beta, float eps, "
+               "bool has_wd, bool track_clip")
 
 
 def _decode_dense(idx, scale, tscale, grid: LatentGrid, triton_on: bool, dtype):
@@ -273,8 +277,8 @@ def _fp4_weight_of(idx, scale, tscale, grid: LatentGrid, triton_on: bool):
     return fg.Fp4Weight(nib, scale, tscale)
 
 
-def _op_fwd_impl(x, idx, scale, tscale, v_rms, clip_buf, token, k, m, gemm, dx_gemm, triton_on, umode, lr, beta, eps,
-                 wd, track_clip):
+def _op_fwd_impl(x, idx, scale, tscale, v_rms, clip_buf, token, lr_t, wd_t, k, m, gemm, dx_gemm, triton_on, umode, beta,
+                 eps, has_wd, track_clip):
     grid = get_grid(k, m)
     if gemm != "cublas_bf16":
         from . import fp4_gemm as fg
@@ -303,32 +307,44 @@ def _op_dx(dy, idx, scale, tscale, grid, gemm, dx_gemm, triton_on):
     return dy @ _decode_dense(idx, scale, tscale, grid, triton_on, dy.dtype)
 
 
-def _op_update_(grad_w, idx, scale, tscale, v_rms, clip_buf, grid, triton_on, umode, lr, beta, eps, wd, track_clip):
-    """In-place state update with global-RNG randomness (module.generator is None on the ops path)."""
+def _draw_seed() -> int:
+    """31-bit Philox seed from the global CPU RNG. Called from the (opaque) backward-op body, i.e. at RUN time on every
+    execution of the backward: torch.compile never sees or bakes it, so each step gets fresh noise (no host-device sync:
+    the CPU generator is read, not the GPU). NOT safe under CUDA-graph replay (mode="reduce-overhead"): the seed would
+    be frozen into the captured launch."""
+    return int(torch.randint(0, 2 ** 31 - 1, (1,)).item())
+
+
+def _op_update_(grad_w, idx, scale, tscale, v_rms, clip_buf, lr_t, wd_t, grid, triton_on, umode, beta, eps, has_wd,
+                track_clip):
+    """In-place state update with global-RNG randomness (module.generator is None on the ops path). lr / wd arrive as
+    0-dim fp32 device tensors (module buffers updated in place by `set_counter_lr`), so a scheduled lr is DATA, not a
+    schema constant: no recompiles, no host sync."""
     if triton_on:
-        seed = int(torch.randint(0, 2 ** 31 - 1, (1,)).item())
-        clip = lg_update_(grad_w, idx, scale, tscale, v_rms, lr=lr, beta=beta, eps=eps, weight_decay=wd, m=grid.m,
-                          seed=seed, track_clip=track_clip)
+        seed = _draw_seed()
+        clip = lg_update_(grad_w, idx, scale, tscale, v_rms, lr=lr_t, beta=beta, eps=eps, weight_decay=wd_t, m=grid.m,
+                          seed=seed, track_clip=track_clip, has_wd=has_wd)
         if clip is not None:
             clip_buf.copy_(clip.sum(dtype=torch.float32) / idx.numel())
         return
     v_new, g_hat = mx_update.rms_update(grad_w.detach().float(), v_rms, beta, eps)
     v_rms.copy_(v_new)
-    if wd > 0.0:
-        g_hat = g_hat + wd * grid.tables(idx.device).values[idx.long()]
-    delta = (-lr * g_hat) / grid.na.expand_scale(scale, tscale)
+    if has_wd:
+        g_hat = g_hat + wd_t * grid.tables(idx.device).values[idx.long()]
+    delta = (-lr_t * g_hat) / grid.na.expand_scale(scale, tscale)
     new, over = grid.move(idx, delta, None, umode, return_clip=True)
     clip_buf.copy_(over.float().mean())
     idx.copy_(new.to(idx.dtype))
 
 
-def _op_bwd_impl(dy, x, idx, scale, tscale, v_rms, clip_buf, needs_dx, k, m, gemm, dx_gemm, triton_on, umode, lr, beta,
-                 eps, wd, track_clip):
+def _op_bwd_impl(dy, x, idx, scale, tscale, v_rms, clip_buf, lr_t, wd_t, needs_dx, k, m, gemm, dx_gemm, triton_on, umode,
+                 beta, eps, has_wd, track_clip):
     grid = get_grid(k, m)
     dy = dy.to(x.dtype)
     dx = _op_dx(dy, idx, scale, tscale, grid, gemm, dx_gemm, triton_on) if needs_dx else x.new_empty(0)
     grad_w = dy.t() @ x
-    _op_update_(grad_w, idx, scale, tscale, v_rms, clip_buf, grid, triton_on, umode, lr, beta, eps, wd, track_clip)
+    _op_update_(grad_w, idx, scale, tscale, v_rms, clip_buf, lr_t, wd_t, grid, triton_on, umode, beta, eps, has_wd,
+                track_clip)
     return dx
 
 
@@ -348,32 +364,34 @@ def _register_lg_ops() -> bool:
     try:
         lib = torch.library.Library("mx6", "FRAGMENT")
         lib.define("lg_linear(Tensor x, Tensor idx, Tensor scale, Tensor tscale, Tensor v_rms, Tensor clip_buf, "
-                   "Tensor token, " + _CFG_SCHEMA + ") -> Tensor")
+                   "Tensor token, Tensor lr_t, Tensor wd_t, " + _CFG_SCHEMA + ") -> Tensor")
         lib.define("lg_linear_bwd(Tensor dy, Tensor x, Tensor(a!) idx, Tensor scale, Tensor tscale, Tensor(b!) v_rms, "
-                   "Tensor(c!) clip_buf, bool needs_dx, " + _CFG_SCHEMA + ") -> Tensor")
+                   "Tensor(c!) clip_buf, Tensor lr_t, Tensor wd_t, bool needs_dx, " + _CFG_SCHEMA + ") -> Tensor")
         lib.impl("lg_linear", _op_fwd_impl, "CompositeExplicitAutograd")
         lib.impl("lg_linear_bwd", _op_bwd_impl, "CompositeExplicitAutograd")
 
         @torch.library.register_fake("mx6::lg_linear")
-        def _fake_fwd(x, idx, scale, tscale, v_rms, clip_buf, token, k, m, gemm, dx_gemm, triton_on, umode, lr, beta,
-                      eps, wd, track_clip):
+        def _fake_fwd(x, idx, scale, tscale, v_rms, clip_buf, token, lr_t, wd_t, k, m, gemm, dx_gemm, triton_on, umode,
+                      beta, eps, has_wd, track_clip):
             return x.new_empty(x.shape[0], idx.shape[0])
 
         @torch.library.register_fake("mx6::lg_linear_bwd")
-        def _fake_bwd(dy, x, idx, scale, tscale, v_rms, clip_buf, needs_dx, k, m, gemm, dx_gemm, triton_on, umode, lr,
-                      beta, eps, wd, track_clip):
+        def _fake_bwd(dy, x, idx, scale, tscale, v_rms, clip_buf, lr_t, wd_t, needs_dx, k, m, gemm, dx_gemm, triton_on,
+                      umode, beta, eps, has_wd, track_clip):
             return x.new_empty(x.shape) if needs_dx else x.new_empty(0)
 
         def _setup(ctx, inputs, output):
             x, idx, scale, tscale, v_rms, clip_buf = inputs[:6]
-            ctx.save_for_backward(x, idx, scale, tscale, v_rms, clip_buf)
-            ctx.cfg = tuple(inputs[7:])
+            lr_t, wd_t = inputs[7:9]
+            ctx.save_for_backward(x, idx, scale, tscale, v_rms, clip_buf, lr_t, wd_t)
+            ctx.cfg = tuple(inputs[9:])
             ctx.needs_dx = bool(ctx.needs_input_grad[0])
 
         def _backward(ctx, dy):
-            x, idx, scale, tscale, v_rms, clip_buf = ctx.saved_tensors
-            dx = torch.ops.mx6.lg_linear_bwd(dy, x, idx, scale, tscale, v_rms, clip_buf, ctx.needs_dx, *ctx.cfg)
-            return (dx if ctx.needs_dx else None,) + (None,) * (6 + len(ctx.cfg))
+            x, idx, scale, tscale, v_rms, clip_buf, lr_t, wd_t = ctx.saved_tensors
+            dx = torch.ops.mx6.lg_linear_bwd(dy, x, idx, scale, tscale, v_rms, clip_buf, lr_t, wd_t, ctx.needs_dx,
+                                             *ctx.cfg)
+            return (dx if ctx.needs_dx else None,) + (None,) * (8 + len(ctx.cfg))
 
         torch.library.register_autograd("mx6::lg_linear", _backward, setup_context=_setup)
         _LG_LIB = lib
@@ -463,6 +481,11 @@ class LatentGridLinear(nn.Module):
         self.in_features, self.out_features = in_features, out_features
         self.lr, self.rms_beta, self.rms_eps = lr, rms_beta, rms_eps
         self.headroom, self.weight_decay = float(headroom), float(weight_decay)
+        #: device-side copies of lr / weight_decay for the custom-op path (see the ops section); kept in sync by the
+        #: `lr` / `weight_decay` setters, moved by .to(device); never saved (set from the python floats).
+        self.register_buffer("_lr_t", torch.tensor(float(lr), dtype=torch.float32), persistent=False)
+        self.register_buffer("_wd_t", torch.tensor(float(weight_decay), dtype=torch.float32), persistent=False)
+        self.__dict__["_lr_dev"], self.__dict__["_wd_dev"] = float(lr), float(weight_decay)
         self.update_mode, self.init_mode = update_mode, init
         self.fmt = grid if grid is not None else get_grid(k)
         self.generator: torch.Generator | None = None           # None = global RNG (harness seeding)
@@ -482,6 +505,33 @@ class LatentGridLinear(nn.Module):
         self._pending = False
         self._weight_cache: torch.Tensor | None = None
         self._scale_cache: torch.Tensor | None = None
+
+    @property
+    def lr(self) -> float:
+        return self._lr
+
+    @lr.setter
+    def lr(self, v) -> None:
+        v = float(v)
+        self.__dict__["_lr"] = v
+        b = self._buffers.get("_lr_t")
+        if b is not None and self.__dict__.get("_lr_dev") != v:
+            b.fill_(v)                       # in place on the same tensor object (a compiled graph input), no host sync
+            self.__dict__["_lr_dev"] = v
+
+    @property
+    def weight_decay(self) -> float:
+        return self._wd
+
+    @weight_decay.setter
+    def weight_decay(self, v) -> None:
+        v = float(v)
+        self.__dict__["_wd"] = v
+        self.__dict__["_has_wd"] = v > 0.0
+        b = self._buffers.get("_wd_t")
+        if b is not None and self.__dict__.get("_wd_dev") != v:
+            b.fill_(v)
+            self.__dict__["_wd_dev"] = v
 
     @property
     def last_clip_frac(self) -> torch.Tensor | None:
@@ -616,9 +666,8 @@ class LatentGridLinear(nn.Module):
                     and torch.is_grad_enabled() and self.training):
                 out = torch.ops.mx6.lg_linear(
                     x2, self.idx, self._scale, self._tscale, self.v_rms, self._clip_buf, self._token,
-                    self.fmt.k, self.fmt.m, self.gemm, self.dx_gemm, self._use_triton(), self.update_mode,
-                    float(self.lr), float(self.rms_beta), float(self.rms_eps), float(self.weight_decay),
-                    self.track_clip)
+                    self._lr_t, self._wd_t, self.fmt.k, self.fmt.m, self.gemm, self.dx_gemm, self._use_triton(),
+                    self.update_mode, float(self.rms_beta), float(self.rms_eps), self._has_wd, self.track_clip)
                 return out.reshape(*shape[:-1], self.out_features)
             if torch.is_grad_enabled() and self.training:
                 if self._pending:
