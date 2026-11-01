@@ -80,7 +80,7 @@ class AccumState:
 
     def __init__(self, n: int, mode: str, kind: str, loss_scaled: bool, grad_allreduce):
         if mode == "ema":
-            n = 1
+            n = max(1, int(n))
         elif int(n) < 2:
             raise ValueError(f"accumulation needs n >= 2, got {n}")
         if mode not in MODES:
@@ -204,9 +204,68 @@ def ema_step_(st: AccumState, grad_w: torch.Tensor, buf: torch.Tensor, bscale) -
     return grad_w.copy_(buf)
 
 
+def _fp8_store_(buf: torch.Tensor, bscale: torch.Tensor, src: torch.Tensor) -> None:
+    """buf (fp8) <- SR_fp8(src) with per-row scale amax/448."""
+    rows, cols = buf.shape
+    step = _rows_per_chunk(cols)
+    for r0 in range(0, rows, step):
+        r1 = min(rows, r0 + step)
+        t = src[r0:r1].to(torch.float32)
+        amax = t.abs().amax(dim=1, keepdim=True)
+        ns = torch.where(amax > 0, amax / FP8_MAX, torch.ones_like(amax))
+        buf[r0:r1] = sr_fp8(t / ns)
+        bscale[r0:r1] = ns
+
+
+def ema_accum_(st: AccumState, grad_w: torch.Tensor, buf: torch.Tensor, bscale):
+    """Momentum WITH gradient accumulation over st.n micro-batches, in the SAME buffer (no extra memory):
+    micro 0 decays buf by mu (fp8: exact, only the row scale is multiplied), every micro adds c*g_i
+    (c = 1-mu; loss_scaled => sum of g_i is already the big-batch mean), the last micro forms
+    mu*buf_old + (1-mu)*G, runs the all-reduce hook on it (identical buffers on all ranks => the mean of the
+    per-rank totals is exactly the global EMA), stores it back and returns it for the update. -> grad | None."""
+    mu = float(st.mu)
+    c = (1.0 - mu) if st.loss_scaled else (1.0 - mu) / st.n
+    if st.idx == 0:
+        if st.kind == "fp8":
+            bscale.mul_(mu)
+        else:
+            buf.mul_(mu)
+    if not st.last:
+        if st.kind == "fp8":
+            fp8_add_(buf, bscale, grad_w.mul_(c))
+        else:
+            buf.add_(grad_w.to(buf.dtype), alpha=c)
+        return None
+    if st.kind == "fp8":
+        rows, cols = buf.shape
+        step = _rows_per_chunk(cols)
+        for r0 in range(0, rows, step):
+            r1 = min(rows, r0 + step)
+            t = buf[r0:r1].to(torch.float32).mul_(bscale[r0:r1]).add_(grad_w[r0:r1].to(torch.float32), alpha=c)
+            grad_w[r0:r1] = t.to(grad_w.dtype)
+    else:
+        grad_w.mul_(c).add_(buf.to(grad_w.dtype))
+    if st.grad_allreduce is not None:
+        st.n_hook += 1
+        out = st.grad_allreduce(grad_w)
+        if out is not None:
+            grad_w = out
+    if st.kind == "fp8":
+        _fp8_store_(buf, bscale, grad_w)
+    else:
+        buf.copy_(grad_w.to(buf.dtype))
+    st.n_updates += 1
+    return grad_w
+
+
 def accum_grad_(st: AccumState, grad_w: torch.Tensor, buf, bscale):
     """The accumulation step of one layer's backward. -> the gradient to hand to the update (after the all-reduce hook), or None
     (buffer mode, not the last micro-batch: nothing to update). `grad_w` is consumed (modified in place)."""
+    if st.mode == "ema" and st.n > 1:
+        if not st.active:
+            raise RuntimeError("momentum with accumulation (set_momentum(..., n>1)) needs the lg_accumulate context")
+        st.n_bwd += 1
+        return ema_accum_(st, grad_w, buf, bscale)
     if st.mode == "ema":
         if st.grad_allreduce is not None:            # sync the raw gradient first: the EMA stays identical on all ranks
             st.n_hook += 1
@@ -271,10 +330,13 @@ def set_accum(model, n: int, mode: str = "buffer", dtype: str = "bf16", loss_sca
     return st
 
 
-def set_momentum(model, mu: float, dtype: str = "bf16", nesterov: bool = False, grad_allreduce=None) -> AccumState | None:
+def set_momentum(model, mu: float, dtype: str = "bf16", nesterov: bool = False, grad_allreduce=None,
+                 n: int = 1) -> AccumState | None:
     """Per-weight momentum for every LatentGridLinear (reuses the accumulation buffer: bf16 +2 B/param, fp8 ~ +1 B/param).
     Every backward: buf <- mu*buf + (1-mu)*grad and the update uses buf. No lg_accumulate context needed. mu <= 0 disables.
-    Mutually exclusive with set_accum (same per-layer buffer). Call BEFORE torch.compile."""
+    n > 1: ALSO accumulates n micro-batches into the same buffer (run them inside lg_accumulate(model, n)); ONE update
+    per optimizer step on mu*buf + (1-mu)*G, G = the big-batch gradient. Replaces set_accum (same buffer, no extra
+    memory). Call BEFORE torch.compile."""
     if mu is None or float(mu) <= 0.0:
         clear_accum(model)
         return None
@@ -283,8 +345,10 @@ def set_momentum(model, mu: float, dtype: str = "bf16", nesterov: bool = False, 
     layers = _lg_layers(model)
     if not layers:
         raise ValueError("set_momentum: the model has no LatentGridLinear layer")
+    if int(n) > 1 and nesterov:
+        raise ValueError("nesterov momentum with accumulation is not supported")
     clear_accum(model)
-    st = AccumState(1, "ema", dtype, True, grad_allreduce)
+    st = AccumState(int(n), "ema", dtype, True, grad_allreduce)
     st.mu, st.nesterov = float(mu), bool(nesterov)
     for m in layers:
         m.enable_accum_(st)

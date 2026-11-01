@@ -284,11 +284,10 @@ class Engine:
         #: opt-in per-weight momentum for lg (mx6/lg_accum.set_momentum): the EMA of grad_w feeds the RMS-normalised update.
         self.momentum = float(getattr(args, "momentum", 0.0) or 0.0)
         if self.momentum > 0.0 and self.is_lg:
-            if self.accum > 1:
-                raise ValueError("--momentum and --accum both use the per-layer lg buffer; pick one")
-            from mx6.lg_accum import set_momentum
-            self.acc_state = set_momentum(model, self.momentum, getattr(args, "momentum_dtype", "bf16"),
-                                          bool(getattr(args, "nesterov", False)))
+            from mx6.lg_accum import set_momentum      # accum > 1: micro-batches accumulate INTO the momentum buffer
+            st = set_momentum(model, self.momentum, getattr(args, "momentum_dtype", "bf16"),
+                              bool(getattr(args, "nesterov", False)), n=self.accum)
+            self.acc_state = st if self.accum > 1 else None
         if args.grad_checkpoint:
             why = _bts().checkpoint_refusal(model, "compile" if args.compile else "eager", "op")
             if why:
