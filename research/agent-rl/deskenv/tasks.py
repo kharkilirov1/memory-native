@@ -198,13 +198,18 @@ def _make_append_line(rng: random.Random, workdir: Path) -> Task:
         content = p.read_text(encoding="utf-8")
         if content == expected:
             return 1.0, {"reason": "exact match (appended)"}
-        # Partial: original lines intact?
+        # Partial credit ONLY for real progress: an untouched file must score 0 (doing nothing
+        # used to get 0.5, so every GRPO group had equal rewards and no learning signal).
         orig = content.splitlines()
-        if len(orig) >= len(lines) and orig[:len(lines)] == lines:
-            return 0.5, {
-                "reason": "original lines intact, but appended text differs",
+        if orig == lines:
+            return 0.0, {"reason": "file unchanged"}
+        if len(orig) > len(lines) and orig[:len(lines)] == lines:
+            added = " ".join(orig[len(lines):])
+            r = 0.3 + 0.5 * _token_overlap(added, extra)
+            return round(r, 4), {
+                "reason": "original lines intact, appended text differs",
                 "expected_line": extra,
-                "got_last": orig[-1] if orig else "",
+                "got_added": added,
             }
         return 0.0, {
             "reason": "content changed unexpectedly",
