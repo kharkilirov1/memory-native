@@ -48,6 +48,8 @@ class DesktopSession:
     ):
         self.display = display
         self.workdir_root = Path(workdir_root)
+        self._dbus_addr: str | None = None
+        self._dbus_pid: int | None = None
         self.ad = AgentDesktop(ad_bin, env=self.env())
 
         self._procs: list[subprocess.Popen] = []
@@ -91,7 +93,12 @@ class DesktopSession:
             text=True,
         )
         stdout, _ = dbus.communicate(timeout=5)
-        self._procs.append(dbus)
+        # --fork: the printed address/pid belong to the daemon child, not to `dbus`
+        lines = [ln.strip() for ln in (stdout or "").splitlines() if ln.strip()]
+        if len(lines) < 2:
+            raise RuntimeError(f"dbus-daemon printed no address/pid: {stdout!r}")
+        self._dbus_addr, self._dbus_pid = lines[0], int(lines[1])
+        self.ad._env = self.env()  # agent-desktop must see the private session bus
 
         # 3. at-spi-bus-launcher
         atspi = subprocess.Popen(
@@ -118,6 +125,12 @@ class DesktopSession:
         for proc in reversed(self._procs):
             self._kill_proc(proc)
         self._procs.clear()
+        if self._dbus_pid:
+            try:
+                os.kill(self._dbus_pid, 15)
+            except ProcessLookupError:
+                pass
+            self._dbus_pid = self._dbus_addr = None
         self._running = False
 
     # ------------------------------------------------------------------
@@ -131,7 +144,16 @@ class DesktopSession:
             "DISPLAY": f":{self.display}",
             "NO_AT_BRIDGE": "0",
             "GTK_MODULES": "gail:atk-bridge",
+            # in-memory GSettings: apps start from defaults every launch, so mousepad never
+            # shows "previous session did not end normally - restore?" after we kill it
+            "GSETTINGS_BACKEND": "memory",
+            # per-session app data/config/cache (autosave files, recent lists) - no cross-run state
+            "XDG_DATA_HOME": str(self.workdir_root / "xdg" / "data"),
+            "XDG_CONFIG_HOME": str(self.workdir_root / "xdg" / "config"),
+            "XDG_CACHE_HOME": str(self.workdir_root / "xdg" / "cache"),
         })
+        if self._dbus_addr:
+            base["DBUS_SESSION_BUS_ADDRESS"] = self._dbus_addr
         return base
 
     def launch(
@@ -139,12 +161,19 @@ class DesktopSession:
         cmd: list[str],
         wait_app: str | None = None,
         timeout_s: int = 10,
+        workdir: str | Path | None = None,
     ) -> subprocess.Popen:
         """Start an app with the session environment and optionally wait for it.
 
+        If *workdir* is given, the app's stdout and stderr are redirected to
+        ``<workdir>/app.log`` (inherited pipes keep callers hanging on Linux).
         Returns the ``Popen`` handle.
         """
-        proc = subprocess.Popen(cmd, env=self.env())
+        stdout = stderr = None
+        if workdir is not None:
+            log_path = Path(workdir) / "app.log"
+            stdout = stderr = open(log_path, "w", encoding="utf-8")
+        proc = subprocess.Popen(cmd, env=self.env(), stdout=stdout, stderr=stderr)
         if wait_app is not None:
             self._wait_for_app(wait_app, timeout_s)
         return proc

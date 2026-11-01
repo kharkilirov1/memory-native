@@ -57,7 +57,8 @@ def run_episode(
     # Launch the app
     launched = None
     if session is not None:
-        launched = session.launch(task.launch_cmd, wait_app=task.app)
+        launched = session.launch(task.launch_cmd, wait_app=task.app,
+                                  workdir=workdir)
 
     env = DesktopEnv(ad, task, workdir=workdir, max_steps=max_steps)
     obs = env.reset()

@@ -140,7 +140,7 @@ def test_env_reset():
     obs = env.reset()
     assert "Task:" in obs
     assert "Window:" in obs  # title included
-    assert "short_id=1" in obs or "mousepad" in obs
+    assert "[1]" in obs or "mousepad" in obs
     assert ad.call_log[0][0] == "snapshot"
 
 

@@ -75,13 +75,16 @@ class AgentDesktop:
                 f"agent-desktop timed out after {self.timeout_s}s",
                 cmd=cmd,
             )
-        if cp.returncode != 0:
+        out = cp.stdout.strip()
+        # agent-desktop exits non-zero on ok:false but still prints a JSON envelope:
+        # return it so the env can show the error to the agent. Raise only without one.
+        if cp.returncode != 0 and not out.startswith("{"):
             raise ADError(
                 f"agent-desktop exited with code {cp.returncode}: "
-                f"{cp.stderr.strip() or cp.stdout.strip()}",
+                f"{cp.stderr.strip() or out}",
                 cmd=cmd,
             )
-        return cp.stdout.strip()
+        return out
 
     @staticmethod
     def _parse(stdout: str, cmd: list[str]) -> dict[str, Any]:
