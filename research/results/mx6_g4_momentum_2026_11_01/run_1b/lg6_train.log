@@ -1,0 +1,123 @@
+arm=lg6_fp4_h2 (lg6_fp4_h2) device=cuda torch=2.11.0+cu130 NVIDIA RTX PRO 6000 Blackwell Server Edition
+model d=2048 layers=24 heads=32 seq=512 params=1,210,257,408 | batch=128 (one micro-batch, no accumulation) tokens/step=65536 steps=5000 tokens=327,680,000 epochs=0.147 train_bytes=2,227,753,162 val_bytes=22,502,601
+optim: adam_lr=0.0001 lr(counter)=0.003 wd=0.1 clip=1 betas=(0.9,0.95) sched=cosine warmup=0.02 min=0.1 precision=bf16 sdpa=True compile=True grad_checkpoint=True fused_adam=True lg_layers=96  [lg: grad clip covers FP params only]
+step 50/5000 | loss 5.5628 bpb | lr 5.00e-05 ctr 1.50e-03 | gnorm 8.605 | 28864 tok/s | 2271 ms/step | peak 18.8 GB (incl. compile)
+step 100/5000 | loss 4.0337 bpb | lr 1.00e-04 ctr 3.00e-03 | gnorm 7.750 | 34056 tok/s | 1924 ms/step | peak 18.8 GB
+step 150/5000 | loss 3.4597 bpb | lr 1.00e-04 ctr 3.00e-03 | gnorm 3.744 | 34052 tok/s | 1925 ms/step | peak 18.8 GB
+step 200/5000 | loss 3.3536 bpb | lr 9.99e-05 ctr 3.00e-03 | gnorm 2.106 | 34067 tok/s | 1924 ms/step | peak 18.8 GB
+step 250/5000 | loss 3.3305 bpb | lr 9.98e-05 ctr 2.99e-03 | gnorm 1.841 | 34066 tok/s | 1924 ms/step | peak 18.8 GB
+step 300/5000 | loss 3.3176 bpb | lr 9.96e-05 ctr 2.99e-03 | gnorm 1.655 | 34067 tok/s | 1924 ms/step | peak 18.8 GB
+step 350/5000 | loss 3.3063 bpb | lr 9.94e-05 ctr 2.98e-03 | gnorm 1.345 | 34059 tok/s | 1924 ms/step | peak 18.8 GB
+step 400/5000 | loss 3.3017 bpb | lr 9.92e-05 ctr 2.98e-03 | gnorm 1.425 | 34066 tok/s | 1924 ms/step | peak 18.8 GB
+step 450/5000 | loss 3.2964 bpb | lr 9.89e-05 ctr 2.97e-03 | gnorm 1.127 | 34063 tok/s | 1924 ms/step | peak 18.8 GB
+step 500/5000 | loss 3.2929 bpb | lr 9.85e-05 ctr 2.96e-03 | gnorm 1.372 | 34058 tok/s | 1924 ms/step | peak 18.8 GB
+EVAL step 500: val 3.2750 bpb (1.1s)
+checkpoint step 500 -> /content/runs/lg6_fp4_h2/ckpt.pt (5s)
+step 550/5000 | loss 3.2803 bpb | lr 9.81e-05 ctr 2.94e-03 | gnorm 1.332 | 34040 tok/s | 1925 ms/step | peak 18.8 GB
+step 600/5000 | loss 3.2746 bpb | lr 9.77e-05 ctr 2.93e-03 | gnorm 1.131 | 34054 tok/s | 1924 ms/step | peak 18.8 GB
+step 650/5000 | loss 3.2675 bpb | lr 9.72e-05 ctr 2.92e-03 | gnorm 1.436 | 34054 tok/s | 1924 ms/step | peak 18.8 GB
+step 700/5000 | loss 3.2519 bpb | lr 9.67e-05 ctr 2.90e-03 | gnorm 1.360 | 34053 tok/s | 1925 ms/step | peak 18.8 GB
+step 750/5000 | loss 3.2394 bpb | lr 9.62e-05 ctr 2.88e-03 | gnorm 1.522 | 34058 tok/s | 1924 ms/step | peak 18.8 GB
+step 800/5000 | loss 3.2257 bpb | lr 9.56e-05 ctr 2.87e-03 | gnorm 1.510 | 34060 tok/s | 1924 ms/step | peak 18.8 GB
+step 850/5000 | loss 3.1860 bpb | lr 9.49e-05 ctr 2.85e-03 | gnorm 1.783 | 34064 tok/s | 1924 ms/step | peak 18.8 GB
+step 900/5000 | loss 3.1233 bpb | lr 9.42e-05 ctr 2.83e-03 | gnorm 1.796 | 34056 tok/s | 1924 ms/step | peak 18.8 GB
+step 950/5000 | loss 3.1624 bpb | lr 9.35e-05 ctr 2.80e-03 | gnorm 1.771 | 34060 tok/s | 1924 ms/step | peak 18.8 GB
+step 1000/5000 | loss 2.9872 bpb | lr 9.27e-05 ctr 2.78e-03 | gnorm 1.697 | 34066 tok/s | 1924 ms/step | peak 18.8 GB
+EVAL step 1000: val 2.9421 bpb (1.1s)
+checkpoint step 1000 -> /content/runs/lg6_fp4_h2/ckpt.pt (5s)
+step 1050/5000 | loss 2.8527 bpb | lr 9.19e-05 ctr 2.76e-03 | gnorm 1.803 | 34055 tok/s | 1924 ms/step | peak 18.8 GB
+step 1100/5000 | loss 2.6442 bpb | lr 9.11e-05 ctr 2.73e-03 | gnorm 1.703 | 34061 tok/s | 1924 ms/step | peak 18.8 GB
+step 1150/5000 | loss 2.5216 bpb | lr 9.02e-05 ctr 2.71e-03 | gnorm 1.446 | 34063 tok/s | 1924 ms/step | peak 18.8 GB
+step 1200/5000 | loss 2.4586 bpb | lr 8.93e-05 ctr 2.68e-03 | gnorm 1.434 | 34068 tok/s | 1924 ms/step | peak 18.8 GB
+step 1250/5000 | loss 2.8751 bpb | lr 8.83e-05 ctr 2.65e-03 | gnorm 2.286 | 34074 tok/s | 1923 ms/step | peak 18.8 GB
+step 1300/5000 | loss 2.7236 bpb | lr 8.73e-05 ctr 2.62e-03 | gnorm 1.273 | 34061 tok/s | 1924 ms/step | peak 18.8 GB
+step 1350/5000 | loss 2.5440 bpb | lr 8.63e-05 ctr 2.59e-03 | gnorm 1.218 | 34060 tok/s | 1924 ms/step | peak 18.8 GB
+step 1400/5000 | loss 2.4154 bpb | lr 8.53e-05 ctr 2.56e-03 | gnorm 1.107 | 34066 tok/s | 1924 ms/step | peak 18.8 GB
+step 1450/5000 | loss 2.3454 bpb | lr 8.42e-05 ctr 2.53e-03 | gnorm 1.254 | 34053 tok/s | 1925 ms/step | peak 18.8 GB
+step 1500/5000 | loss 2.2823 bpb | lr 8.31e-05 ctr 2.49e-03 | gnorm 1.198 | 34066 tok/s | 1924 ms/step | peak 18.8 GB
+EVAL step 1500: val 2.2249 bpb (1.1s)
+checkpoint step 1500 -> /content/runs/lg6_fp4_h2/ckpt.pt (5s)
+step 1550/5000 | loss 2.2158 bpb | lr 8.19e-05 ctr 2.46e-03 | gnorm 1.253 | 34047 tok/s | 1925 ms/step | peak 18.8 GB
+step 1600/5000 | loss 2.1509 bpb | lr 8.08e-05 ctr 2.42e-03 | gnorm 1.173 | 34074 tok/s | 1923 ms/step | peak 18.8 GB
+step 1650/5000 | loss 2.0830 bpb | lr 7.96e-05 ctr 2.39e-03 | gnorm 1.129 | 34067 tok/s | 1924 ms/step | peak 18.8 GB
+step 1700/5000 | loss 2.0136 bpb | lr 7.84e-05 ctr 2.35e-03 | gnorm 1.092 | 34073 tok/s | 1923 ms/step | peak 18.8 GB
+step 1750/5000 | loss 1.9596 bpb | lr 7.71e-05 ctr 2.31e-03 | gnorm 1.047 | 34073 tok/s | 1923 ms/step | peak 18.8 GB
+step 1800/5000 | loss 1.8996 bpb | lr 7.58e-05 ctr 2.28e-03 | gnorm 1.068 | 34076 tok/s | 1923 ms/step | peak 18.8 GB
+step 1850/5000 | loss 1.8486 bpb | lr 7.46e-05 ctr 2.24e-03 | gnorm 0.982 | 34072 tok/s | 1923 ms/step | peak 18.8 GB
+step 1900/5000 | loss 1.8032 bpb | lr 7.32e-05 ctr 2.20e-03 | gnorm 0.963 | 34069 tok/s | 1924 ms/step | peak 18.8 GB
+step 1950/5000 | loss 1.7585 bpb | lr 7.19e-05 ctr 2.16e-03 | gnorm 0.928 | 34073 tok/s | 1923 ms/step | peak 18.8 GB
+step 2000/5000 | loss 1.7206 bpb | lr 7.06e-05 ctr 2.12e-03 | gnorm 0.880 | 34070 tok/s | 1924 ms/step | peak 18.8 GB
+EVAL step 2000: val 1.6694 bpb (1.1s)
+checkpoint step 2000 -> /content/runs/lg6_fp4_h2/ckpt.pt (5s)
+step 2050/5000 | loss 1.6746 bpb | lr 6.92e-05 ctr 2.08e-03 | gnorm 0.875 | 34067 tok/s | 1924 ms/step | peak 18.8 GB
+step 2100/5000 | loss 1.6366 bpb | lr 6.78e-05 ctr 2.03e-03 | gnorm 0.882 | 34075 tok/s | 1923 ms/step | peak 18.8 GB
+step 2150/5000 | loss 1.5984 bpb | lr 6.64e-05 ctr 1.99e-03 | gnorm 0.785 | 34083 tok/s | 1923 ms/step | peak 18.8 GB
+step 2200/5000 | loss 1.5651 bpb | lr 6.50e-05 ctr 1.95e-03 | gnorm 0.757 | 34073 tok/s | 1923 ms/step | peak 18.8 GB
+step 2250/5000 | loss 1.5334 bpb | lr 6.36e-05 ctr 1.91e-03 | gnorm 0.765 | 34090 tok/s | 1922 ms/step | peak 18.8 GB
+step 2300/5000 | loss 1.5057 bpb | lr 6.22e-05 ctr 1.87e-03 | gnorm 0.697 | 34070 tok/s | 1924 ms/step | peak 18.8 GB
+step 2350/5000 | loss 1.4726 bpb | lr 6.08e-05 ctr 1.82e-03 | gnorm 0.688 | 34075 tok/s | 1923 ms/step | peak 18.8 GB
+step 2400/5000 | loss 1.4476 bpb | lr 5.93e-05 ctr 1.78e-03 | gnorm 0.695 | 34063 tok/s | 1924 ms/step | peak 18.8 GB
+step 2450/5000 | loss 1.4145 bpb | lr 5.79e-05 ctr 1.74e-03 | gnorm 0.663 | 34066 tok/s | 1924 ms/step | peak 18.8 GB
+step 2500/5000 | loss 1.3892 bpb | lr 5.65e-05 ctr 1.69e-03 | gnorm 0.624 | 34069 tok/s | 1924 ms/step | peak 18.8 GB
+EVAL step 2500: val 1.3606 bpb (1.1s)
+checkpoint step 2500 -> /content/runs/lg6_fp4_h2/ckpt.pt (5s)
+step 2550/5000 | loss 1.3625 bpb | lr 5.50e-05 ctr 1.65e-03 | gnorm 0.576 | 34056 tok/s | 1924 ms/step | peak 18.8 GB
+step 2600/5000 | loss 1.3315 bpb | lr 5.36e-05 ctr 1.61e-03 | gnorm 0.599 | 34064 tok/s | 1924 ms/step | peak 18.8 GB
+step 2650/5000 | loss 1.3077 bpb | lr 5.21e-05 ctr 1.56e-03 | gnorm 0.574 | 34060 tok/s | 1924 ms/step | peak 18.8 GB
+step 2700/5000 | loss 1.2869 bpb | lr 5.07e-05 ctr 1.52e-03 | gnorm 0.568 | 34076 tok/s | 1923 ms/step | peak 18.8 GB
+step 2750/5000 | loss 1.2569 bpb | lr 4.93e-05 ctr 1.48e-03 | gnorm 0.544 | 34074 tok/s | 1923 ms/step | peak 18.8 GB
+step 2800/5000 | loss 1.2368 bpb | lr 4.78e-05 ctr 1.44e-03 | gnorm 0.502 | 34071 tok/s | 1923 ms/step | peak 18.8 GB
+step 2850/5000 | loss 1.2136 bpb | lr 4.64e-05 ctr 1.39e-03 | gnorm 0.499 | 34076 tok/s | 1923 ms/step | peak 18.8 GB
+step 2900/5000 | loss 1.1947 bpb | lr 4.50e-05 ctr 1.35e-03 | gnorm 0.428 | 34077 tok/s | 1923 ms/step | peak 18.8 GB
+step 2950/5000 | loss 1.1799 bpb | lr 4.36e-05 ctr 1.31e-03 | gnorm 0.473 | 34083 tok/s | 1923 ms/step | peak 18.8 GB
+step 3000/5000 | loss 1.1667 bpb | lr 4.22e-05 ctr 1.27e-03 | gnorm 0.409 | 34090 tok/s | 1922 ms/step | peak 18.8 GB
+EVAL step 3000: val 1.1442 bpb (1.1s)
+checkpoint step 3000 -> /content/runs/lg6_fp4_h2/ckpt.pt (5s)
+step 3050/5000 | loss 1.1515 bpb | lr 4.08e-05 ctr 1.23e-03 | gnorm 0.441 | 34055 tok/s | 1924 ms/step | peak 18.8 GB
+step 3100/5000 | loss 1.1347 bpb | lr 3.95e-05 ctr 1.18e-03 | gnorm 0.397 | 34065 tok/s | 1924 ms/step | peak 18.8 GB
+step 3150/5000 | loss 1.1254 bpb | lr 3.81e-05 ctr 1.14e-03 | gnorm 0.367 | 34065 tok/s | 1924 ms/step | peak 18.8 GB
+step 3200/5000 | loss 1.1201 bpb | lr 3.68e-05 ctr 1.10e-03 | gnorm 0.371 | 34066 tok/s | 1924 ms/step | peak 18.8 GB
+step 3250/5000 | loss 1.1037 bpb | lr 3.55e-05 ctr 1.07e-03 | gnorm 0.339 | 34069 tok/s | 1924 ms/step | peak 18.8 GB
+step 3300/5000 | loss 1.1021 bpb | lr 3.42e-05 ctr 1.03e-03 | gnorm 0.354 | 34062 tok/s | 1924 ms/step | peak 18.8 GB
+step 3350/5000 | loss 1.0946 bpb | lr 3.29e-05 ctr 9.88e-04 | gnorm 0.322 | 34061 tok/s | 1924 ms/step | peak 18.8 GB
+step 3400/5000 | loss 1.0775 bpb | lr 3.17e-05 ctr 9.51e-04 | gnorm 0.286 | 34083 tok/s | 1923 ms/step | peak 18.8 GB
+step 3450/5000 | loss 1.0744 bpb | lr 3.05e-05 ctr 9.14e-04 | gnorm 0.286 | 34073 tok/s | 1923 ms/step | peak 18.8 GB
+step 3500/5000 | loss 1.0662 bpb | lr 2.93e-05 ctr 8.78e-04 | gnorm 0.279 | 34075 tok/s | 1923 ms/step | peak 18.8 GB
+EVAL step 3500: val 1.0423 bpb (1.1s)
+checkpoint step 3500 -> /content/runs/lg6_fp4_h2/ckpt.pt (5s)
+step 3550/5000 | loss 1.0616 bpb | lr 2.81e-05 ctr 8.43e-04 | gnorm 0.296 | 34053 tok/s | 1925 ms/step | peak 18.8 GB
+step 3600/5000 | loss 1.0497 bpb | lr 2.70e-05 ctr 8.09e-04 | gnorm 0.250 | 34059 tok/s | 1924 ms/step | peak 18.8 GB
+step 3650/5000 | loss 1.0459 bpb | lr 2.59e-05 ctr 7.76e-04 | gnorm 0.258 | 34069 tok/s | 1924 ms/step | peak 18.8 GB
+step 3700/5000 | loss 1.0419 bpb | lr 2.48e-05 ctr 7.43e-04 | gnorm 0.221 | 34077 tok/s | 1923 ms/step | peak 18.8 GB
+step 3750/5000 | loss 1.0330 bpb | lr 2.37e-05 ctr 7.11e-04 | gnorm 0.232 | 34066 tok/s | 1924 ms/step | peak 18.8 GB
+step 3800/5000 | loss 1.0274 bpb | lr 2.27e-05 ctr 6.81e-04 | gnorm 0.226 | 34058 tok/s | 1924 ms/step | peak 18.8 GB
+step 3850/5000 | loss 1.0220 bpb | lr 2.17e-05 ctr 6.51e-04 | gnorm 0.195 | 34071 tok/s | 1924 ms/step | peak 18.8 GB
+step 3900/5000 | loss 1.0200 bpb | lr 2.08e-05 ctr 6.23e-04 | gnorm 0.186 | 34082 tok/s | 1923 ms/step | peak 18.8 GB
+step 3950/5000 | loss 1.0141 bpb | lr 1.98e-05 ctr 5.95e-04 | gnorm 0.176 | 34070 tok/s | 1924 ms/step | peak 18.8 GB
+step 4000/5000 | loss 1.0107 bpb | lr 1.90e-05 ctr 5.69e-04 | gnorm 0.178 | 34067 tok/s | 1924 ms/step | peak 18.8 GB
+EVAL step 4000: val 0.9937 bpb (1.1s)
+checkpoint step 4000 -> /content/runs/lg6_fp4_h2/ckpt.pt (5s)
+step 4050/5000 | loss 1.0041 bpb | lr 1.81e-05 ctr 5.43e-04 | gnorm 0.169 | 34059 tok/s | 1924 ms/step | peak 18.8 GB
+step 4100/5000 | loss 0.9999 bpb | lr 1.73e-05 ctr 5.19e-04 | gnorm 0.170 | 34071 tok/s | 1923 ms/step | peak 18.8 GB
+step 4150/5000 | loss 1.0014 bpb | lr 1.65e-05 ctr 4.96e-04 | gnorm 0.146 | 34066 tok/s | 1924 ms/step | peak 18.8 GB
+step 4200/5000 | loss 0.9987 bpb | lr 1.58e-05 ctr 4.74e-04 | gnorm 0.150 | 34069 tok/s | 1924 ms/step | peak 18.8 GB
+step 4250/5000 | loss 0.9903 bpb | lr 1.51e-05 ctr 4.53e-04 | gnorm 0.150 | 34069 tok/s | 1924 ms/step | peak 18.8 GB
+step 4300/5000 | loss 0.9870 bpb | lr 1.45e-05 ctr 4.34e-04 | gnorm 0.141 | 34077 tok/s | 1923 ms/step | peak 18.8 GB
+step 4350/5000 | loss 0.9873 bpb | lr 1.39e-05 ctr 4.16e-04 | gnorm 0.147 | 34091 tok/s | 1922 ms/step | peak 18.8 GB
+step 4400/5000 | loss 0.9819 bpb | lr 1.33e-05 ctr 3.99e-04 | gnorm 0.143 | 34081 tok/s | 1923 ms/step | peak 18.8 GB
+step 4450/5000 | loss 0.9835 bpb | lr 1.28e-05 ctr 3.83e-04 | gnorm 0.133 | 34072 tok/s | 1923 ms/step | peak 18.8 GB
+step 4500/5000 | loss 0.9789 bpb | lr 1.23e-05 ctr 3.69e-04 | gnorm 0.132 | 34070 tok/s | 1924 ms/step | peak 18.8 GB
+EVAL step 4500: val 0.9637 bpb (1.1s)
+checkpoint step 4500 -> /content/runs/lg6_fp4_h2/ckpt.pt (5s)
+step 4550/5000 | loss 0.9785 bpb | lr 1.19e-05 ctr 3.56e-04 | gnorm 0.127 | 34058 tok/s | 1924 ms/step | peak 18.8 GB
+step 4600/5000 | loss 0.9730 bpb | lr 1.15e-05 ctr 3.44e-04 | gnorm 0.125 | 34075 tok/s | 1923 ms/step | peak 18.8 GB
+step 4650/5000 | loss 0.9765 bpb | lr 1.11e-05 ctr 3.34e-04 | gnorm 0.124 | 34079 tok/s | 1923 ms/step | peak 18.8 GB
+step 4700/5000 | loss 0.9721 bpb | lr 1.08e-05 ctr 3.25e-04 | gnorm 0.127 | 34064 tok/s | 1924 ms/step | peak 18.8 GB
+step 4750/5000 | loss 0.9705 bpb | lr 1.06e-05 ctr 3.17e-04 | gnorm 0.127 | 34063 tok/s | 1924 ms/step | peak 18.8 GB
+step 4800/5000 | loss 0.9665 bpb | lr 1.04e-05 ctr 3.11e-04 | gnorm 0.123 | 34084 tok/s | 1923 ms/step | peak 18.8 GB
+step 4850/5000 | loss 0.9690 bpb | lr 1.02e-05 ctr 3.06e-04 | gnorm 0.128 | 34089 tok/s | 1923 ms/step | peak 18.8 GB
+step 4900/5000 | loss 0.9614 bpb | lr 1.01e-05 ctr 3.03e-04 | gnorm 0.123 | 34074 tok/s | 1923 ms/step | peak 18.8 GB
+step 4950/5000 | loss 0.9641 bpb | lr 1.00e-05 ctr 3.01e-04 | gnorm 0.124 | 34084 tok/s | 1923 ms/step | peak 18.8 GB
+step 5000/5000 | loss 0.9637 bpb | lr 1.00e-05 ctr 3.00e-04 | gnorm 0.124 | 34077 tok/s | 1923 ms/step | peak 18.8 GB
+EVAL step 5000: val 0.9468 bpb (1.1s)
+checkpoint step 5000 -> /content/runs/lg6_fp4_h2/ckpt.pt (5s)

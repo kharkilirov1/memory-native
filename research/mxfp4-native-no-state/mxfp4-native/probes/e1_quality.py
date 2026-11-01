@@ -949,7 +949,9 @@ def run_arm(arm: str, seed: int, d: int, steps: int, batch: int, seq: int,
             sched: str = "const", warmup_frac: float = 0.02, lr_min_frac: float = 0.1,
             eval_every: int = 100, val_ids: torch.Tensor | None = None,
             blocks: int = 2, heads: int = 1, precision: str = "fp32", compile: bool = False,
-            compile_backend: str | None = None) -> dict:
+            compile_backend: str | None = None, accum: int = 1, accum_mode: str = "buffer",
+            accum_dtype: str = "bf16", momentum: float = 0.0, momentum_dtype: str = "bf16",
+            nesterov: bool = False) -> dict:
     """compile: torch.compile the TRAINING forward (see compile_model); eval stays eager. `ids` is the TRAINING tensor (batches are sampled from it only). `val_ids` is the held-out
     tensor "val" is measured on; None -> `ids` itself (legacy: val == train). Each eval also
     estimates the train loss on a fixed subset of `ids` (same fixed starts every time)."""
@@ -964,6 +966,19 @@ def run_arm(arm: str, seed: int, d: int, steps: int, batch: int, seq: int,
         base_mem = torch.cuda.memory_allocated()
     torch.manual_seed(seed)
     model, opt = build_model_opt(arm, vocab, d, lr, adam_lr, blocks, heads)
+    acc_state = None
+    if accum > 1:                     # opt-in gradient accumulation; `batch` is then the MICRO-batch (effective = batch*accum)
+        from mx6.latent_grid import lg_layers
+        if lg_layers(model):          # lg arms: mx6/lg_accum (buffer | latent); other arms: plain autograd accumulation
+            from mx6.lg_accum import set_accum
+            acc_state = set_accum(model, accum, accum_mode, accum_dtype, loss_scaled=True)
+    if momentum > 0.0:                # opt-in per-weight momentum for lg arms (mx6/lg_accum.set_momentum); no-op for others
+        from mx6.latent_grid import lg_layers
+        if lg_layers(model):
+            if accum > 1:
+                raise ValueError("--momentum and --accum both use the per-layer lg buffer; pick one")
+            from mx6.lg_accum import set_momentum
+            set_momentum(model, momentum, momentum_dtype, nesterov)
     train_fwd, cinfo = model, None
     if compile:                       # BEFORE fp32_islands: it must see the lg layers as native (no fp32 island)
         train_fwd, cinfo = compile_model(model, arm, compile_backend)
@@ -989,13 +1004,28 @@ def run_arm(arm: str, seed: int, d: int, steps: int, batch: int, seq: int,
         set_counter_lr(model, cur_lr, scale_frac=(cur_lr / lr if lr > 0 else 0.0))
         for g in opt.param_groups:
             g["lr"] = sched_lr(sched, g["base_lr"], step, steps, warmup_frac, lr_min_frac)
-        idx = torch.randint(0, len(ids) - seq - 1, (batch,), device=DEV)
+        idx = torch.randint(0, len(ids) - seq - 1, (batch * accum,), device=DEV)
         x = ids[idx.unsqueeze(1) + torch.arange(seq, device=DEV)]
         y = ids[idx.unsqueeze(1) + torch.arange(1, seq + 1, device=DEV)]
-        loss = nn.functional.cross_entropy(fwd_logits(train_fwd, x, precision).reshape(-1, vocab), y.reshape(-1))
-        opt.zero_grad(set_to_none=True)
-        loss.backward()
-        opt.step()
+        if accum == 1:
+            loss = nn.functional.cross_entropy(fwd_logits(train_fwd, x, precision).reshape(-1, vocab), y.reshape(-1))
+            opt.zero_grad(set_to_none=True)
+            loss.backward()
+            opt.step()
+        else:                         # ONE optimizer step over `accum` micro-batches of the SAME windows a batch*accum run uses
+            opt.zero_grad(set_to_none=True)
+            ctx = contextlib.nullcontext()
+            if acc_state is not None:
+                from mx6.lg_accum import lg_accumulate
+                ctx = lg_accumulate(model, accum)
+            with ctx as acc:
+                loss = 0.0
+                for i in (acc.micro_batches() if acc is not None else range(accum)):
+                    li = nn.functional.cross_entropy(
+                        fwd_logits(train_fwd, x.chunk(accum)[i], precision).reshape(-1, vocab), y.chunk(accum)[i].reshape(-1))
+                    (li / accum).backward()
+                    loss = loss + li.detach() / accum
+            opt.step()
         c = clip_frac_now(model)
         if c is not None:
             clips.append(c)
@@ -1057,6 +1087,19 @@ def main(argv=None) -> int:
     ap.add_argument("--d", type=int, default=128)
     ap.add_argument("--steps", type=int, default=1500)
     ap.add_argument("--batch", type=int, default=32)
+    ap.add_argument("--accum", type=int, default=1,
+                    help="gradient accumulation: N micro-batches of --batch per OPTIMIZER step (effective batch = batch*N). "
+                         "Default 1 = off (unchanged). lg arms: mx6/lg_accum (see --accum-mode); other arms: plain autograd")
+    ap.add_argument("--accum-mode", default="buffer", choices=["buffer", "latent"],
+                    help="lg arms: buffer = per-layer grad buffer, ONE update per optimizer step (== big batch); latent = every "
+                         "micro-batch updates with lr/N and beta^(1/N), no buffer")
+    ap.add_argument("--accum-dtype", default="bf16", choices=["bf16", "fp8"],
+                    help="lg buffer mode: bf16 (+2 B/param) or fp8 e4m3 + per-row scale + stochastic rounding (~ +1 B/param)")
+    ap.add_argument("--momentum", type=float, default=0.0,
+                    help="lg arms: per-weight momentum mu (EMA of the gradient fed to the RMS-normalised update). 0 = off")
+    ap.add_argument("--momentum-dtype", default="bf16", choices=["bf16", "fp8"],
+                    help="lg momentum buffer: bf16 (+2 B/param) or fp8 e4m3 + row scale + SR (~ +1 B/param)")
+    ap.add_argument("--nesterov", action="store_true", help="lg momentum: nesterov direction mu*buf + (1-mu)*g")
     ap.add_argument("--seq", type=int, default=128)
     ap.add_argument("--seeds", default="0,1")
     ap.add_argument("--lr", type=float, default=0.01,
@@ -1168,11 +1211,15 @@ def main(argv=None) -> int:
     ids_all = ids_cpu.to(DEV)
     del ids_cpu
     ids, val_ids = split_ids(ids_all, args.val_frac)
-    epochs = args.steps * args.batch * args.seq / len(ids)
+    if args.accum < 1:
+        ap.error("--accum must be >= 1")
+    epochs = args.steps * args.batch * args.accum * args.seq / len(ids)
 
     print(f"device={torch.cuda.get_device_name(0) if DEV == 'cuda' else 'cpu'} "
           f"d={args.d} steps={args.steps} batch={args.batch} seq={args.seq} "
-          f"vocab={len(chars)} tokens={len(ids_all)} train_tokens={len(ids)} "
+          + (f"ACCUM={args.accum} (effective batch {args.batch * args.accum}, mode={args.accum_mode}, dtype={args.accum_dtype}) "
+             if args.accum > 1 else "")
+          + f"vocab={len(chars)} tokens={len(ids_all)} train_tokens={len(ids)} "
           f"val_tokens={len(val_ids) if args.val_frac > 0 else 0} val_frac={args.val_frac:g} "
           f"epochs={epochs:.2f}"
           + (" [LEGACY: val measured on train data]" if args.val_frac == 0 else "")
@@ -1213,7 +1260,9 @@ def main(argv=None) -> int:
                         warmup_frac=args.warmup_frac, lr_min_frac=args.lr_min_frac,
                         eval_every=args.eval_every, val_ids=val_ids,
                         blocks=args.layers, heads=args.heads, precision=args.precision,
-                        compile=args.compile, compile_backend=args.compile_backend)
+                        compile=args.compile, compile_backend=args.compile_backend,
+                        accum=args.accum, accum_mode=args.accum_mode, accum_dtype=args.accum_dtype,
+                        momentum=args.momentum, momentum_dtype=args.momentum_dtype, nesterov=args.nesterov)
             results.append(r)
             f0, f1, f2 = r["flip"]
             print(f"  {r['arm']:17} seed={r['seed']} bits={r['bits']:.3f} "

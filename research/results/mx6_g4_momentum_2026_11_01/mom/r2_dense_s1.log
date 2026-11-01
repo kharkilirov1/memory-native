@@ -1,0 +1,19 @@
+device=NVIDIA RTX PRO 6000 Blackwell Server Edition d=512 steps=3000 batch=128 seq=128 vocab=202 tokens=20000000 train_tokens=18000000 val_tokens=2000000 val_frac=0.1 epochs=2.73 (loss in bits/char) sched=cosine(warmup=0.02 min=0.1) lr=0.01 adam_lr=0.001 eval_every=250 scale_format=nvfp4
+data: dataset=enwik8 encoding=latin-1 (byte-level) path=/content/mx3/mxfp4-native/data/enwik8 chars=20000000 (--chars 20000000) vocab=202
+model: d=512 layers=4 heads=8 head_dim=64 mlp=4d seq=128 | params total=13,061,120 block_linears(counter layers)=12,582,912 other(emb/pos/LN/head)=478,208 | AdamW state 12 B/param (fp32 master+m+v)
+  dense_nobias      seed=1 bits=96.000 val=1.7524 train=1.6006 gap=+0.1518 best=1.7524 clip=nan% flip%(start/mid/end)=nan/nan/nan edge=nan% grown=0 (204s)
+      compile: kind=plain backend=inductor graphs=1 graph_breaks=0
+      weights: kurt=2.93 tail3=0.32% zero=0.0%
+      memory: params total=13,061,120 block_linears=12,582,912 | state=144.0MB (+grad 192.0MB) | peak=1632MB (+1480MB over run start)
+      curve: 250:2.766 500:2.324 750:2.147 1000:2.013 1250:1.941 1500:1.892 1750:1.852 2000:1.822 2250:1.798 2500:1.774 2750:1.762 3000:1.752
+
+arm                 bits  mean val   train     gap      sd  clip%    best  flip%e  edge%  seeds
+dense_nobias      96.000    1.7524  1.6006 +0.1518  0.0000    nan  1.7524     nan    nan  [1.7524]
+
+deployed weights of the 4 block linears (pooled over rows & layers; mean over seeds): kurt = E[w^4]/E[w^2]^2 per row (Gaussian 3, uniform 1.8); tail3 = frac |w| > 3*rms_row (Gaussian 0.27%); zero = frac exactly 0
+arm                  kurt  tail3%  zero%
+dense_nobias         2.93    0.32    0.0
+
+memory per arm, MB (block linears: 12,582,912 params; formulas in the module docstring)
+arm                 bits  B/param     state     +grad    other      peak  peak-run
+dense_nobias      96.000   12.000    144.00    192.00     5.47      1632      1480

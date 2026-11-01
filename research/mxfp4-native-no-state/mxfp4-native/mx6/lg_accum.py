@@ -1,0 +1,374 @@
+"""Opt-in gradient accumulation for `LatentGridLinear` (the update lives INSIDE backward, so plain autograd accumulation
+cannot work: every backward would already move the weights). Nothing here is active unless `set_accum(model, n, mode)` is called.
+
+Two modes (N = micro-batches per optimizer step)
+  "buffer"  per-layer gradient buffer (bf16 [out,in] +2 B/param, or float8_e4m3fn + fp32 per-row scale ~ +1 B/param, or fp32
+            +4 B/param for tests). Micro-batches 1..N-1 only ADD grad_w into the buffer (no update, RMS EMA untouched); micro-batch N
+            forms the total gradient, calls the (all-reduce hook and the) normal ONE-launch update with it and zeroes the buffer.
+            => ONE update and ONE RMS-EMA step per optimizer step, identical to a single batch of N x the size (up to the summation
+            order / the buffer rounding). All N micro-batches see the SAME weights (as in a big batch).
+  "latent"  no buffer. Every micro-batch applies its own update with lr / N and a per-micro RMS-EMA factor beta' = beta^(1/N):
+            the latent grid integrates the micro-updates. N updates per optimizer step. NOT equivalent to a big batch (see below).
+
+Loss convention (`loss_scaled=True`, default): the training loop divides every micro-batch loss by N (standard practice, so the
+grads of ordinary FP params accumulated by autograd are the big-batch mean). Then buffer mode uses SUM(buffer) as the gradient (that
+already is the mean) and latent mode multiplies each micro gradient back by N (restores the scale of a normal batch gradient;
+matters only through rms_eps). With `loss_scaled=False` (loss NOT divided) buffer mode divides the sum by N and latent mode uses
+the micro gradient as is.
+
+Latent mode, the choices
+  * lr/N: the N micro-steps add up to about one optimizer step of size lr when the micro-gradients agree.
+  * beta' = beta^(1/N): N EMA steps decay old information by beta in total, so the EMA horizon IN OPTIMIZER STEPS is unchanged
+    (1/(1-beta) steps). The EMA sees micro-batch gradients, whose second moment is larger than the big-batch one by up to N x in
+    the noise-dominated regime (E[g_micro^2] = mu^2 + sigma^2/B vs mu^2 + sigma^2/(N B)): v is biased UP, g/sqrt(v) is smaller, the
+    effective lr lies between lr/sqrt(N) (pure noise) and lr (pure signal) relative to buffer mode. Tune lr (or scale it by sqrt(N))
+    if you compare to buffer mode. Micro-batches 2..N also see weights already moved by micro-batch 1 (SGD-like, not a big batch).
+  * SR noise: each micro-update is stochastically rounded to the integer index grid. For a step delta (in index units) the SR
+    variance is d^2 p(1-p), p = frac(delta). N draws of delta/N: sum of variances ~ N * d * (delta/N) * (1 - delta/(N d)) =
+    d*delta*(1 - delta/(N d)), versus one draw d^2 frac(delta)(1-frac(delta)) <= d^2/4. For |delta| << d (the usual regime) they are
+    nearly equal (about d*delta; the single draw loses a factor (1-p), the N draws (1-p/N)); for |delta| >> d, N small draws are
+    noisier (grows like d*delta, a single draw is bounded by d^2/4). Every draw is unbiased, so the expectation is unaffected.
+    The MC test measures the ratio (tests/test_lg_accum.py).
+
+fp8 buffer (float8_e4m3fn + per-row fp32 scale): total t = deq(buf) + grad is formed in fp32 per row-chunk, the new row scale is
+amax(t)/448 and t/scale is STOCHASTICALLY ROUNDED to the e4m3 grid (mantissa 3 bits; subnormal spacing 2^-9) -> E[deq] = t exactly
+(unbiased; the only exception is the clamp at +-448 which never triggers because the scale is set by amax). Each requantisation
+adds zero-mean noise of ~2.5-5 % of |value| rms (relative spacing 2^-4..2^-3, rms of SR = 0.41 * spacing); N-1 requantisations for
+N micro-batches (the last one is NOT stored: the total is formed in fp32 and goes to the update). The noise is far below the
+element-wise sampling noise of a micro-batch gradient. Cost: transient fp32 chunk (<= `FP8_CHUNK` elements, 32 MB), several small
+torch ops per chunk (not fused; a Triton kernel is the obvious follow-up).
+
+DDP hook: `grad_allreduce(grad) -> grad|None` is called inside the backward op right before the update: buffer mode on the LAST
+micro-batch only (the accumulated gradient: ONE all-reduce per layer per optimizer step), latent mode on EVERY micro-batch (every
+update needs a synchronised gradient). `dist_allreduce_mean` is a ready-made version (sum all-reduce / world_size, guarded by
+`dist.is_initialized()`). Keep the lg state identical on all ranks: same global CPU seed (the Philox seed is drawn from it) and
+DDP(broadcast_buffers=False) (otherwise DDP re-broadcasts idx every forward).
+
+State is read at RUN time inside the opaque backward op (like the Philox seed), never traced by torch.compile: the micro-batch
+index is a plain Python int on `AccumState`, the compiled graph only sees the int `acc_id` (constant) => no recompiles, no host
+sync. Not CUDA-graph-replay safe (mode="reduce-overhead"), same as the seed.
+"""
+from __future__ import annotations
+
+import contextlib
+
+import torch
+
+KINDS = ("bf16", "fp8", "fp32")
+MODES = ("buffer", "latent", "ema")
+FP8_MAX = 448.0
+FP8_CHUNK = 1 << 23                      # elements per fp32 chunk in the fp8 buffer arithmetic
+
+_STATES: dict[int, "AccumState"] = {}
+_NEXT_ID = [0]
+
+
+def dist_allreduce_mean(grad: torch.Tensor) -> torch.Tensor:
+    """Mean all-reduce of `grad` over the default process group, in place; a no-op if torch.distributed is not initialised."""
+    import torch.distributed as dist
+    if dist.is_available() and dist.is_initialized():
+        ws = dist.get_world_size()
+        dist.all_reduce(grad, op=dist.ReduceOp.SUM)
+        if ws > 1:
+            grad.div_(ws)
+    return grad
+
+
+class AccumState:
+    """Shared by all LatentGridLinear layers of one model (see set_accum). `idx` = index of the micro-batch whose backward is
+    running (set by `lg_accumulate`); the layers read it at run time."""
+
+    def __init__(self, n: int, mode: str, kind: str, loss_scaled: bool, grad_allreduce):
+        if mode == "ema":
+            n = 1
+        elif int(n) < 2:
+            raise ValueError(f"accumulation needs n >= 2, got {n}")
+        if mode not in MODES:
+            raise ValueError(f"accum mode must be one of {MODES}, got {mode!r}")
+        if kind not in KINDS:
+            raise ValueError(f"accum dtype must be one of {KINDS}, got {kind!r}")
+        if grad_allreduce == "dist":
+            grad_allreduce = dist_allreduce_mean
+        if grad_allreduce is not None and not callable(grad_allreduce):
+            raise ValueError("grad_allreduce must be None, 'dist' or a callable")
+        self.n, self.mode, self.kind = int(n), mode, kind
+        self.mu = 0.0                    # ema mode: momentum factor (set_momentum)
+        self.nesterov = False
+        self.loss_scaled, self.grad_allreduce = bool(loss_scaled), grad_allreduce
+        self.idx = 0                     # micro-batch index of the running backward
+        self.active = False              # inside lg_accumulate
+        self.n_layers = 0
+        self.n_bwd = 0                   # backward calls of lg layers since the context was entered
+        self.n_updates = 0               # updates applied (all layers) since set_accum
+        self.n_hook = 0                  # grad_allreduce calls since set_accum
+        self.id = _NEXT_ID[0]
+        _NEXT_ID[0] += 1
+        _STATES[self.id] = self
+
+    @property
+    def lr_mult(self) -> float:
+        return 1.0 / self.n if self.mode == "latent" else 1.0
+
+    def beta_eff(self, beta: float) -> float:
+        return float(beta) ** (1.0 / self.n) if self.mode == "latent" else float(beta)
+
+    @property
+    def last(self) -> bool:
+        return self.idx == self.n - 1
+
+
+def get_state(acc_id: int) -> AccumState:
+    return _STATES[int(acc_id)]
+
+
+# ── fp8 stochastic rounding / buffer arithmetic ───────────────────────────────────────────────────────────────
+
+def sr_fp8(x: torch.Tensor) -> torch.Tensor:
+    """Stochastic rounding of float32 `x` (|x| <= 448) to the float8_e4m3fn grid: E[result] = x. Spacing of the grid at x:
+    2^(floor(log2|x|) - 3), but at least 2^-9 (subnormals). Returns float8_e4m3fn."""
+    x = x.to(torch.float32)
+    _, e = torch.frexp(x)                                           # |x| = m 2^e, m in [0.5, 1)
+    d = torch.exp2((e - 4).clamp_(min=-9).to(torch.float32))        # floor(log2|x|) = e - 1
+    a = x.abs() / d
+    q = torch.floor(a + torch.rand_like(a)) * d
+    return torch.copysign(q, x).clamp_(-FP8_MAX, FP8_MAX).to(torch.float8_e4m3fn)
+
+
+def _rows_per_chunk(cols: int) -> int:
+    return max(1, FP8_CHUNK // max(cols, 1))
+
+
+def fp8_add_(buf: torch.Tensor, bscale: torch.Tensor, grad: torch.Tensor) -> None:
+    """buf (fp8) <- SR_fp8(deq(buf) + grad), per-row scale amax/448 (bscale [rows,1] fp32)."""
+    rows, cols = buf.shape
+    step = _rows_per_chunk(cols)
+    for r0 in range(0, rows, step):
+        r1 = min(rows, r0 + step)
+        t = buf[r0:r1].to(torch.float32).mul_(bscale[r0:r1]).add_(grad[r0:r1])
+        amax = t.abs().amax(dim=1, keepdim=True)
+        ns = torch.where(amax > 0, amax / FP8_MAX, torch.ones_like(amax))
+        buf[r0:r1] = sr_fp8(t / ns)
+        bscale[r0:r1] = ns
+
+
+def acc_add_(buf: torch.Tensor, bscale: torch.Tensor, grad: torch.Tensor, kind: str) -> None:
+    """Micro-batches 1..N-1 (buffer mode): buffer += grad. bf16/fp32: one in-place add, no fp32 copy."""
+    if kind == "fp8":
+        fp8_add_(buf, bscale, grad)
+    else:
+        buf.add_(grad)
+
+
+def acc_finish_(buf: torch.Tensor, bscale: torch.Tensor, grad: torch.Tensor, kind: str, mult: float) -> torch.Tensor:
+    """Last micro-batch: grad <- (buffer + grad) * mult IN PLACE (grad is the layer's fresh grad_w), buffer zeroed. -> grad."""
+    if kind == "fp8":
+        rows, cols = buf.shape
+        step = _rows_per_chunk(cols)
+        for r0 in range(0, rows, step):
+            r1 = min(rows, r0 + step)
+            t = buf[r0:r1].to(torch.float32).mul_(bscale[r0:r1]).add_(grad[r0:r1])
+            grad[r0:r1] = (t * mult).to(grad.dtype) if mult != 1.0 else t.to(grad.dtype)
+        buf.zero_()
+        bscale.zero_()
+    else:
+        grad.add_(buf)
+        if mult != 1.0:
+            grad.mul_(mult)
+        buf.zero_()
+    return grad
+
+
+def ema_step_(st: AccumState, grad_w: torch.Tensor, buf: torch.Tensor, bscale) -> torch.Tensor:
+    """Momentum ("ema" mode): buf <- mu*buf + (1-mu)*g; returns the direction handed to the RMS-normalised update:
+    buf (heavy-ball EMA) or mu*buf + (1-mu)*g (nesterov). bf16/fp32 buffer: in-place lerp; fp8: fp32 chunk + SR requant.
+    The update's row-RMS normaliser then sees the EMA, so the step stays ~unit-scale where the gradient sign is consistent
+    and shrinks where it flips (noise averages out): Adam's first-moment effect at 1 or 2 B/param."""
+    mu = float(st.mu)
+    if st.kind == "fp8":
+        rows, cols = buf.shape
+        step = _rows_per_chunk(cols)
+        for r0 in range(0, rows, step):
+            r1 = min(rows, r0 + step)
+            g = grad_w[r0:r1].to(torch.float32)
+            t = buf[r0:r1].to(torch.float32).mul_(bscale[r0:r1]).mul_(mu).add_(g, alpha=1.0 - mu)
+            amax = t.abs().amax(dim=1, keepdim=True)
+            ns = torch.where(amax > 0, amax / FP8_MAX, torch.ones_like(amax))
+            buf[r0:r1] = sr_fp8(t / ns)
+            bscale[r0:r1] = ns
+            out = t.mul_(mu).add_(g, alpha=1.0 - mu) if st.nesterov else t
+            grad_w[r0:r1] = out.to(grad_w.dtype)
+        return grad_w
+    buf.lerp_(grad_w.to(buf.dtype), 1.0 - mu)
+    if st.nesterov:
+        return grad_w.mul_(1.0 - mu).add_(buf.to(grad_w.dtype), alpha=mu)
+    return grad_w.copy_(buf)
+
+
+def accum_grad_(st: AccumState, grad_w: torch.Tensor, buf, bscale):
+    """The accumulation step of one layer's backward. -> the gradient to hand to the update (after the all-reduce hook), or None
+    (buffer mode, not the last micro-batch: nothing to update). `grad_w` is consumed (modified in place)."""
+    if st.mode == "ema":
+        if st.grad_allreduce is not None:            # sync the raw gradient first: the EMA stays identical on all ranks
+            st.n_hook += 1
+            out = st.grad_allreduce(grad_w)
+            if out is not None:
+                grad_w = out
+        st.n_updates += 1
+        return ema_step_(st, grad_w, buf, bscale)
+    if not st.active:
+        raise RuntimeError("LatentGridLinear accumulation is configured (set_accum) but backward ran outside "
+                           "`with lg_accumulate(model, n) as acc: for i in acc.micro_batches(): ...`")
+    st.n_bwd += 1
+    if st.mode == "latent":
+        g = grad_w.mul_(float(st.n)) if st.loss_scaled else grad_w
+    else:
+        if not st.last:
+            acc_add_(buf, bscale, grad_w, st.kind)
+            return None
+        g = acc_finish_(buf, bscale, grad_w, st.kind, 1.0 if st.loss_scaled else 1.0 / st.n)
+    if st.grad_allreduce is not None:
+        st.n_hook += 1
+        out = st.grad_allreduce(g)
+        if out is not None:
+            g = out
+    st.n_updates += 1
+    return g
+
+
+# ── user API ───────────────────────────────────────────────────────────────────────────────────────────────
+
+def _lg_layers(model):
+    from .latent_grid import lg_layers
+    return lg_layers(model)
+
+
+def get_accum(model) -> AccumState | None:
+    for m in _lg_layers(model):
+        if m._acc is not None:
+            return m._acc
+    return None
+
+
+def clear_accum(model) -> None:
+    for m in _lg_layers(model):
+        m.disable_accum_()
+
+
+def set_accum(model, n: int, mode: str = "buffer", dtype: str = "bf16", loss_scaled: bool = True,
+              grad_allreduce=None) -> AccumState | None:
+    """Enable gradient accumulation over `n` micro-batches on every LatentGridLinear of `model` (n <= 1 disables it and frees
+    the buffers). Call BEFORE torch.compile. Allocates the per-layer buffers (buffer mode). Returns the shared AccumState."""
+    layers = _lg_layers(model)
+    clear_accum(model)
+    if n is None or int(n) <= 1:
+        return None
+    if not layers:
+        raise ValueError("set_accum: the model has no LatentGridLinear layer")
+    st = AccumState(n, mode, dtype, loss_scaled, grad_allreduce)
+    for m in layers:
+        m.enable_accum_(st)
+    st.n_layers = len(layers)
+    return st
+
+
+def set_momentum(model, mu: float, dtype: str = "bf16", nesterov: bool = False, grad_allreduce=None) -> AccumState | None:
+    """Per-weight momentum for every LatentGridLinear (reuses the accumulation buffer: bf16 +2 B/param, fp8 ~ +1 B/param).
+    Every backward: buf <- mu*buf + (1-mu)*grad and the update uses buf. No lg_accumulate context needed. mu <= 0 disables.
+    Mutually exclusive with set_accum (same per-layer buffer). Call BEFORE torch.compile."""
+    if mu is None or float(mu) <= 0.0:
+        clear_accum(model)
+        return None
+    if not 0.0 < float(mu) < 1.0:
+        raise ValueError(f"momentum must be in (0, 1), got {mu}")
+    layers = _lg_layers(model)
+    if not layers:
+        raise ValueError("set_momentum: the model has no LatentGridLinear layer")
+    clear_accum(model)
+    st = AccumState(1, "ema", dtype, True, grad_allreduce)
+    st.mu, st.nesterov = float(mu), bool(nesterov)
+    for m in layers:
+        m.enable_accum_(st)
+    st.n_layers = len(layers)
+    return st
+
+
+class _Accumulate:
+    def __init__(self, st: AccumState):
+        self.st = st
+        self.n = st.n
+
+    def micro_batches(self):
+        """Iterate 0..n-1; the layers know which micro-batch's backward is running (the last one triggers the buffer-mode
+        update). Run forward AND backward of micro-batch i inside the loop body."""
+        for i in range(self.n):
+            self.st.idx = i
+            yield i
+        self.st.idx = self.n
+
+    @contextlib.contextmanager
+    def micro(self, i: int):
+        """Explicit alternative: `with acc.micro(i): fwd; bwd`."""
+        if not 0 <= i < self.n:
+            raise ValueError(f"micro-batch {i} out of range 0..{self.n - 1}")
+        self.st.idx = i
+        yield i
+        self.st.idx = i + 1
+
+
+@contextlib.contextmanager
+def lg_accumulate(model, n: int | None = None):
+    """One optimizer step worth of micro-batches. On exit it checks that every lg layer ran exactly n backwards (otherwise a
+    buffer would be left half-full: RuntimeError) and, after an exception, zeroes the buffers.
+
+        set_accum(model, 4, "buffer")
+        for step in ...:
+            with lg_accumulate(model, 4) as acc:
+                for i in acc.micro_batches():
+                    loss = f(model, batch_i) / 4        # loss_scaled convention
+                    loss.backward()
+            optimizer.step()                            # FP params: normal autograd accumulation
+    """
+    st = get_accum(model)
+    if st is None:
+        raise RuntimeError("lg_accumulate: call set_accum(model, n, mode) first")
+    if n is not None and int(n) != st.n:
+        raise ValueError(f"lg_accumulate(n={n}) != set_accum n={st.n}")
+    if st.active:
+        raise RuntimeError("lg_accumulate is not re-entrant")
+    st.active, st.idx, st.n_bwd = True, 0, 0
+    ok = False
+    try:
+        yield _Accumulate(st)
+        ok = True
+    finally:
+        st.active = False
+        want = st.n * st.n_layers
+        got = st.n_bwd
+        st.idx = 0
+        st.n_bwd = 0
+        if not ok:
+            for m in _lg_layers(model):
+                m.zero_accum_()
+    if got != want:
+        for m in _lg_layers(model):
+            m.zero_accum_()
+        raise RuntimeError(f"lg_accumulate: {got} lg backward calls, expected {want} = {st.n} micro-batches x "
+                           f"{st.n_layers} layers (a layer unused in a micro-batch, used twice, or fewer micro-batches run); "
+                           f"accumulation buffers were reset")
+
+
+def accum_bytes_per_param(kind: str, in_features: int, mode: str = "buffer") -> float:
+    """Resident bytes per weight added by the accumulation buffer."""
+    if mode == "latent":
+        return 0.0
+    # "ema" (momentum) uses the same buffer as "buffer"
+    return {"bf16": 2.0, "fp32": 4.0, "fp8": 1.0 + 4.0 / in_features}[kind]
+
+
+def accum_resident_bytes(model) -> int:
+    n = 0
+    for m in _lg_layers(model):
+        for t in (m._acc_buf, m._acc_scale):
+            if t is not None:
+                n += t.numel() * t.element_size()
+    return n

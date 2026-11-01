@@ -44,6 +44,7 @@ import torch
 from torch import nn
 
 from . import update as mx_update
+from . import lg_accum
 from .lg_update_kernel import HAS_TRITON, lg_decode, lg_update_
 from .packed_na import NVFP4_BLOCK, PackedNA
 
@@ -201,7 +202,7 @@ class _LGFunction(torch.autograd.Function):
         grad_x = grad_out @ weight
         grad_w = (grad_out.t() @ x).contiguous()
         with torch.no_grad():
-            module.apply_update_(grad_w)
+            module._backward_update_(grad_w)
         module._pending = False
         return grad_x, None, None
 
@@ -236,7 +237,7 @@ class _LGNativeFunction(torch.autograd.Function):
         dx = module._gemm_dx(dy, w) if ctx.needs_input_grad[0] else None
         grad_w = dy.t() @ x                                       # [out, in] in x.dtype, contiguous
         with torch.no_grad():
-            module.apply_update_(grad_w)
+            module._backward_update_(grad_w)
         del grad_w
         module._pending = False
         return dx, None, None
@@ -403,6 +404,94 @@ def _register_lg_ops() -> bool:
 HAS_LG_OPS = _register_lg_ops()
 
 
+# ── gradient-accumulation twins of the two ops (opt-in; the ops above are untouched) ────────────────────────────────────
+#
+# `lg_linear_acc` / `lg_linear_acc_bwd` = the same arithmetic plus the per-layer accumulation buffer (acc_buf, acc_scale:
+# declared MUTATED in the backward) and `int acc_id` (a constant: the id of the shared lg_accum.AccumState). The micro-batch
+# index, n, mode, kind and the all-reduce hook are read from that state at RUN time inside the opaque backward body (never
+# traced): changing the micro-batch never changes the compiled graph. lr scaling (latent mode: lr / n) is a device-side
+# multiply of the 0-dim lr tensor (no host sync); beta' arrives as the (constant) `beta` argument.
+
+_ACC_SCHEMA = _CFG_SCHEMA + ", int acc_id"
+
+
+def _op_acc_fwd_impl(x, idx, scale, tscale, v_rms, clip_buf, token, lr_t, wd_t, acc_buf, acc_scale, k, m, gemm, dx_gemm,
+                     triton_on, umode, beta, eps, has_wd, track_clip, acc_id):
+    return _op_fwd_impl(x, idx, scale, tscale, v_rms, clip_buf, token, lr_t, wd_t, k, m, gemm, dx_gemm, triton_on, umode,
+                        beta, eps, has_wd, track_clip)
+
+
+def _op_acc_bwd_impl(dy, x, idx, scale, tscale, v_rms, clip_buf, lr_t, wd_t, acc_buf, acc_scale, needs_dx, k, m, gemm,
+                     dx_gemm, triton_on, umode, beta, eps, has_wd, track_clip, acc_id):
+    grid = get_grid(k, m)
+    dy = dy.to(x.dtype)
+    dx = _op_dx(dy, idx, scale, tscale, grid, gemm, dx_gemm, triton_on) if needs_dx else x.new_empty(0)
+    grad_w = dy.t() @ x
+    st = lg_accum.get_state(acc_id)
+    g = lg_accum.accum_grad_(st, grad_w, acc_buf if acc_buf.numel() else None, acc_scale if acc_scale.numel() else None)
+    if g is not None:
+        lr_eff = lr_t * st.lr_mult if st.lr_mult != 1.0 else lr_t
+        _op_update_(g, idx, scale, tscale, v_rms, clip_buf, lr_eff, wd_t, grid, triton_on, umode, beta, eps, has_wd,
+                    track_clip)
+    return dx
+
+
+_LG_ACC_LIB = None
+HAS_LG_ACC_OPS = False
+
+
+def _register_lg_acc_ops() -> bool:
+    global _LG_ACC_LIB
+    if not HAS_LG_OPS:
+        return False
+    try:
+        if hasattr(torch.ops.mx6, "lg_linear_acc") and hasattr(torch.ops.mx6, "lg_linear_acc_bwd"):
+            return True
+    except (AttributeError, RuntimeError):
+        pass
+    try:
+        lib = torch.library.Library("mx6", "FRAGMENT")
+        lib.define("lg_linear_acc(Tensor x, Tensor idx, Tensor scale, Tensor tscale, Tensor v_rms, Tensor clip_buf, "
+                   "Tensor token, Tensor lr_t, Tensor wd_t, Tensor acc_buf, Tensor acc_scale, " + _ACC_SCHEMA + ") -> Tensor")
+        lib.define("lg_linear_acc_bwd(Tensor dy, Tensor x, Tensor(a!) idx, Tensor scale, Tensor tscale, Tensor(b!) v_rms, "
+                   "Tensor(c!) clip_buf, Tensor lr_t, Tensor wd_t, Tensor(d!) acc_buf, Tensor(e!) acc_scale, bool needs_dx, "
+                   + _ACC_SCHEMA + ") -> Tensor")
+        lib.impl("lg_linear_acc", _op_acc_fwd_impl, "CompositeExplicitAutograd")
+        lib.impl("lg_linear_acc_bwd", _op_acc_bwd_impl, "CompositeExplicitAutograd")
+
+        @torch.library.register_fake("mx6::lg_linear_acc")
+        def _fake_acc_fwd(x, idx, scale, tscale, v_rms, clip_buf, token, lr_t, wd_t, acc_buf, acc_scale, k, m, gemm,
+                          dx_gemm, triton_on, umode, beta, eps, has_wd, track_clip, acc_id):
+            return x.new_empty(x.shape[0], idx.shape[0])
+
+        @torch.library.register_fake("mx6::lg_linear_acc_bwd")
+        def _fake_acc_bwd(dy, x, idx, scale, tscale, v_rms, clip_buf, lr_t, wd_t, acc_buf, acc_scale, needs_dx, k, m, gemm,
+                          dx_gemm, triton_on, umode, beta, eps, has_wd, track_clip, acc_id):
+            return x.new_empty(x.shape) if needs_dx else x.new_empty(0)
+
+        def _setup(ctx, inputs, output):
+            x, idx, scale, tscale, v_rms, clip_buf = inputs[:6]
+            lr_t, wd_t, acc_buf, acc_scale = inputs[7:11]
+            ctx.save_for_backward(x, idx, scale, tscale, v_rms, clip_buf, lr_t, wd_t, acc_buf, acc_scale)
+            ctx.cfg = tuple(inputs[11:])
+            ctx.needs_dx = bool(ctx.needs_input_grad[0])
+
+        def _backward(ctx, dy):
+            x, idx, scale, tscale, v_rms, clip_buf, lr_t, wd_t, acc_buf, acc_scale = ctx.saved_tensors
+            dx = torch.ops.mx6.lg_linear_acc_bwd(dy, x, idx, scale, tscale, v_rms, clip_buf, lr_t, wd_t, acc_buf,
+                                                 acc_scale, ctx.needs_dx, *ctx.cfg)
+            return (dx if ctx.needs_dx else None,) + (None,) * (10 + len(ctx.cfg))
+
+        torch.library.register_autograd("mx6::lg_linear_acc", _backward, setup_context=_setup)
+        _LG_ACC_LIB = lib
+        return True
+    except Exception:                                     # noqa: BLE001
+        return False
+
+
+HAS_LG_ACC_OPS = _register_lg_acc_ops()
+
+
 def lg_layers(model: nn.Module):
     return [m for m in model.modules() if isinstance(m, LatentGridLinear)]
 
@@ -502,6 +591,14 @@ class LatentGridLinear(nn.Module):
         self.register_buffer("v_rms", torch.full((out_features, 1), rms_eps, dtype=torch.float32))
         self.register_buffer("_clip_buf", torch.zeros(()), persistent=False)   # ops path: fraction beyond the grid
         self._token = torch.zeros(0, requires_grad=True)
+        #: opt-in gradient accumulation (mx6/lg_accum.py, set via lg_accum.set_accum): shared AccumState, its id (-1 = off;
+        #: a python int, so a guard-constant for torch.compile), the beta exponent (1/n in latent mode) and the buffers
+        #: (non-persistent: never in state_dict; empty tensors when the mode needs none).
+        self._acc = None
+        self._acc_id = -1
+        self._acc_pow = 1.0
+        self.register_buffer("_acc_buf", None, persistent=False)
+        self.register_buffer("_acc_scale", None, persistent=False)
         self._pending = False
         self._weight_cache: torch.Tensor | None = None
         self._scale_cache: torch.Tensor | None = None
@@ -664,6 +761,15 @@ class LatentGridLinear(nn.Module):
             x2 = x.reshape(-1, shape[-1]).to(cdt)
             if (self.use_custom_op and HAS_LG_OPS and self.generator is None
                     and torch.is_grad_enabled() and self.training):
+                if self._acc_id >= 0:
+                    if not HAS_LG_ACC_OPS:
+                        raise RuntimeError("gradient accumulation on the op path needs the mx6::lg_linear_acc ops")
+                    out = torch.ops.mx6.lg_linear_acc(
+                        x2, self.idx, self._scale, self._tscale, self.v_rms, self._clip_buf, self._token,
+                        self._lr_t, self._wd_t, self._acc_buf, self._acc_scale, self.fmt.k, self.fmt.m, self.gemm,
+                        self.dx_gemm, self._use_triton(), self.update_mode, float(self.rms_beta) ** self._acc_pow,
+                        float(self.rms_eps), self._has_wd, self.track_clip, self._acc_id)
+                    return out.reshape(*shape[:-1], self.out_features)
                 out = torch.ops.mx6.lg_linear(
                     x2, self.idx, self._scale, self._tscale, self.v_rms, self._clip_buf, self._token,
                     self._lr_t, self._wd_t, self.fmt.k, self.fmt.m, self.gemm, self.dx_gemm, self._use_triton(),
@@ -759,17 +865,58 @@ class LatentGridLinear(nn.Module):
             w = self.decode_weight(dy.dtype)
         return dy @ w
 
-    def apply_update_(self, grad_w: torch.Tensor) -> None:
-        """In-place update of the index, called from backward. No optimizer, no momentum, no counter."""
+    # ── opt-in gradient accumulation (mx6/lg_accum.py) ─────────────────────────────────────────────────────
+
+    def enable_accum_(self, st) -> None:
+        """Attach the shared AccumState and allocate this layer's buffer (buffer mode): bf16/fp32 [out,in], or
+        float8_e4m3fn [out,in] + fp32 [out,1] row scale. Latent mode / unused parts are empty tensors (the op needs tensors)."""
+        dev = self.idx.device
+        empty = lambda dt: torch.empty(0, dtype=dt, device=dev)           # noqa: E731
+        shape = tuple(self.idx.shape)
+        if st.mode in ("buffer", "ema"):
+            dt = {"bf16": torch.bfloat16, "fp32": torch.float32, "fp8": torch.float8_e4m3fn}[st.kind]
+            self._acc_buf = torch.zeros(shape, dtype=dt, device=dev)
+            self._acc_scale = (torch.zeros(shape[0], 1, dtype=torch.float32, device=dev) if st.kind == "fp8"
+                               else empty(torch.float32))
+        else:
+            self._acc_buf, self._acc_scale = empty(torch.bfloat16), empty(torch.float32)
+        self._acc, self._acc_id = st, st.id
+        self._acc_pow = 1.0 / st.n if st.mode == "latent" else 1.0
+
+    def disable_accum_(self) -> None:
+        self._acc, self._acc_id, self._acc_pow = None, -1, 1.0
+        self._acc_buf = self._acc_scale = None
+
+    def zero_accum_(self) -> None:
+        for t in (self._acc_buf, self._acc_scale):
+            if t is not None and t.numel():
+                t.zero_()
+
+    def _backward_update_(self, grad_w: torch.Tensor) -> None:
+        """What backward calls: the plain update, or (accumulation configured) the accumulation step + update."""
+        st = self._acc
+        if st is None:
+            self.apply_update_(grad_w)
+            return
+        g = lg_accum.accum_grad_(st, grad_w, self._acc_buf if self._acc_buf.numel() else None,
+                                 self._acc_scale if self._acc_scale.numel() else None)
+        if g is not None:
+            self.apply_update_(g, lr_scale=st.lr_mult, beta=st.beta_eff(self.rms_beta))
+
+    def apply_update_(self, grad_w: torch.Tensor, lr_scale: float = 1.0, beta: float | None = None) -> None:
+        """In-place update of the index, called from backward. No optimizer, no momentum, no counter.
+        lr_scale / beta (defaults: 1.0 / self.rms_beta = unchanged behaviour) are used by the latent accumulation mode."""
         if grad_w.shape != self.idx.shape:
             raise ValueError(f"grad shape {tuple(grad_w.shape)} != state {tuple(self.idx.shape)}")
         if self._use_triton():
-            self._apply_update_triton(grad_w)
+            self._apply_update_triton(grad_w, lr_scale, beta)
             return
-        self.v_rms, g_hat = mx_update.rms_update(grad_w.detach().float(), self.v_rms, self.rms_beta, self.rms_eps)
+        lr = self.lr if lr_scale == 1.0 else self.lr * lr_scale
+        self.v_rms, g_hat = mx_update.rms_update(grad_w.detach().float(), self.v_rms,
+                                                 self.rms_beta if beta is None else beta, self.rms_eps)
         if self.weight_decay > 0.0:
             g_hat = g_hat + self.weight_decay * self.fmt.tables(self.idx.device).values[self.idx.long()]
-        delta = (-self.lr * g_hat) / self._scale_full()              # value step in block-scale units
+        delta = (-lr * g_hat) / self._scale_full()              # value step in block-scale units
         new, over = self.fmt.move(self.idx, delta, self.generator, self.update_mode, return_clip=True)
         self.last_clip_frac = over.float().mean()
         self.idx.copy_(new.to(self.idx.dtype))
@@ -782,8 +929,10 @@ class LatentGridLinear(nn.Module):
         dev = gen.device if gen is not None else "cpu"
         return int(torch.randint(0, 2 ** 31 - 1, (1,), generator=gen, device=dev).item())
 
-    def _apply_update_triton(self, grad_w: torch.Tensor) -> None:
-        clip = lg_update_(grad_w, self.idx, self._scale, self._tscale, self.v_rms, lr=self.lr, beta=self.rms_beta,
+    def _apply_update_triton(self, grad_w: torch.Tensor, lr_scale: float = 1.0, beta: float | None = None) -> None:
+        clip = lg_update_(grad_w, self.idx, self._scale, self._tscale, self.v_rms,
+                          lr=self.lr if lr_scale == 1.0 else self.lr * lr_scale,
+                          beta=self.rms_beta if beta is None else beta,
                           eps=self.rms_eps, weight_decay=self.weight_decay, m=self.fmt.m, seed=self._next_seed(),
                           track_clip=self.track_clip)
         self.last_clip_frac = (clip.sum(dtype=torch.float32) / self.idx.numel()) if clip is not None else None

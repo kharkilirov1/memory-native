@@ -1,0 +1,28 @@
+arm=dense (dense_nobias) device=cuda torch=2.11.0+cu130 NVIDIA RTX PRO 6000 Blackwell Server Edition
+model d=2048 layers=24 heads=32 seq=512 params=1,210,257,408 | batch=128 (one micro-batch, no accumulation) tokens/step=65536 steps=5000 tokens=327,680,000 epochs=0.147 train_bytes=2,227,753,162 val_bytes=22,502,601
+optim: adam_lr=0.0001 lr(counter)=0.01 wd=0.1 clip=1 betas=(0.9,0.95) sched=cosine warmup=0.02 min=0.1 precision=bf16 sdpa=True compile=True grad_checkpoint=True fused_adam=True lg_layers=0
+step 50/5000 | loss 4.1168 bpb | lr 5.00e-05 | gnorm 4.141 | 29254 tok/s | 2240 ms/step | peak 32.2 GB (incl. compile)
+step 100/5000 | loss 3.3409 bpb | lr 1.00e-04 | gnorm 1.973 | 33822 tok/s | 1938 ms/step | peak 32.2 GB
+step 150/5000 | loss 3.2840 bpb | lr 1.00e-04 | gnorm 1.423 | 33813 tok/s | 1938 ms/step | peak 32.2 GB
+step 200/5000 | loss 3.1413 bpb | lr 9.99e-05 | gnorm 1.474 | 33810 tok/s | 1938 ms/step | peak 32.2 GB
+step 250/5000 | loss 2.8640 bpb | lr 9.98e-05 | gnorm 1.539 | 33819 tok/s | 1938 ms/step | peak 32.2 GB
+step 300/5000 | loss 2.4175 bpb | lr 9.96e-05 | gnorm 1.414 | 33808 tok/s | 1938 ms/step | peak 32.2 GB
+step 350/5000 | loss 2.0114 bpb | lr 9.94e-05 | gnorm 0.971 | 33809 tok/s | 1938 ms/step | peak 32.2 GB
+step 400/5000 | loss 1.7414 bpb | lr 9.92e-05 | gnorm 0.829 | 33814 tok/s | 1938 ms/step | peak 32.2 GB
+step 450/5000 | loss 1.5730 bpb | lr 9.89e-05 | gnorm 0.710 | 33811 tok/s | 1938 ms/step | peak 32.2 GB
+step 500/5000 | loss 1.4545 bpb | lr 9.85e-05 | gnorm 0.646 | 33811 tok/s | 1938 ms/step | peak 32.2 GB
+EVAL step 500: val 1.3759 bpb (1.1s)
+checkpoint step 500 -> /content/runs/dense/ckpt.pt (46s)
+step 550/5000 | loss 1.3350 bpb | lr 9.81e-05 | gnorm 0.591 | 33921 tok/s | 1932 ms/step | peak 32.2 GB
+step 600/5000 | loss 1.2354 bpb | lr 9.77e-05 | gnorm 0.534 | 33814 tok/s | 1938 ms/step | peak 32.2 GB
+step 650/5000 | loss 1.1640 bpb | lr 9.72e-05 | gnorm 0.491 | 33813 tok/s | 1938 ms/step | peak 32.2 GB
+step 700/5000 | loss 1.1172 bpb | lr 9.67e-05 | gnorm 0.472 | 33817 tok/s | 1938 ms/step | peak 32.2 GB
+step 750/5000 | loss 1.0766 bpb | lr 9.62e-05 | gnorm 0.431 | 33819 tok/s | 1938 ms/step | peak 32.2 GB
+step 800/5000 | loss 1.0451 bpb | lr 9.56e-05 | gnorm 0.393 | 33815 tok/s | 1938 ms/step | peak 32.2 GB
+step 850/5000 | loss 1.0146 bpb | lr 9.49e-05 | gnorm 0.391 | 33818 tok/s | 1938 ms/step | peak 32.2 GB
+step 900/5000 | loss 0.9948 bpb | lr 9.42e-05 | gnorm 0.358 | 33817 tok/s | 1938 ms/step | peak 32.2 GB
+step 950/5000 | loss 0.9678 bpb | lr 9.35e-05 | gnorm 0.350 | 33819 tok/s | 1938 ms/step | peak 32.2 GB
+step 1000/5000 | loss 0.9522 bpb | lr 9.27e-05 | gnorm 0.330 | 33811 tok/s | 1938 ms/step | peak 32.2 GB
+EVAL step 1000: val 0.9329 bpb (1.1s)
+checkpoint step 1000 -> /content/runs/dense/ckpt.pt (45s)
+step 1050/5000 | loss 0.9391 bpb | lr 9.19e-05 | gnorm 0.332 | 26411 tok/s | 2481 ms/step | peak 32.2 GB
