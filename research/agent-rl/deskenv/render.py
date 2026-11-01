@@ -19,6 +19,8 @@ _SHORT_ACTIONS = {
     "Scroll": "scr",
 }
 
+_MAX_TEXT_VALUE = 300
+
 
 def _compact_actions(actions: list[str] | None) -> str:
     if not actions:
@@ -42,6 +44,27 @@ def _name_str(name: str | None, max_name: int) -> str:
     return f' "{stripped}"'
 
 
+def _value_str(node: dict[str, Any]) -> str:
+    """Return inline text value for textfield-like nodes (value/text/description).
+
+    Truncated to ``_MAX_TEXT_VALUE`` chars and escaped for safe embedding.
+    """
+    raw = node.get("value") or node.get("text") or node.get("description") or ""
+    if not raw:
+        return ""
+    text = str(raw).strip()
+    if not text:
+        return ""
+    # Escape inner quotes and backslashes so the output stays parseable
+    text = text.replace("\\", "\\\\").replace('"', '\\"')
+    # Collapse internal whitespace runs for readability
+    import re as _re
+    text = _re.sub(r"\s+", " ", text)
+    if len(text) > _MAX_TEXT_VALUE:
+        text = text[:_MAX_TEXT_VALUE] + "\u2026"
+    return f' text="{text}"'
+
+
 def _count_descendants(node: dict[str, Any]) -> int:
     """Count all descendant *nodes* (including non-interactive, recursively)."""
     total = 0
@@ -50,9 +73,36 @@ def _count_descendants(node: dict[str, Any]) -> int:
     return total
 
 
+def _has_actionable_descendant(node: dict[str, Any]) -> bool:
+    """Return True if *node* or any descendant has available_actions."""
+    if node.get("available_actions"):
+        return True
+    for child in node.get("children") or []:
+        if _has_actionable_descendant(child):
+            return True
+    return False
+
+
 # Roles that are never interactive enough to warrant a line; their children
 # get flattened up.
 _FLATTEN_ROLES = frozenset({"group", "scrollarea", "scrollbar"})
+
+
+def _should_skip_offscreen(node: dict[str, Any]) -> bool:
+    """Skip nodes that are offscreen and have no actionable children.
+
+    Offscreen toolbar buttons cannot be clicked headless (agent-desktop
+    refuses them).  Keep offscreen nodes only if they have direct or
+    indirect children with available_actions.
+    """
+    states = node.get("states") or []
+    if "offscreen" not in states:
+        return False
+    # Keep the node if ANY descendant (not itself) is actionable
+    for child in node.get("children") or []:
+        if _has_actionable_descendant(child):
+            return False
+    return True
 
 
 def _flatten(
@@ -64,14 +114,24 @@ def _flatten(
     """Walk the tree and produce (depth, node) pairs, flattening as needed."""
     rows: list[tuple[int, dict[str, Any]]] = []
     role = (node.get("role") or "").lower()
-    name = node.get("name") or ""
+    name = (node.get("name") or "").strip()
     ref = node.get("ref_id") or ""
     children = node.get("children") or []
 
-    # ── menu collapsing ────────────────────────────────────────────────
+    # ── skip offscreen nodes without actionable children ────────────────
+    if _should_skip_offscreen(node):
+        return rows
+
+    # ── unnamed menu (menubar) — transparent container ──────────────────
+    if role == "menu" and not name:
+        # Show named child menus, each collapsed as a normal menu
+        for child in children:
+            rows.extend(_flatten(child, depth, open_menus, max_name))
+        return rows
+
+    # ── named menu collapsing ────────────────────────────────────────────
     if role == "menu" and ref not in open_menus:
         count = _count_descendants(node)
-        # Represent the collapsed menu as a single line
         collapsed = dict(node)
         collapsed["_collapsed_count"] = count
         rows.append((depth, collapsed))
@@ -145,7 +205,7 @@ def render(
             short_id += 1
             indent = "  " * depth
             name_display = _name_str(name, max_name)
-            body = f"[short_id={short_id}] {role}{name_display} (+{coll_count} items, use open_menu)"
+            body = f"[{short_id}] {role}{name_display} (+{coll_count} items, use open_menu)"
             lines.append(f"{indent}{body}")
             if ref:
                 refmap[short_id] = ref
@@ -156,9 +216,10 @@ def render(
         name_display = _name_str(name, max_name)
         actions_display = _compact_actions(actions)
         states_display = _states_str(states)
+        value_display = _value_str(node) if role == "textfield" else ""
         body = (
-            f"[short_id={short_id}] {role}"
-            f"{name_display}{actions_display}{states_display}"
+            f"[{short_id}] {role}"
+            f"{name_display}{value_display}{actions_display}{states_display}"
         )
         lines.append(f"{indent}{body}")
         if ref:

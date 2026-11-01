@@ -68,7 +68,7 @@ def test_session_start_calls_popen(mock_popen):
          patch("deskenv.session.sys.platform", "linux"):
         s.start()
         assert s._running
-        assert len(s._procs) == 4
+        assert len(s._procs) == 3  # Xvfb, at-spi, openbox (forked dbus tracked by pid)
         s.stop()
 
 
