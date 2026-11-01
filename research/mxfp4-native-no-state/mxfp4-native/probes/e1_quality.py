@@ -975,10 +975,9 @@ def run_arm(arm: str, seed: int, d: int, steps: int, batch: int, seq: int,
     if momentum > 0.0:                # opt-in per-weight momentum for lg arms (mx6/lg_accum.set_momentum); no-op for others
         from mx6.latent_grid import lg_layers
         if lg_layers(model):
-            if accum > 1:
-                raise ValueError("--momentum and --accum both use the per-layer lg buffer; pick one")
-            from mx6.lg_accum import set_momentum
-            set_momentum(model, momentum, momentum_dtype, nesterov)
+            from mx6.lg_accum import set_momentum      # accum > 1: micro-batches accumulate INTO the momentum buffer
+            st = set_momentum(model, momentum, momentum_dtype, nesterov, n=accum)
+            acc_state = st if accum > 1 else None
     train_fwd, cinfo = model, None
     if compile:                       # BEFORE fp32_islands: it must see the lg layers as native (no fp32 island)
         train_fwd, cinfo = compile_model(model, arm, compile_backend)

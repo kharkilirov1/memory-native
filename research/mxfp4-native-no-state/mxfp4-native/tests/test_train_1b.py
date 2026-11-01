@@ -174,10 +174,10 @@ def test_resume_is_bit_exact(arm, corpus, tmp_path):
 
 
 @needs_ops
-@pytest.mark.parametrize("mdt", ["bf16", "fp8"])
-def test_momentum_resume_is_bit_exact(mdt, corpus, tmp_path):
+@pytest.mark.parametrize("mdt,acc", [("bf16", "1"), ("fp8", "1"), ("fp8", "2")])
+def test_momentum_resume_is_bit_exact(mdt, acc, corpus, tmp_path):
     common = ["--arm", "lg6_fp4_h2", "--steps", "8", "--eval-every", "4", "--ckpt-every", "4",
-              "--momentum", "0.9", "--momentum-dtype", mdt, "--lr", "0.03"]
+              "--momentum", "0.9", "--momentum-dtype", mdt, "--lr", "0.03", "--accum", acc]
     full = []
     T.run_train(T.build_parser().parse_args(argv(corpus, tmp_path / "A", *common)), record=full)
     assert len(full) == 8 and np.isfinite(full).all()
@@ -188,7 +188,7 @@ def test_momentum_resume_is_bit_exact(mdt, corpus, tmp_path):
     T.run_train(T.build_parser().parse_args(argv(corpus, tmp_path / "B", *common, "--resume")), record=post)
     assert post == full[4:], (post, full[4:])
     bad = argv(corpus, tmp_path / "B", "--arm", "lg6_fp4_h2", "--steps", "8", "--eval-every", "4", "--ckpt-every", "4",
-               "--lr", "0.03", "--resume")                       # momentum dropped -> refused
+               "--lr", "0.03", "--accum", acc, "--resume")                       # momentum dropped -> refused
     with pytest.raises(ValueError, match="momentum"):
         T.run_train(T.build_parser().parse_args(bad))
 
