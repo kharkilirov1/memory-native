@@ -118,7 +118,8 @@ class LMPolicy:
         # Apply chat template
         try:
             prompt = self.tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True
+                messages, tokenize=False, add_generation_prompt=True,
+                enable_thinking=False,  # Qwen3: no <think> block (it would eat max_new_tokens); others ignore it
             )
         except Exception:
             prompt = f"System: {SYSTEM_PROMPT}\n\nUser: {prompt_text}\n\nAssistant:"
