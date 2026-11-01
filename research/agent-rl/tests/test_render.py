@@ -208,3 +208,36 @@ def test_bug4_textfield_fallback_text_key():
                  text="from text key")
     text, refmap = render(tree)
     assert 'text="from text key"' in text
+
+
+def test_menu_is_open_selected():
+    """_menu_is_open: a menu with states=[selected] and onscreen items is expanded."""
+    tree = _node("window", "W", "@w1", children=[
+        _node("menu", "File", "@f1", states=["selected"],
+              children=[
+                  _node("menuitem", "Save", "@s1", actions=["Click"]),
+              ]),
+        _node("menu", "Edit", "@e1",
+              children=[
+                  _node("menuitem", "Undo", "@u1", actions=["Click"]),
+              ]),
+    ])
+    text, refmap = render(tree)
+    # File menu (selected + onscreen children) is expanded: shows "Save"
+    assert "Save" in text
+    # Edit menu (no selected state, children are offscreen) is collapsed
+    assert 'menu "Edit" (+1 items, use open_menu)' in text
+
+
+def test_menu_is_open_closed_menu():
+    """_menu_is_open: a menu without selected state stays collapsed even if items are onscreen."""
+    tree = _node("window", "W", "@w1", children=[
+        _node("menu", "File", "@f1",
+              children=[
+                  _node("menuitem", "Save", "@s1", actions=["Click"]),
+              ]),
+    ])
+    text, refmap = render(tree)
+    # Without selected/expanded state, the menu is collapsed regardless of children
+    assert 'menu "File" (+1 items, use open_menu)' in text
+    assert "Save" not in text
