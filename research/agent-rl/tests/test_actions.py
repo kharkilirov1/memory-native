@@ -68,6 +68,13 @@ def test_parse_open_menu():
     assert result.id == "@s1:e1"
 
 
+def test_parse_close_menu():
+    result = parse_action('ACTION: {"op": "close_menu", "id": 3}', REFS)
+    assert isinstance(result, Action)
+    assert result.op == "close_menu"
+    assert result.id == "@s1:e10"
+
+
 def test_parse_done():
     result = parse_action('ACTION: {"op": "done"}', REFS)
     assert isinstance(result, Action)
