@@ -654,6 +654,61 @@ def fp32_islands(model: nn.Module) -> int:
     return n
 
 
+def compile_kind(arm: str):
+    """--compile support: "lg" (latent grid: opaque custom ops, fullgraph), "plain" (dense_* / qat_*: plain torch.compile),
+    None (na_* / tern_* / dense_rms / s9 ...: the in-backward state mutation cannot be traced -> refused)."""
+    if arm.startswith("lg"):
+        return "lg"
+    if arm in DENSE_ADAM_ARMS or is_qat_arm(arm):
+        return "plain"
+    return None
+
+
+def compile_refusal(arm: str):
+    """None if `arm` can be compiled, else the message that --compile prints for it."""
+    if compile_kind(arm) is not None:
+        return None
+    return (f"--compile is not supported for arm {arm!r}: its state is updated by a custom autograd.Function inside backward "
+            f"(na_* counters, tern_*, dense_rms, s9_*), which torch.compile cannot trace without graph breaks / double "
+            f"updates. Compilable arms: lg*_fp4*, dense_bf16 / dense_nobias, qat_*. Drop this arm or --compile.")
+
+
+def compile_model(model: nn.Module, arm: str, backend: str | None = None):
+    """-> (callable to use for the TRAINING forward, info dict). lg arms: every LatentGridLinear is switched to the native
+    path if it is not yet (CPU / no Triton: the torch backend, so the ops path exists) and to torch.ops.mx6.lg_linear
+    (prepare_lg_for_compile), then torch.compile(fullgraph=True, dynamic=False): a graph break raises. The cosine schedule
+    changes lr every step WITHOUT recompiling (lr lives in a device buffer, see mx6/latent_grid.py). Evaluation under
+    no_grad should keep using the eager `model` (same modules; the compiled one is never run in eval mode)."""
+    msg = compile_refusal(arm)
+    if msg:
+        raise ValueError(msg)
+    import torch._dynamo as dynamo
+    dynamo.reset()
+    dynamo.utils.counters.clear()
+    info = {"kind": compile_kind(arm), "backend": backend or "inductor"}
+    if info["kind"] == "lg":
+        from mx6.latent_grid import HAS_LG_OPS, lg_layers, prepare_lg_for_compile
+        if not HAS_LG_OPS:
+            raise RuntimeError("--compile for lg arms needs torch.library.register_autograd / register_fake (torch >= 2.4)")
+        for m in lg_layers(model):
+            if not m.native_enabled():
+                m.native = True
+        prepare_lg_for_compile(model, "op")
+        kw = dict(fullgraph=True)
+    else:
+        kw = {}
+    if backend:
+        kw["backend"] = backend
+    return torch.compile(model, dynamic=False, **kw), info
+
+
+def compile_stats() -> dict:
+    """Dynamo counters of the current process: unique graphs (1 = no recompiles over the whole run) and graph breaks."""
+    import torch._dynamo.utils as du
+    c = du.counters
+    return {"graphs": int(c["stats"]["unique_graphs"]), "graph_breaks": int(sum(c["graph_break"].values()))}
+
+
 def fwd_logits(model: nn.Module, x: torch.Tensor, precision: str = "fp32") -> torch.Tensor:
     """model(x) under the precision; logits returned in fp32 for the loss."""
     with autocast_ctx(precision, x.device.type):
@@ -893,8 +948,9 @@ def run_arm(arm: str, seed: int, d: int, steps: int, batch: int, seq: int,
             ids: torch.Tensor, vocab: int, lr: float, adam_lr: float,
             sched: str = "const", warmup_frac: float = 0.02, lr_min_frac: float = 0.1,
             eval_every: int = 100, val_ids: torch.Tensor | None = None,
-            blocks: int = 2, heads: int = 1, precision: str = "fp32") -> dict:
-    """`ids` is the TRAINING tensor (batches are sampled from it only). `val_ids` is the held-out
+            blocks: int = 2, heads: int = 1, precision: str = "fp32", compile: bool = False,
+            compile_backend: str | None = None) -> dict:
+    """compile: torch.compile the TRAINING forward (see compile_model); eval stays eager. `ids` is the TRAINING tensor (batches are sampled from it only). `val_ids` is the held-out
     tensor "val" is measured on; None -> `ids` itself (legacy: val == train). Each eval also
     estimates the train loss on a fixed subset of `ids` (same fixed starts every time)."""
     same = val_ids is None or val_ids is ids
@@ -908,6 +964,9 @@ def run_arm(arm: str, seed: int, d: int, steps: int, batch: int, seq: int,
         base_mem = torch.cuda.memory_allocated()
     torch.manual_seed(seed)
     model, opt = build_model_opt(arm, vocab, d, lr, adam_lr, blocks, heads)
+    train_fwd, cinfo = model, None
+    if compile:                       # BEFORE fp32_islands: it must see the lg layers as native (no fp32 island)
+        train_fwd, cinfo = compile_model(model, arm, compile_backend)
     if precision != "fp32":
         fp32_islands(model)
     bits = measured_bits(model, arm)
@@ -933,7 +992,7 @@ def run_arm(arm: str, seed: int, d: int, steps: int, batch: int, seq: int,
         idx = torch.randint(0, len(ids) - seq - 1, (batch,), device=DEV)
         x = ids[idx.unsqueeze(1) + torch.arange(seq, device=DEV)]
         y = ids[idx.unsqueeze(1) + torch.arange(1, seq + 1, device=DEV)]
-        loss = nn.functional.cross_entropy(fwd_logits(model, x, precision).reshape(-1, vocab), y.reshape(-1))
+        loss = nn.functional.cross_entropy(fwd_logits(train_fwd, x, precision).reshape(-1, vocab), y.reshape(-1))
         opt.zero_grad(set_to_none=True)
         loss.backward()
         opt.step()
@@ -956,10 +1015,13 @@ def run_arm(arm: str, seed: int, d: int, steps: int, batch: int, seq: int,
                 torch.cuda.reset_peak_memory_stats()
     elapsed = time.time() - t0
     clip = float(torch.stack(clips).mean()) if clips else float("nan")
+    if cinfo is not None:
+        cinfo.update(compile_stats())
+        del train_fwd
 
     val = curve[-1][1]
     flips = [c[3] for c in curve]
-    return {"arm": arm, "seed": seed, "bits": bits, "val": val, "sec": elapsed,
+    return {"arm": arm, "seed": seed, "bits": bits, "val": val, "sec": elapsed, "compile": cinfo,
             "hist": magnitude_histogram(model), "clip": clip,
             "grown": grown_blocks(model), "curve": curve,
             "best": min(c[1] for c in curve),
@@ -1060,9 +1122,21 @@ def main(argv=None) -> int:
     ap.add_argument("--sdpa", action="store_true",
                     help="attention via F.scaled_dot_product_attention(is_causal=True) instead of the naive T x T "
                          "softmax (same maths, different rounding; default OFF so quality numbers stay unchanged)")
+    ap.add_argument("--compile", action="store_true",
+                    help="torch.compile the TRAINING forward: lg arms = opaque custom ops + fullgraph=True (graph break "
+                         "raises), dense_* / qat_* = plain compile; na_* / tern_* / dense_rms are refused. Works with "
+                         "--precision bf16, --sdpa and --sched cosine (lr is a device buffer: no per-step recompiles; the "
+                         "graph count is printed after each run). Evaluation stays eager (no_grad, never updates).")
+    ap.add_argument("--compile-backend", default=None,
+                    help="torch.compile backend (default inductor; aot_eager for a CPU smoke test without a C++ compiler)")
     args = ap.parse_args(argv)
     global SDPA
     SDPA = bool(args.sdpa)
+    if args.compile:
+        for a in (x.strip() for x in args.arms.split(",") if x.strip()):
+            msg = compile_refusal(a)
+            if msg:
+                ap.error(msg)
     if args.layers < 1:
         ap.error("--layers must be >= 1")
     if args.heads < 1 or args.d % args.heads:
@@ -1138,7 +1212,8 @@ def main(argv=None) -> int:
                         args.adam_lr, sched=args.sched,
                         warmup_frac=args.warmup_frac, lr_min_frac=args.lr_min_frac,
                         eval_every=args.eval_every, val_ids=val_ids,
-                        blocks=args.layers, heads=args.heads, precision=args.precision)
+                        blocks=args.layers, heads=args.heads, precision=args.precision,
+                        compile=args.compile, compile_backend=args.compile_backend)
             results.append(r)
             f0, f1, f2 = r["flip"]
             print(f"  {r['arm']:17} seed={r['seed']} bits={r['bits']:.3f} "
@@ -1148,6 +1223,11 @@ def main(argv=None) -> int:
                   f"edge={r['edge']*100:.2f}% grown={r['grown']} ({r['sec']:.0f}s)"
                   + (f" scale_moves={r['scale_moves']}" if r.get("scale_moves") else "")
                   + (f" rebased={r['rebased']}" if r.get("rebased") else ""), flush=True)
+            if r.get("compile"):
+                ci = r["compile"]
+                print(f"      compile: kind={ci['kind']} backend={ci['backend']} graphs={ci['graphs']} "
+                      f"graph_breaks={ci['graph_breaks']}" + ("" if ci["graphs"] == 1 else
+                      "  <-- expected 1 graph (a recompile happened)"), flush=True)
             ws = r.get("wstats")
             if ws:
                 print(f"      weights: kurt={ws['kurt']:.2f} tail3={ws['tail3']*100:.2f}% "

@@ -45,7 +45,10 @@ lg6_fp4_h2, lg8_fp4_h2 (the latent grid, mx6/latent_grid.py via probes/lg_ab.py)
 
 Strong-baseline mode (see the flags): --precision bf16 (autocast of the whole model; custom-autograd counter linears stay
 fp32 islands), --adam-impl fused, arm "dense_strong" (= dense_nobias + bf16 + fused AdamW + torch.compile; the reference
-every other row is divided by in "vs dense_strong"), --preset tiny|d512|d1024|d2048|1b, --grad-checkpoint (dense/qat arms only).
+every other row is divided by in "vs dense_strong"), --preset tiny|d512|d1024|d2048|1b, --grad-checkpoint (dense / qat arms
+and lg arms on the native custom-op path; refused for na_* / tern / dense_rms and for the legacy lg path), --lr-sched cosine
+(per-step lr change of the counter layers AND AdamW inside the timed step: proves that a schedule costs no recompiles; rows
+report graphs before/after the timed window), --estimate-only (analytic memory estimate per arm, no run).
 
 Outputs: <out>.json (everything, incl. per-config kernels) and <out>.md (the tables below); both also on stdout.
 
@@ -152,13 +155,73 @@ def has_custom_autograd_linears(model) -> bool:
     return any(not isinstance(lin, torch.nn.Linear) for blk in model.blocks for lin in (blk.qkv, blk.proj, blk.fc, blk.out))
 
 
+def checkpoint_refusal(model, variant: str = "eager", lg_compile: str = "op"):
+    """None if torch.utils.checkpoint is safe for every block linear of `model`, else the reason (a message). Safe: plain
+    nn.Linear, and LatentGridLinear on the NATIVE CUSTOM-OP path (native_enabled(), generator None, ops available; the
+    update lives only in the backward op, the recomputed forward has no side effect, there is no _pending guard). Unsafe:
+    the autograd.Function paths (na_* / tern / dense_rms / lg legacy): the recompute trips the one-forward-per-backward
+    guard (_pending / weight._version) or would apply the in-backward update twice."""
+    from mx6.latent_grid import HAS_LG_OPS, LatentGridLinear
+    bad, why_lg = [], None
+    for blk in model.blocks:
+        for lin in (blk.qkv, blk.proj, blk.fc, blk.out):
+            if isinstance(lin, torch.nn.Linear):
+                continue
+            if isinstance(lin, LatentGridLinear):
+                if not (HAS_LG_OPS and lin.native_enabled() and lin.generator is None):
+                    why_lg = ("lg layers need the native custom-op path (CUDA + Triton or --lg-native on, torch with "
+                              "torch.library.register_autograd, generator=None)")
+                elif variant == "compile" and lg_compile == "disable":
+                    why_lg = "--lg-compile disable uses the autograd.Function path"
+                continue
+            bad.append(type(lin).__name__)
+    if not bad and not why_lg:
+        return None
+    return ("--grad-checkpoint refused for this arm: checkpoint re-runs the block forward inside backward, which breaks "
+            "the counter layers' one-forward-per-backward guard (_pending / weight._version) and would apply the "
+            "in-backward update twice" + (f" [{', '.join(sorted(set(bad)))}]" if bad else "")
+            + (f" [{why_lg}]" if why_lg else "")
+            + ". Allowed: dense_* / dense_strong / qat_* and lg* on the native custom-op path.")
+
+
 def enable_grad_checkpoint(model) -> int:
     """torch.utils.checkpoint (non-reentrant) around every block. The recompute re-runs forward during backward, which
-    breaks the counter layers' one-forward-per-backward guard -> callers must refuse arms with custom linears."""
+    breaks the one-forward-per-backward guard of the autograd.Function counter layers (see `checkpoint_refusal`); the lg
+    custom-op path is safe (update only in the backward op)."""
     from torch.utils.checkpoint import checkpoint
     for blk in model.blocks:
         blk.forward = (lambda x, _f=blk.forward: checkpoint(_f, x, use_reentrant=False))
     return len(model.blocks)
+
+def estimate_memory(base_arm: str, d: int, layers: int, batch: int, seq: int, vocab: int, precision: str,
+                    ckpt: bool) -> dict | None:
+    """ANALYTIC peak-memory estimate of one training step in MB (+-30 %; the measured peak_mem_mb is the truth). Only for
+    the AdamW arms (dense_* / qat_*) and lg*; None for the rest.
+      state  adam arms: fp32 master + grad + m + v = 16 B x (block linears + other); lg: idx 1 B + E4M3 scale 1/16 B per
+             block-linear param + fp32 v_rms per row, and 16 B x other (emb / pos / LN / head stay on AdamW)
+      act    Korthikanti et al. ~34 B x tokens x d per block (bf16, flash/SDPA attention; x2 in fp32); with checkpointing:
+             block inputs (tokens x d x act bytes x layers) + ONE block's full activations (the recompute)
+      logits tokens x vocab x (act + 4 fp32 copy + 4 grad)
+      trans  lg only: decoded bf16 weight + bf16 grad_w of the largest layer (4 d^2 each, 2 B)"""
+    adam = base_arm in ("dense_bf16", "dense_nobias") or base_arm in ("qat_tern", "qat_fp4", "qat_e2m1lad")
+    if not (adam or base_arm.startswith("lg")):
+        return None
+    a = _analytic(d, layers, vocab)
+    tok, ab = batch * seq, (2 if precision == "bf16" else 4)
+    if adam:
+        state = 16.0 * (a["lin"] + a["other"])
+        trans = 0.0
+    else:
+        rows = layers * (3 * d + d + 4 * d + d)
+        state = a["lin"] * (1.0 + 1.0 / 16.0) + 4.0 * rows + 16.0 * a["other"]
+        trans = 2.0 * 2.0 * 4 * d * d
+    per_block = 34.0 * tok * d * ab / 2.0
+    act = (tok * d * ab * layers + per_block) if ckpt else per_block * layers
+    logits = tok * vocab * (ab + 4 + 4)
+    mb = 2.0 ** 20
+    return {"state_mb": state / mb, "act_mb": act / mb, "logits_mb": logits / mb, "transient_mb": trans / mb,
+            "total_mb": (state + act + logits + trans) / mb}
+
 
 # kernel-name -> category (first match wins; lower-cased name)
 CATEGORIES = (
@@ -344,12 +407,16 @@ def make_batches(n: int, batch: int, seq: int, vocab: int, dev: str, seed: int =
     return out
 
 
-def train_step_fn(fwd, opt, batches, vocab: int, amp=None):
-    """amp: a zero-arg factory of the forward's context manager (bf16 autocast), None = fp32. Backward is outside it."""
+def train_step_fn(fwd, opt, batches, vocab: int, amp=None, on_step=None):
+    """amp: a zero-arg factory of the forward's context manager (bf16 autocast), None = fp32. Backward is outside it.
+    on_step(i): called at the start of the i-th step (0-based, counted over every call) -- the lr schedule hook."""
     it = itertools.cycle(batches)
     amp = amp or contextlib.nullcontext
+    n = itertools.count()
 
     def step():
+        if on_step is not None:
+            on_step(next(n))
         x, y = next(it)
         with amp():
             logits = fwd(x)
@@ -497,15 +564,21 @@ def bench_one(arm: str, d: int, variant: str, args, e1, vocab: int, dev: str, cu
             torch.manual_seed(args.seed)
             model, opt = e1.build_model_opt(base_arm, vocab, d, lr, args.adam_lr, args.layers, heads)
             model.train()
-            if use_ckpt:
-                if has_custom_autograd_linears(model):
-                    raise RuntimeError(
-                        "--grad-checkpoint refused for this arm: checkpoint re-runs the block forward inside backward, "
-                        "which breaks the counter layers' one-forward-per-backward guard (_pending / weight._version) and "
-                        "would apply the in-backward update twice. Use it only for dense_* / dense_strong / qat_* arms.")
-                rec["checkpointed_blocks"] = enable_grad_checkpoint(model)
             if base_arm.startswith("lg"):
                 rec.update(configure_lg(model, args, arm))
+            est = estimate_memory(base_arm, d, args.layers, args.batch, args.seq, vocab, precision, use_ckpt)
+            if est:
+                rec["est_mem_mb"] = est["total_mb"]
+                rec["est_mem"] = est
+            if use_ckpt:
+                why = checkpoint_refusal(model, variant, getattr(args, "lg_compile", "op"))
+                if why:
+                    raise RuntimeError(why)
+                if base_arm.startswith("lg"):                 # the op path is the checkpoint-safe one (also in eager)
+                    from mx6.latent_grid import prepare_lg_for_compile as _prep
+                    _prep(model, "op")
+                    rec["lg_ckpt_op_path"] = True
+                rec["checkpointed_blocks"] = enable_grad_checkpoint(model)
             if precision != "fp32":
                 # custom-autograd counter linears (mx6 / lg / tern) cannot take bf16 (backward runs outside autocast ->
                 # dtype mismatch): their forward becomes an fp32 island (autocast off, fp32 in/out); nn.Linear/QAT: autocast
@@ -540,7 +613,19 @@ def bench_one(arm: str, d: int, variant: str, args, e1, vocab: int, dev: str, cu
             rec["other_state_mb"] = rec["other_state_bytes"] / 2**20
             batches = make_batches(8, args.batch, args.seq, vocab, dev, args.seed)
             amp = lambda: amp_ctx(precision, dev)          # noqa: E731
-            step = train_step_fn(fwd, opt, batches, vocab, amp=amp)
+            on_step = None
+            lr_sched = getattr(args, "lr_sched", "const")
+            rec["lr_sched"] = lr_sched
+            if lr_sched != "const":
+                total = args.warmup + args.steps + max(args.phase_steps, 0) + 4        # >= every step this row runs
+
+                def on_step(i, _total=total):
+                    j = min(i, _total - 1)
+                    cur = e1.sched_lr(lr_sched, lr, j, _total)
+                    e1.set_counter_lr(model, cur, scale_frac=(cur / lr if lr > 0 else 0.0))
+                    for g in opt.param_groups:
+                        g["lr"] = e1.sched_lr(lr_sched, g.get("base_lr", args.adam_lr), j, _total)
+            step = train_step_fn(fwd, opt, batches, vocab, amp=amp, on_step=on_step)
             for _ in range(args.warmup):
                 loss = step()
             clock.sync()
@@ -554,6 +639,9 @@ def bench_one(arm: str, d: int, variant: str, args, e1, vocab: int, dev: str, cu
             ev_ms, wall_ms = time_steps(step, args.steps, clock)
             loss = step()
             clock.sync()
+            if counters is not None:                              # after the timed window: still the same graph(s)?
+                rec["graphs_end"] = int(counters["stats"]["unique_graphs"])
+                rec["graph_breaks_end"] = int(sum(counters["graph_break"].values()))
             rec["final_loss"] = float(loss.detach())
             rec["finite"] = bool(torch.isfinite(loss).item())
             if cuda:
@@ -616,7 +704,7 @@ def markdown(meta: dict, recs: list[dict]) -> str:
          f"batch {meta['batch']} x seq {meta['seq']} | {meta['layers']} layers | warmup {meta['warmup']} + {meta['steps']} timed steps | "
          f"matmul precision {meta['matmul_precision']} | --precision {meta.get('precision', 'fp32')} | "
          f"adam {meta.get('adam_impl', 'foreach')} | grad-checkpoint {meta.get('grad_checkpoint', False)} | "
-         f"sdpa {meta.get('sdpa', False)}"
+         f"sdpa {meta.get('sdpa', False)} | lr-sched {meta.get('lr_sched', 'const')}"
          + (f" | preset {meta['preset']}" if meta.get("preset") else ""), ""]
     ref = {r["d"]: r["ms_step"] for r in recs if r["arm"] == "dense_nobias" and r["variant"] == "eager" and not r["error"]}
     strong = {r["d"]: r["ms_step"] for r in recs if r["arm"] == STRONG_ARM and not r["error"]}
@@ -640,11 +728,18 @@ def markdown(meta: dict, recs: list[dict]) -> str:
         if r.get("native_lg"):
             note = (note + f" native bf16 lg ({r.get('lg_gemm')})").strip()
         if r.get("graphs") is not None:
-            note = (note + f" compile: {r['graphs']} graph(s), {r['graph_breaks']} break(s)"
-                    + (f", lg={r['lg_compile']}" if r.get("lg_compile") else "")).strip()
+            ge = r.get("graphs_end", r["graphs"])
+            note = (note + f" compile: {r['graphs']} graph(s)" + ("" if ge == r["graphs"] else f" -> {ge} RECOMPILED")
+                    + f", {r['graph_breaks']} break(s)" + (f", lg={r['lg_compile']}" if r.get("lg_compile") else "")).strip()
         if r.get("updates_per_step") is not None:
             ok_u = r["updates_per_step"] == r["lg_layers_n"]
             note = (note + f" updates/step {r['updates_per_step']}/{r['lg_layers_n']}" + ("" if ok_u else " WRONG")).strip()
+        if r.get("lr_sched", "const") != "const":
+            note += f" lr-sched {r['lr_sched']}"
+        if r.get("checkpointed_blocks"):
+            note += " ckpt" + ("(op path)" if r.get("lg_ckpt_op_path") else "")
+        if r.get("est_mem_mb") is not None:
+            note += f" est {r['est_mem_mb']:,.0f} MB"
         if r.get("lg_gemm") == "nvfp4_scaled_mm":
             note += " APPROX: NVFP4 activations"
         L.append(f"| {r['label']} | {r['d']} | {r['heads']} | {r['n_total']:,} | {r['n_lin']:,} | {_f(r['bits'])} | "
@@ -692,8 +787,16 @@ def main(argv=None) -> int:
                     help="AdamW implementation of the AdamW arms and of emb/LN/head everywhere: foreach (default, as before) "
                          "or fused=True. dense_strong is always fused")
     ap.add_argument("--grad-checkpoint", action="store_true",
-                    help="torch.utils.checkpoint per block (fits big presets). REFUSED (row FAILED) for counter arms "
-                         "(na_*/lg*/tern/dense_rms): the recompute breaks their one-forward-per-backward guard")
+                    help="torch.utils.checkpoint (non-reentrant) per block (fits big presets). Allowed: dense_* / qat_* and "
+                         "lg* on the native custom-op path (the update is in the backward op only; the arm is switched to "
+                         "that path even in eager). REFUSED (row FAILED) for na_* / tern / dense_rms / legacy lg: the "
+                         "recompute breaks their one-forward-per-backward guard")
+    ap.add_argument("--lr-sched", default="const", choices=["const", "cosine"],
+                    help="const (default) | cosine: every step sets a new lr for the counter layers AND AdamW (e1_quality.sched_lr: "
+                         "2 %% warmup, cosine to 10 %%, over warmup+steps+phase steps) INSIDE the timed step, so the timing "
+                         "includes the per-step lr change; compile rows must still report 1 graph before and after")
+    ap.add_argument("--estimate-only", action="store_true",
+                    help="print the analytic memory estimate of every (arm, d) and exit without running anything")
     ap.add_argument("--vocab", type=int, default=256, help="byte-level vocabulary")
     ap.add_argument("--warmup", type=int, default=30)
     ap.add_argument("--steps", type=int, default=100)
@@ -773,6 +876,20 @@ def main(argv=None) -> int:
           + ("" if cuda else "  [CPU: plumbing only, timings are meaningless]"), flush=True)
     print(f"precision={args.precision} adam={args.adam_impl} grad_checkpoint={args.grad_checkpoint} preset={args.preset} | "
           f"params: " + ", ".join(f"d={w}: {n:,}" for w, n in meta["params"].items()), flush=True)
+
+    meta["lr_sched"] = args.lr_sched
+    for d in widths:
+        for arm in arms:
+            base = ARM_ALIASES.get(arm, arm)
+            prec = "bf16" if arm == STRONG_ARM else args.precision
+            est = estimate_memory(base, d, args.layers, args.batch, args.seq, args.vocab, prec, args.grad_checkpoint)
+            print(f"  est d={d:<4} {arm:<24} " + (
+                f"~{est['total_mb']:,.0f} MB = state {est['state_mb']:,.0f} + act {est['act_mb']:,.0f} + logits "
+                f"{est['logits_mb']:,.0f} + transient {est['transient_mb']:,.0f}  (analytic, +-30%"
+                f"{', grad-checkpoint' if args.grad_checkpoint else ''})" if est else "no analytic estimate for this arm"),
+                flush=True)
+    if args.estimate_only:
+        return 0
 
     recs = []
     for d in widths:

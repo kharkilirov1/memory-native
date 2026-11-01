@@ -2,13 +2,19 @@
 """A/B wrapper: probes/e1_quality.py + the latent-grid arms (mx6/latent_grid.py). e1_quality.py is NOT edited.
 
 New arms (everything else is delegated to e1_quality unchanged):
-    lg<k>_fp4[_h<h>][_rung]     LatentGridLinear: ONE k-bit index into the fine FP4-aligned grid (14*m+1 points,
+    lg<k>_fp4[_h<h>][_rung][_nvfp4fwd]     LatentGridLinear: ONE k-bit index into the fine FP4-aligned grid (14*m+1 points,
                                 m = (2^k-1)//14: lg8 -> m=18, 253 pts; lg7 -> 9, 127; lg6 -> 4, 57), deployed weight =
                                 RTN to the E2M1 values (ties away from zero) x NVFP4 block scale, no hysteresis counter.
                                 _h<h>: headroom (NVFP4 target amax/s = 6/h, default 1; same meaning as
                                 --headroom-mode ladder --headroom h). _rung: init the latent ON the E2M1 rung
                                 (the same deployed init as na_* for a seed) instead of the nearest fine point.
+                                _nvfp4fwd: forward GEMM = cuBLASLt NVFP4 (gemm="nvfp4_scaled_mm", x quantized to NVFP4 on the
+                                fly: APPROXIMATE activations; needs sm_100+/sm_120 and CUDA, otherwise it falls back to bf16
+                                and fp4_fallbacks counts it). Same state / update as the plain arm.
 Bits/param = k + 0.5 (E4M3/16) + 32/in (RMS row) + 32/numel (tensor scale): lg8 8.69 at d=128, like na_fp4_c8.
+
+--compile / --compile-backend / --precision bf16 / --sdpa / --sched cosine are e1_quality's (passed through): lg arms are
+compiled with fullgraph=True over the custom ops, one graph for the whole cosine schedule (printed after each run).
 
 Same CLI as e1_quality (all args are passed through, incl. the scaling-study flags --dataset enwik8, --data-encoding,
 --layers, --heads and the parameter-count / memory report). lg arms need --scale-format nvfp4 (they are NVFP4-only; it keeps
@@ -37,7 +43,8 @@ import torch                                                       # noqa: E402
 from mx6.latent_grid import E2M1_SIGNED, N_RUNGS, LatentGridLinear, get_grid   # noqa: E402
 
 FP4_LADDER = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0]
-ARM_RE = re.compile(r"^lg(\d+)_fp4(?:_h(\d+(?:\.\d+)?))?(_rung)?$")
+ARM_RE = re.compile(r"^lg(\d+)_fp4(?:_h(\d+(?:\.\d+)?))?(_rung)?(_nvfp4fwd)?$")
+NVFP4FWD_SUFFIX = "_nvfp4fwd"
 
 
 def parse_lg(arm: str):
@@ -46,8 +53,14 @@ def parse_lg(arm: str):
         return None
     mt = ARM_RE.match(arm)
     if mt is None:
-        raise ValueError(f"bad latent-grid arm {arm!r}: expected lg<k>_fp4[_h<headroom>][_rung], e.g. lg8_fp4_h1.25")
+        raise ValueError(f"bad latent-grid arm {arm!r}: expected lg<k>_fp4[_h<headroom>][_rung][_nvfp4fwd], "
+                         f"e.g. lg8_fp4_h1.25")
     return int(mt.group(1)), (float(mt.group(2)) if mt.group(2) else None), bool(mt.group(3))
+
+
+def lg_gemm(arm: str) -> str:
+    """Forward GEMM of a latent-grid arm: nvfp4_scaled_mm for *_nvfp4fwd, else the exact cuBLAS bf16 one."""
+    return "nvfp4_scaled_mm" if arm.endswith(NVFP4FWD_SUFFIX) else "cublas_bf16"
 
 
 def load_e1(register: bool = True):
@@ -94,7 +107,7 @@ def install(e1):
         if h is None:        # same default as na_*: --headroom-mode ladder --headroom h, else h = 1 (amax -> outer rung)
             h = e1.HEADROOM if (e1.HEADROOM_MODE == "ladder" and e1.HEADROOM is not None) else 1.0
         return LatentGridLinear(i, o, k=k, lr=lr, headroom=h, weight_decay=e1.COUNTER_WD,
-                                init="rung" if rung else "fine")
+                                init="rung" if rung else "fine", gemm=lg_gemm(arm))
 
     def snapshot_values(model):
         snap = [(m.rung_index().to(torch.int8), N_RUNGS) for m in model.modules() if isinstance(m, LatentGridLinear)]
@@ -126,7 +139,7 @@ def _announce(argv) -> None:
             g = get_grid(k)
             print(f"lg_ab: {arm} -> LatentGridLinear k={k} m={g.m} grid_points={g.n_pts}/{2 ** k} "
                   f"headroom={'ladder-default' if h is None else h} init={'rung' if rung else 'fine'} "
-                  f"bits=k+0.5+32/in+32/numel", flush=True)
+                  f"gemm={lg_gemm(arm)} bits=k+0.5+32/in+32/numel", flush=True)
 
 
 def main(argv=None) -> int:
