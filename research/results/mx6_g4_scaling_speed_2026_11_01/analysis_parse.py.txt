@@ -1,0 +1,34 @@
+import re, sys, glob, os, statistics as st, json
+X = r'C:\Users\Kharki\AppData\Local\claude-ctl\_x3'
+OLD = r'C:\Users\Kharki\Desktop\memory-native-training\research\results\mx6_g4_headroom_lg_2026_10_31'
+seed_re = re.compile(r'^\s+(\S+)\s+seed=(\d+) bits=([\d.]+) val=([\d.]+) train=([\d.]+) gap=([+-][\d.]+) best=([\d.]+) clip=(\S+)% flip%\(start/mid/end\)=(\S+)/(\S+)/(\S+) edge=(\S+)% grown=(\d+)')
+w_re = re.compile(r'weights: kurt=(\S+) tail3=(\S+)% zero=(\S+)%')
+m_re = re.compile(r'memory: .*state=([\d.]+)MB \(\+grad ([\d.]+)MB\) \| peak=(\d+)MB \(\+(\d+)MB over run start\)')
+def parse(path):
+    rows = []
+    cur = None
+    for ln in open(path, encoding='utf-8', errors='replace'):
+        m = seed_re.match(ln)
+        if m:
+            g = m.groups()
+            cur = dict(arm=g[0], seed=int(g[1]), bits=float(g[2]), val=float(g[3]), train=float(g[4]), gap=float(g[5]),
+                       best=float(g[6]), clip=g[7], flip=g[10], edge=g[11])
+            rows.append(cur); continue
+        m = w_re.search(ln)
+        if m and cur is not None:
+            cur.update(kurt=m.group(1), tail3=m.group(2), zero=m.group(3)); continue
+        m = m_re.search(ln)
+        if m and cur is not None:
+            cur.update(state=float(m.group(1)), grad=float(m.group(2)), peak=int(m.group(3)), over=int(m.group(4)))
+    return rows
+def ms(v):
+    return (st.mean(v), st.stdev(v) if len(v) > 1 else float('nan'))
+if __name__ == '__main__':
+    out = {}
+    for p in sorted(glob.glob(X + r'\q\*.log')):
+        out[os.path.basename(p)[:-4]] = parse(p)
+    for k, rows in out.items():
+        v = [r['val'] for r in rows]
+        if not v: print(k, 'NO ROWS'); continue
+        m, s = ms(v)
+        print(f"{k:28s} n={len(v)} val={m:.4f} sd={s:.4f} vals={v} train={st.mean([r['train'] for r in rows]):.4f} edge={rows[0].get('edge')} kurt={rows[0].get('kurt')}")

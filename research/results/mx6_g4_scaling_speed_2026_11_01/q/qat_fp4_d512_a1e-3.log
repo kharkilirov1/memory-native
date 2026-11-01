@@ -1,0 +1,25 @@
+device=NVIDIA RTX PRO 6000 Blackwell Server Edition d=512 steps=6000 batch=32 seq=128 vocab=202 tokens=20000000 train_tokens=18000000 val_tokens=2000000 val_frac=0.1 epochs=1.37 (loss in bits/char) sched=cosine(warmup=0.02 min=0.1) lr=0.01 adam_lr=0.001 eval_every=500 scale_format=nvfp4
+data: dataset=enwik8 encoding=latin-1 (byte-level) path=/content/mx/mxfp4-native/data/enwik8 chars=20000000 (--chars 20000000) vocab=202
+model: d=512 layers=4 heads=8 head_dim=64 mlp=4d seq=128 | params total=13,061,120 block_linears(counter layers)=12,582,912 other(emb/pos/LN/head)=478,208 | AdamW state 12 B/param (fp32 master+m+v)
+gap arms: qat_lr=0.001
+  qat_fp4           seed=0 bits=96.000 val=1.8033 train=1.6622 gap=+0.1412 best=1.8033 clip=nan% flip%(start/mid/end)=nan/nan/nan edge=nan% grown=0 (1232s)
+      weights: kurt=3.14 tail3=0.36% zero=6.9%
+      memory: params total=13,061,120 block_linears=12,582,912 | state=144.0MB (+grad 192.0MB) | peak=1064MB (+912MB over run start)
+      curve: 500:2.753 1000:2.417 1500:2.252 2000:2.151 2500:2.042 3000:1.976 3500:1.928 4000:1.890 4500:1.857 5000:1.831 5500:1.816 6000:1.803
+      magnitudes: (no counter layers)
+  qat_fp4           seed=1 bits=96.000 val=1.7933 train=1.6508 gap=+0.1425 best=1.7933 clip=nan% flip%(start/mid/end)=nan/nan/nan edge=nan% grown=0 (422s)
+      weights: kurt=3.15 tail3=0.36% zero=6.9%
+      memory: params total=13,061,120 block_linears=12,582,912 | state=144.0MB (+grad 192.0MB) | peak=1062MB (+893MB over run start)
+      curve: 500:2.730 1000:2.395 1500:2.230 2000:2.134 2500:2.043 3000:1.974 3500:1.930 4000:1.879 4500:1.847 5000:1.821 5500:1.805 6000:1.793
+      magnitudes: (no counter layers)
+
+arm                 bits  mean val   train     gap      sd  clip%    best  flip%e  edge%  seeds
+qat_fp4           96.000    1.7983  1.6565 +0.1418  0.0071    nan  1.7983     nan    nan  [1.8033, 1.7933]
+
+deployed weights of the 4 block linears (pooled over rows & layers; mean over seeds): kurt = E[w^4]/E[w^2]^2 per row (Gaussian 3, uniform 1.8); tail3 = frac |w| > 3*rms_row (Gaussian 0.27%); zero = frac exactly 0
+arm                  kurt  tail3%  zero%
+qat_fp4              3.15    0.36    6.9
+
+memory per arm, MB (block linears: 12,582,912 params; formulas in the module docstring)
+arm                 bits  B/param     state     +grad    other      peak  peak-run
+qat_fp4           96.000   12.000    144.00    192.00     5.47      1064       912

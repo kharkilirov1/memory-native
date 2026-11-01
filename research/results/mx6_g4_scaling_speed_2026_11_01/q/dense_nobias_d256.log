@@ -1,0 +1,24 @@
+device=NVIDIA RTX PRO 6000 Blackwell Server Edition d=256 steps=6000 batch=32 seq=128 vocab=202 tokens=20000000 train_tokens=18000000 val_tokens=2000000 val_frac=0.1 epochs=1.37 (loss in bits/char) sched=cosine(warmup=0.02 min=0.1) lr=0.01 adam_lr=0.003 eval_every=500 scale_format=nvfp4
+data: dataset=enwik8 encoding=latin-1 (byte-level) path=/content/mx/mxfp4-native/data/enwik8 chars=20000000 (--chars 20000000) vocab=202
+model: d=256 layers=4 heads=4 head_dim=64 mlp=4d seq=128 | params total=3,384,832 block_linears(counter layers)=3,145,728 other(emb/pos/LN/head)=239,104 | AdamW state 12 B/param (fp32 master+m+v)
+  dense_nobias      seed=0 bits=96.000 val=1.8550 train=1.7159 gap=+0.1390 best=1.8550 clip=nan% flip%(start/mid/end)=nan/nan/nan edge=nan% grown=0 (203s)
+      weights: kurt=3.22 tail3=0.37% zero=0.0%
+      memory: params total=3,384,832 block_linears=3,145,728 | state=36.0MB (+grad 48.0MB) | peak=529MB (+376MB over run start)
+      curve: 500:2.761 1000:2.438 1500:2.287 2000:2.196 2500:2.120 3000:2.039 3500:1.985 4000:1.943 4500:1.910 5000:1.882 5500:1.864 6000:1.855
+      magnitudes: (no counter layers)
+  dense_nobias      seed=1 bits=96.000 val=1.8466 train=1.7059 gap=+0.1406 best=1.8466 clip=nan% flip%(start/mid/end)=nan/nan/nan edge=nan% grown=0 (168s)
+      weights: kurt=3.31 tail3=0.36% zero=0.0%
+      memory: params total=3,384,832 block_linears=3,145,728 | state=36.0MB (+grad 48.0MB) | peak=529MB (+360MB over run start)
+      curve: 500:2.747 1000:2.414 1500:2.269 2000:2.176 2500:2.114 3000:2.059 3500:2.000 4000:1.948 4500:1.909 5000:1.879 5500:1.861 6000:1.847
+      magnitudes: (no counter layers)
+
+arm                 bits  mean val   train     gap      sd  clip%    best  flip%e  edge%  seeds
+dense_nobias      96.000    1.8508  1.7109 +0.1398  0.0060    nan  1.8508     nan    nan  [1.855, 1.8466]
+
+deployed weights of the 4 block linears (pooled over rows & layers; mean over seeds): kurt = E[w^4]/E[w^2]^2 per row (Gaussian 3, uniform 1.8); tail3 = frac |w| > 3*rms_row (Gaussian 0.27%); zero = frac exactly 0
+arm                  kurt  tail3%  zero%
+dense_nobias         3.27    0.37    0.0
+
+memory per arm, MB (block linears: 3,145,728 params; formulas in the module docstring)
+arm                 bits  B/param     state     +grad    other      peak  peak-run
+dense_nobias      96.000   12.000     36.00     48.00     2.74       529       376

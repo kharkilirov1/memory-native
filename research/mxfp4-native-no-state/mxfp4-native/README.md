@@ -58,6 +58,14 @@ The 33-state counter beats the best-tuned Adam baseline on the documented 3-seed
 
 ## Current results (claimed in reports, not re-run here)
 
+**Newest (2026-11-01, G4, commit `e9830bc`): scaling, 4 seeds, step speed and memory: [research/results/mx6_g4_scaling_speed_2026_11_01.md](../../results/mx6_g4_scaling_speed_2026_11_01.md)**, raw logs and bench files in `research/results/mx6_g4_scaling_speed_2026_11_01/`. Held-out enwik8, 4 layers, 2 seeds per point; gap to the best-tuned `dense_nobias` at d=128 / 256 / 512:
+
+- `lg6_fp4_h2` (6.55-6.69 bits) +0.283 / +0.231 / +0.179, `tern_counter` +0.380 / +0.299 / +0.200, `qat_fp4` +0.029 / +0.016 / +0.000: the gap shrinks with width; `na_fp4_c8` (8.55-8.69 bits) +0.143 / +0.134 / +0.106 is flat within its seed noise.
+- AdamW lr 3e-3 diverges at d=512 for dense and `qat_fp4` (val 3.17 vs 1.80 at 1e-3); the counter / grid arms did not diverge. Dense d=128 / 256 were not re-tuned.
+- 4 seeds, d=128 tinyshakespeare: `na_fp4_c8` h2 2.317, `lg7_fp4_h2` 2.353, `lg6_fp4_h2` 2.414 (dense_bf16 2.286).
+- Speed (fp32 GEMMs, no autocast; step vs dense eager at d=128 / 256 / 512): `lg6` 3.28x / 2.94x / 1.38x, `na_fp4_c8` 8.19x / 7.23x / 3.44x; with `torch.compile` `lg6` 1.11x at d=512 (1.22x vs compiled dense), `na` 2.64x. Eager steps are launch-bound (~10 us per launch); no fused update kernel exists yet.
+- Memory: block-linear state 15x smaller (lg6 9.82 vs 144.00 MB at d=512) and resident 3x smaller (72 vs 211 MB), but peak is unchanged at these sizes (794 vs 827 MB); at equal state memory lg6 d=512 beats dense d=128 by 0.043, at equal peak dense wins.
+
 **Newest frontier (2026-10-31, held-out, G4, d=128, 6000 steps, 2 seeds per arm): [research/results/mx6_g4_headroom_lg_2026_10_31.md](../../results/mx6_g4_headroom_lg_2026_10_31.md)**, raw logs in `research/results/mx6_g4_headroom_lg_2026_10_31/` (uncommitted code; arm flags are in the Colab job scripts, not in the logs). Val bits/char; references: dense bf16 2.286, `qat_fp4` (fp32 latent) 2.298:
 
 - 8.69 bits/param: **2.315** (`na_fp4_c8`, full E2M1 ladder, nvfp4 scale, block-scale headroom 2 via `--headroom-mode ladder --headroom 2`; 2.372 at the default headroom in the same batch, 2.361 in the earlier run below)
@@ -83,4 +91,4 @@ Sources: `research/results/mx6_gpu_2026_10_30.md` (A100-SXM4-40GB, two linears 1
 
 **Quality, bits/char (4 seeds, mean) - SUPERSEDED, memorisation (validation == training data); see the newest evidence above** (quality report): na_wide_c3 (5.44 bits) 2.4203, na_wide_c5 (6.44 bits) 2.4085, na_e2m1_c3 (6.44 bits) 2.6402 (one seed at 3.13, near the bigram floor 3.469); dense bf16 2.0394 (2 seeds). The counter arms are about 0.37 bits/char behind dense; the report attributes this to a degenerate, effectively 3-level quantizer (80-84% of weights on the outermost rung) caused by the frozen block scale.
 
-**Bottom line:** a storage-state win only. There is no speed win and no peak-memory win over dense bf16 except with `torch.compile` at batch >= 32 (peak 168 vs 177.7 MB, speed still 0.33x). Quality is behind dense (held-out, d=128, 2 seeds: +0.03 at 8.69 bits, +0.13 at 6.69 bits with the latent grid; the older 6-bit counter was +0.26) and the scale rule is only partly solved (static headroom 2 helps; no dynamic rule beat it).
+**Bottom line:** a storage-state win only. There is no speed win and no peak-memory win over dense bf16 except with `torch.compile` at batch >= 32 (peak 168 vs 177.7 MB, speed still 0.33x). Quality is behind dense (held-out, d=128, 2 seeds: +0.03 at 8.69 bits, +0.13 at 6.69 bits with the latent grid; the older 6-bit counter was +0.26) and the scale rule is only partly solved (static headroom 2 helps; no dynamic rule beat it). 2026-11-01 update: the gap to dense shrinks with width for the latent grid and the ternary counter (not detectable for `na_fp4_c8`), eager steps are 1.4x-8x slower than fp32-GEMM dense (compiled lg6 1.11x at d=512), and resident memory is 3x lower while peak memory is unchanged at d<=512 (see the newest report above).

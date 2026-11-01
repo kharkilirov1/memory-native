@@ -1,0 +1,25 @@
+device=NVIDIA RTX PRO 6000 Blackwell Server Edition d=128 steps=6000 batch=32 seq=128 vocab=202 tokens=20000000 train_tokens=18000000 val_tokens=2000000 val_frac=0.1 epochs=1.37 (loss in bits/char) sched=cosine(warmup=0.02 min=0.1) lr=0.01 adam_lr=0.003 eval_every=500 scale_format=nvfp4
+data: dataset=enwik8 encoding=latin-1 (byte-level) path=/content/mx/mxfp4-native/data/enwik8 chars=20000000 (--chars 20000000) vocab=202
+model: d=128 layers=4 heads=2 head_dim=64 mlp=4d seq=128 | params total=905,984 block_linears(counter layers)=786,432 other(emb/pos/LN/head)=119,552 | AdamW state 12 B/param (fp32 master+m+v)
+tern arms: memory_native=/content/mx/src/memory_native/__init__.py tern_lr=0.03 C=11 lr_scale=0.0002 rms_beta=0.9 rms_eps=0.001
+  tern_counter      seed=0 bits=6.562 val=2.3987 train=2.2929 gap=+0.1058 best=2.3986 clip=nan% flip%(start/mid/end)=48.48/30.74/21.71 edge=75.74% grown=0 (1220s)
+      weights: kurt=1.33 tail3=0.00% zero=24.3%
+      memory: params total=905,984 block_linears=786,432 | state=0.6MB (+grad 0.9MB) | peak=334MB (+182MB over run start)
+      curve: 500:3.260 1000:3.034 1500:2.757 2000:2.659 2500:2.589 3000:2.533 3500:2.494 4000:2.451 4500:2.433 5000:2.407 5500:2.399 6000:2.399
+      magnitudes: -1:37.8%  +0:24.3%  +1:38.0%
+  tern_counter      seed=1 bits=6.562 val=2.4006 train=2.2989 gap=+0.1017 best=2.4006 clip=nan% flip%(start/mid/end)=52.53/30.76/21.71 edge=75.77% grown=0 (352s)
+      weights: kurt=1.33 tail3=0.00% zero=24.2%
+      memory: params total=905,984 block_linears=786,432 | state=0.6MB (+grad 0.9MB) | peak=334MB (+165MB over run start)
+      curve: 500:3.557 1000:2.961 1500:2.754 2000:2.669 2500:2.581 3000:2.543 3500:2.502 4000:2.468 4500:2.447 5000:2.422 5500:2.404 6000:2.401
+      magnitudes: -1:37.9%  +0:24.2%  +1:37.9%
+
+arm                 bits  mean val   train     gap      sd  clip%    best  flip%e  edge%  seeds
+tern_counter       6.562    2.3997  2.2959 +0.1037  0.0013    nan  2.3996   21.71  75.76  [2.3987, 2.4006]
+
+deployed weights of the 4 block linears (pooled over rows & layers; mean over seeds): kurt = E[w^4]/E[w^2]^2 per row (Gaussian 3, uniform 1.8); tail3 = frac |w| > 3*rms_row (Gaussian 0.27%); zero = frac exactly 0
+arm                  kurt  tail3%  zero%
+tern_counter         1.33    0.00   24.2
+
+memory per arm, MB (block linears: 786,432 params; formulas in the module docstring)
+arm                 bits  B/param     state     +grad    other      peak  peak-run
+tern_counter       6.562    0.820      0.62      0.87     1.37       334       182

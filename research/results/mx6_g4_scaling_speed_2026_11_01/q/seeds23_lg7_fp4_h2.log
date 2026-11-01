@@ -1,0 +1,23 @@
+lg_ab: lg7_fp4_h2 -> LatentGridLinear k=7 m=9 grid_points=127/128 headroom=2.0 init=fine bits=k+0.5+32/in+32/numel
+device=NVIDIA RTX PRO 6000 Blackwell Server Edition d=128 steps=6000 batch=32 seq=128 vocab=65 tokens=1115394 train_tokens=1003854 val_tokens=111540 val_frac=0.1 epochs=24.48 (loss in bits/char) sched=cosine(warmup=0.02 min=0.1) lr=0.01 adam_lr=0.003 eval_every=500 scale_format=nvfp4
+data: dataset=tinyshakespeare encoding=utf-8 path=/content/mx/mxfp4-native/data/tinyshakespeare.txt chars=1115394 (--chars None) vocab=65
+model: d=128 layers=2 heads=1 head_dim=128 mlp=4d seq=128 | params total=476,672 block_linears(counter layers)=393,216 other(emb/pos/LN/head)=83,456 | AdamW state 12 B/param (fp32 master+m+v)
+  lg7_fp4_h2        seed=2 bits=7.688 val=2.3417 train=2.0503 gap=+0.2915 best=2.3417 clip=1.81% flip%(start/mid/end)=87.25/63.81/55.93 edge=18.86% grown=0 (140s)
+      weights: kurt=1.96 tail3=0.00% zero=3.3%
+      memory: params total=476,672 block_linears=393,216 | state=0.4MB (+grad 0.6MB) | peak=111MB (+102MB over run start)
+      magnitudes: -6:9.4%  -4:13.0%  -3:8.5%  -2:5.8%  -1.5:4.5%  -1:3.8%  -0.5:3.4%  +0:3.3%  +0.5:3.4%  +1:3.8%  +1.5:4.5%  +2:5.7%  +3:8.5%  +4:12.9%  +6:9.5%
+  lg7_fp4_h2        seed=3 bits=7.688 val=2.3676 train=2.0435 gap=+0.3240 best=2.3583 clip=1.86% flip%(start/mid/end)=88.63/63.62/55.83 edge=19.16% grown=0 (137s)
+      weights: kurt=1.96 tail3=0.00% zero=3.3%
+      memory: params total=476,672 block_linears=393,216 | state=0.4MB (+grad 0.6MB) | peak=111MB (+86MB over run start)
+      magnitudes: -6:9.6%  -4:13.0%  -3:8.4%  -2:5.7%  -1.5:4.5%  -1:3.8%  -0.5:3.4%  +0:3.3%  +0.5:3.4%  +1:3.7%  +1.5:4.5%  +2:5.7%  +3:8.4%  +4:12.9%  +6:9.5%
+
+arm                 bits  mean val   train     gap      sd  clip%    best  flip%e  edge%  seeds
+lg7_fp4_h2         7.688    2.3546  2.0469 +0.3077  0.0183   1.83  2.3500   55.88  19.01  [2.3417, 2.3676]
+
+deployed weights of the 4 block linears (pooled over rows & layers; mean over seeds): kurt = E[w^4]/E[w^2]^2 per row (Gaussian 3, uniform 1.8); tail3 = frac |w| > 3*rms_row (Gaussian 0.27%); zero = frac exactly 0
+arm                  kurt  tail3%  zero%
+lg7_fp4_h2           1.96    0.00    3.3
+
+memory per arm, MB (block linears: 393,216 params; formulas in the module docstring)
+arm                 bits  B/param     state     +grad    other      peak  peak-run
+lg7_fp4_h2         7.688    0.961      0.36      0.61     0.96       111       102

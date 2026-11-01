@@ -1,0 +1,23 @@
+device=NVIDIA RTX PRO 6000 Blackwell Server Edition d=128 steps=6000 batch=32 seq=128 vocab=65 tokens=1115394 train_tokens=1003854 val_tokens=111540 val_frac=0.1 epochs=24.48 (loss in bits/char) sched=cosine(warmup=0.02 min=0.1) lr=0.01 adam_lr=0.003 eval_every=500 scale_format=nvfp4
+data: dataset=tinyshakespeare encoding=utf-8 path=/content/mx/mxfp4-native/data/tinyshakespeare.txt chars=1115394 (--chars None) vocab=65
+model: d=128 layers=2 heads=1 head_dim=128 mlp=4d seq=128 | params total=476,672 block_linears(counter layers)=393,216 other(emb/pos/LN/head)=83,456 | AdamW state 12 B/param (fp32 master+m+v)
+gap arms: counter_wd=0 scale_lr=0
+  na_fp4_c8         seed=2 bits=8.688 val=2.3100 train=2.0063 gap=+0.3037 best=2.3100 clip=0.02% flip%(start/mid/end)=87.93/63.40/53.99 edge=24.05% grown=0 (1692s)
+      weights: kurt=2.02 tail3=0.00% zero=3.7%
+      memory: params total=476,672 block_linears=393,216 | state=0.4MB (+grad 0.7MB) | peak=116MB (+107MB over run start)
+      magnitudes: -6:12.0%  -4:10.2%  -3:7.7%  -2:5.7%  -1.5:4.7%  -1:4.1%  -0.5:3.8%  +0:3.7%  +0.5:3.7%  +1:4.1%  +1.5:4.7%  +2:5.6%  +3:7.6%  +4:10.2%  +6:12.1%
+  na_fp4_c8         seed=3 bits=8.688 val=2.3287 train=1.9929 gap=+0.3358 best=2.3287 clip=0.02% flip%(start/mid/end)=86.69/63.32/53.78 edge=24.14% grown=0 (448s)
+      weights: kurt=2.02 tail3=0.00% zero=3.6%
+      memory: params total=476,672 block_linears=393,216 | state=0.4MB (+grad 0.7MB) | peak=116MB (+91MB over run start)
+      magnitudes: -6:12.1%  -4:10.2%  -3:7.8%  -2:5.7%  -1.5:4.7%  -1:4.1%  -0.5:3.7%  +0:3.6%  +0.5:3.7%  +1:4.0%  +1.5:4.7%  +2:5.7%  +3:7.7%  +4:10.2%  +6:12.1%
+
+arm                 bits  mean val   train     gap      sd  clip%    best  flip%e  edge%  seeds
+na_fp4_c8          8.688    2.3193  1.9996 +0.3198  0.0132   0.02  2.3193   53.88  24.10  [2.31, 2.3287]
+
+deployed weights of the 4 block linears (pooled over rows & layers; mean over seeds): kurt = E[w^4]/E[w^2]^2 per row (Gaussian 3, uniform 1.8); tail3 = frac |w| > 3*rms_row (Gaussian 0.27%); zero = frac exactly 0
+arm                  kurt  tail3%  zero%
+na_fp4_c8            2.02    0.00    3.6
+
+memory per arm, MB (block linears: 393,216 params; formulas in the module docstring)
+arm                 bits  B/param     state     +grad    other      peak  peak-run
+na_fp4_c8          8.688    1.086      0.41      0.66     0.96       116       107

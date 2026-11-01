@@ -1,0 +1,25 @@
+lg_ab: lg6_fp4_h2 -> LatentGridLinear k=6 m=4 grid_points=57/64 headroom=2.0 init=fine bits=k+0.5+32/in+32/numel
+device=NVIDIA RTX PRO 6000 Blackwell Server Edition d=512 steps=6000 batch=32 seq=128 vocab=202 tokens=20000000 train_tokens=18000000 val_tokens=2000000 val_frac=0.1 epochs=1.37 (loss in bits/char) sched=cosine(warmup=0.02 min=0.1) lr=0.01 adam_lr=0.001 eval_every=500 scale_format=nvfp4
+data: dataset=enwik8 encoding=latin-1 (byte-level) path=/content/mx/mxfp4-native/data/enwik8 chars=20000000 (--chars 20000000) vocab=202
+model: d=512 layers=4 heads=8 head_dim=64 mlp=4d seq=128 | params total=13,061,120 block_linears(counter layers)=12,582,912 other(emb/pos/LN/head)=478,208 | AdamW state 12 B/param (fp32 master+m+v)
+  lg6_fp4_h2        seed=0 bits=6.547 val=1.9931 train=1.8742 gap=+0.1189 best=1.9931 clip=2.00% flip%(start/mid/end)=77.84/77.33/63.86 edge=11.94% grown=0 (484s)
+      weights: kurt=2.60 tail3=0.00% zero=4.8%
+      memory: params total=13,061,120 block_linears=12,582,912 | state=9.8MB (+grad 13.8MB) | peak=963MB (+810MB over run start)
+      curve: 500:3.840 1000:3.310 1500:2.745 2000:2.460 2500:2.344 3000:2.227 3500:2.155 4000:2.091 4500:2.050 5000:2.022 5500:2.006 6000:1.993
+      magnitudes: -6:6.0%  -4:7.7%  -3:7.2%  -2:7.0%  -1.5:6.7%  -1:6.5%  -0.5:6.4%  +0:4.8%  +0.5:6.4%  +1:6.5%  +1.5:6.8%  +2:7.0%  +3:7.2%  +4:7.7%  +6:6.0%
+  lg6_fp4_h2        seed=1 bits=6.547 val=1.9612 train=1.8448 gap=+0.1163 best=1.9612 clip=2.02% flip%(start/mid/end)=81.49/76.97/63.39 edge=12.08% grown=0 (278s)
+      weights: kurt=2.58 tail3=0.00% zero=4.8%
+      memory: params total=13,061,120 block_linears=12,582,912 | state=9.8MB (+grad 13.8MB) | peak=963MB (+794MB over run start)
+      curve: 500:3.184 1000:2.632 1500:2.420 2000:2.270 2500:2.188 3000:2.144 3500:2.088 4000:2.048 4500:2.017 5000:1.987 5500:1.973 6000:1.961
+      magnitudes: -6:6.0%  -4:7.7%  -3:7.3%  -2:7.0%  -1.5:6.7%  -1:6.5%  -0.5:6.4%  +0:4.8%  +0.5:6.4%  +1:6.5%  +1.5:6.7%  +2:7.0%  +3:7.3%  +4:7.7%  +6:6.0%
+
+arm                 bits  mean val   train     gap      sd  clip%    best  flip%e  edge%  seeds
+lg6_fp4_h2         6.547    1.9771  1.8595 +0.1176  0.0226   2.01  1.9771   63.62  12.01  [1.9931, 1.9612]
+
+deployed weights of the 4 block linears (pooled over rows & layers; mean over seeds): kurt = E[w^4]/E[w^2]^2 per row (Gaussian 3, uniform 1.8); tail3 = frac |w| > 3*rms_row (Gaussian 0.27%); zero = frac exactly 0
+arm                  kurt  tail3%  zero%
+lg6_fp4_h2           2.59    0.00    4.8
+
+memory per arm, MB (block linears: 12,582,912 params; formulas in the module docstring)
+arm                 bits  B/param     state     +grad    other      peak  peak-run
+lg6_fp4_h2         6.547    0.818      9.82     13.82     5.47       963       810
