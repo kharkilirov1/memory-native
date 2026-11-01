@@ -1,0 +1,40 @@
+tests/test_lg_update_kernel.py:227: AssertionError
+______________________ test_gpu_unbiased_expected_step[6] ______________________
+
+k = 6
+
+    @GPU
+    @pytest.mark.parametrize("k", [8, 6])
+    def test_gpu_unbiased_expected_step(k):
+        """Rows are identical copies (same idx, same grad) => independent Philox noise per row = MC over rows."""
+        n, cols = 8192, 64
+        lay = make_layer(1, cols, k, backend="triton", device="cuda", lr=0.02)
+        idx = lay.idx.repeat(n, 1)
+        sb = lay._scale.repeat(n, 1)
+        g1 = torch.randn(1, cols, device="cuda") * 0.05
+        g = g1.repeat(n, 1)
+        v = torch.full((n, 1), lay.rms_eps, device="cuda")
+        m = lay.fmt.m
+        vals = lay.fmt.tables("cuda").values
+        w0 = vals[lay.idx.long()]
+        s = lay.fmt.na.expand_scale(lay._scale, lay._tscale)
+        v_new = v[:1] * 0.9 + g1.square().mean(1, keepdim=True) * 0.1
+        target = (-lay.lr * g1 / v_new.sqrt().clamp_min(lay.rms_eps) / s).double()
+        clip = K.lg_update_(g, idx, sb, lay._tscale, v, lr=lay.lr, beta=0.9, eps=lay.rms_eps, weight_decay=0.0, m=m,
+                            seed=123)
+        d = (vals[idx.long()] - w0).double()
+        mean, se = d.mean(0), (d.std(0) / n ** 0.5).clamp_min(1e-9)
+        z = ((mean - target[0]) / se).abs()
+        keep = (lay.idx[0] > 0) & (lay.idx[0] < 14 * m)      # grid-end weights clip outward requests (by design)
+>       assert float(z[keep].max()) < 5.5, float(z[keep].max())
+E       AssertionError: 1718019962.310791
+E       assert 1718019962.310791 < 5.5
+E        +  where 1718019962.310791 = float(tensor(1.7180e+09, device='cuda:0', dtype=torch.float64))
+E        +    where tensor(1.7180e+09, device='cuda:0', dtype=torch.float64) = <built-in method max of Tensor object at 0x7b0b100e4f00>()
+E        +      where <built-in method max of Tensor object at 0x7b0b100e4f00> = tensor([1.7673e+00, 1.5533e+00, 9.0042e-01, 8.6780e-01, 1.1011e+00, 9.7059e-01,\n        2.5005e+00, 2.3106e-01, 1.4115...e-02, 6.7971e-01,\n        1.5428e+00, 3.0593e-01, 1.4164e+00, 2.6694e-01], device='cuda:0',\n       dtype=torch.float64).max
+
+tests/test_lg_update_kernel.py:227: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_lg_update_kernel.py::test_gpu_unbiased_expected_step[8] - A...
+FAILED tests/test_lg_update_kernel.py::test_gpu_unbiased_expected_step[6] - A...
+2 failed, 23 passed in 9.30s

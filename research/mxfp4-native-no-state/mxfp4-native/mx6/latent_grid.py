@@ -27,8 +27,13 @@ by the sub-step of the gap moved INTO, no boundary handling: right inside one ga
 
 Bits/param = k + 0.5 (E4M3 per 16) + 32/in (fp32 RMS per row) + 32/numel (fp32 tensor scale). The index is held
 in a dense uint8 buffer at run time; `pack_state()` is the bit-packed k-bit layout that `persistent_bytes()` counts.
-Eager torch only. SR draws torch.rand once per update from `generator` (None = global RNG: the harness'
-torch.manual_seed(seed) fixes init and update noise).
+Backends: backend="torch" is the eager reference (SR draws torch.rand once per update from `generator`; None = global
+RNG). backend="triton" (auto = triton when the module is on CUDA, Triton imports and update_mode="exact") runs the whole
+update as ONE fused kernel (mx6/lg_update_kernel.py: row RMS + value step + U map + Philox SR, in place on the uint8
+index) and decodes the forward weight on the fly into x.dtype (bf16) without any fp32 cache. Same distribution, not the
+same random numbers (Philox seeded per update from `generator`/the global CPU RNG).
+Resident bytes/param (triton, cache_weight=False): idx 1 + scale 1/16 + v_rms 4/in  ~ 1.07 (torch path: + fp32
+_scale_cache 4 + fp32 _weight_cache 4 = ~9.07). Transient inside a step: bf16 deployed weight 2 + grad 2-4.
 """
 from __future__ import annotations
 
@@ -39,6 +44,7 @@ import torch
 from torch import nn
 
 from . import update as mx_update
+from .lg_update_kernel import HAS_TRITON, lg_decode, lg_update_
 from .packed_na import NVFP4_BLOCK, PackedNA
 
 E2M1_MAGS = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0]
@@ -46,6 +52,7 @@ E2M1_SIGNED = [-v for v in reversed(E2M1_MAGS[1:])] + E2M1_MAGS      # 15 signed
 N_RUNGS = len(E2M1_SIGNED)                                           # 15
 N_GAPS = N_RUNGS - 1                                                 # 14
 UPDATE_MODES = ("exact", "dir", "min")
+BACKENDS = ("torch", "triton", "auto")
 
 
 def pack_bits(idx: torch.Tensor, k: int) -> torch.Tensor:
@@ -179,7 +186,7 @@ def get_grid(k: int, m: int | None = None) -> LatentGrid:
 class _LGFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, module, token):
-        weight = module.weight()
+        weight = module.decode_weight(x.dtype)
         ctx.save_for_backward(x, weight)
         ctx.module = module
         ctx.version = module.idx._version
@@ -192,11 +199,211 @@ class _LGFunction(torch.autograd.Function):
         if module.idx._version != ctx.version:
             raise RuntimeError("weights changed between forward and backward")
         grad_x = grad_out @ weight
-        grad_w = grad_out.t() @ x
+        grad_w = (grad_out.t() @ x).contiguous()
         with torch.no_grad():
             module.apply_update_(grad_w)
         module._pending = False
         return grad_x, None, None
+
+
+GEMMS = ("cublas_bf16", "triton_bf16", "nvfp4_scaled_mm")
+NATIVE_MODES = ("auto", True, False)
+
+
+class _LGNativeFunction(torch.autograd.Function):
+    """Native low-precision path (no fp32 anywhere). x arrives already cast to the compute dtype `cdt` (bf16 under
+    autocast; the cast is outside, so autograd casts dx back). Forward: decode the deployed weight straight to `cdt`
+    (or run an fp4 GEMM on the nibbles), y = x W^T. Saves x (cdt) and, only if module.save_weight, the decoded W;
+    otherwise backward re-decodes (1 B read + 2 B write per param, ~free next to the GEMMs). Backward: dx = dy W,
+    grad_w = dy^T x in `cdt` (fp32 accumulation inside cuBLAS, rounded once to `cdt`), then ONE fused update; grad_w is
+    freed right after the kernel. Backward does not depend on the autocast state (everything is explicitly `cdt`)."""
+
+    @staticmethod
+    def forward(ctx, x, module, token):
+        y, w = module._gemm_fwd(x)
+        ctx.save_for_backward(x, w if module.save_weight else None)
+        ctx.module = module
+        ctx.version = module.idx._version
+        return y
+
+    @staticmethod
+    def backward(ctx, grad_out):
+        x, w = ctx.saved_tensors
+        module = ctx.module
+        if module.idx._version != ctx.version:
+            raise RuntimeError("weights changed between forward and backward")
+        dy = grad_out.to(x.dtype)
+        dx = module._gemm_dx(dy, w) if ctx.needs_input_grad[0] else None
+        grad_w = dy.t() @ x                                       # [out, in] in x.dtype, contiguous
+        with torch.no_grad():
+            module.apply_update_(grad_w)
+        del grad_w
+        module._pending = False
+        return dx, None, None
+
+
+# ── opaque custom ops for torch.compile (regional compile: everything EXCEPT the lg linear is compiled) ─────────────────
+#
+# `torch.ops.mx6.lg_linear` (forward, differentiable) and `torch.ops.mx6.lg_linear_bwd` (backward) wrap the SAME arithmetic
+# as `_LGNativeFunction`, as functions of explicit tensors (x, idx, scale, tscale, v_rms, clip_buf) + python scalars. The
+# backward op declares `Tensor(a!) idx, v_rms, clip_buf` as mutated, so dynamo / AOTAutograd see an opaque node with a
+# declared side effect: no graph break, the surrounding LN / attention / GELU / residual code fuses normally, and the
+# update runs exactly once per backward execution (it lives in the backward graph, never re-traced at run time).
+# State the ops do NOT see: the RNG (the Philox seed is drawn from the global CPU RNG inside the op body, i.e. at run
+# time), `module.generator` (ops path requires generator=None), `save_weight` (always re-decodes in backward), and
+# `fp4_fallbacks` (counted in the module-level FP4_FALLBACKS instead). Defined via torch.library.Library (explicit
+# schema strings: this file has `from __future__ import annotations`, which torch.library.custom_op cannot infer from).
+
+FP4_FALLBACKS = {"n": 0}
+_CFG_SCHEMA = ("int k, int m, str gemm, str dx_gemm, bool triton_on, str umode, float lr, float beta, float eps, "
+               "float wd, bool track_clip")
+
+
+def _decode_dense(idx, scale, tscale, grid: LatentGrid, triton_on: bool, dtype):
+    if triton_on:
+        return lg_decode(idx, scale, tscale, grid.m, dtype)
+    w = grid.tables(idx.device).deploy[idx.long()] * grid.na.expand_scale(scale, tscale)
+    return w if w.dtype == dtype else w.to(dtype)
+
+
+def _fp4_weight_of(idx, scale, tscale, grid: LatentGrid, triton_on: bool):
+    from . import fp4_gemm as fg
+    from .lg_update_kernel import lg_pack_nibbles, pack_nibbles_cf
+    nib = lg_pack_nibbles(idx, grid.m) if triton_on else pack_nibbles_cf(idx, grid.m)
+    return fg.Fp4Weight(nib, scale, tscale)
+
+
+def _op_fwd_impl(x, idx, scale, tscale, v_rms, clip_buf, token, k, m, gemm, dx_gemm, triton_on, umode, lr, beta, eps,
+                 wd, track_clip):
+    grid = get_grid(k, m)
+    if gemm != "cublas_bf16":
+        from . import fp4_gemm as fg
+        try:
+            if not x.is_cuda:
+                raise fg.Fp4Unsupported("fp4 GEMMs need CUDA")
+            q = _fp4_weight_of(idx, scale, tscale, grid, triton_on)
+            return fg.fp4_matmul(x.contiguous(), q, "triton_bf16" if gemm == "triton_bf16" else "torch_scaled_mm", x.dtype)
+        except fg.Fp4Unsupported:
+            FP4_FALLBACKS["n"] += 1
+    return x @ _decode_dense(idx, scale, tscale, grid, triton_on, x.dtype).t()
+
+
+def _op_dx(dy, idx, scale, tscale, grid, gemm, dx_gemm, triton_on):
+    if gemm != "cublas_bf16" and dy.is_cuda:
+        from . import fp4_gemm as fg
+        try:
+            if gemm == "triton_bf16":
+                return fg.fp4_matmul_dx(dy.contiguous(), _fp4_weight_of(idx, scale, tscale, grid, triton_on),
+                                        "triton_bf16", dy.dtype)
+            if dx_gemm == "nvfp4":
+                return fg.fp4_matmul_dx(dy.contiguous(), _fp4_weight_of(idx, scale, tscale, grid, triton_on),
+                                        "torch_scaled_mm", dy.dtype)
+        except fg.Fp4Unsupported:
+            FP4_FALLBACKS["n"] += 1
+    return dy @ _decode_dense(idx, scale, tscale, grid, triton_on, dy.dtype)
+
+
+def _op_update_(grad_w, idx, scale, tscale, v_rms, clip_buf, grid, triton_on, umode, lr, beta, eps, wd, track_clip):
+    """In-place state update with global-RNG randomness (module.generator is None on the ops path)."""
+    if triton_on:
+        seed = int(torch.randint(0, 2 ** 31 - 1, (1,)).item())
+        clip = lg_update_(grad_w, idx, scale, tscale, v_rms, lr=lr, beta=beta, eps=eps, weight_decay=wd, m=grid.m,
+                          seed=seed, track_clip=track_clip)
+        if clip is not None:
+            clip_buf.copy_(clip.sum(dtype=torch.float32) / idx.numel())
+        return
+    v_new, g_hat = mx_update.rms_update(grad_w.detach().float(), v_rms, beta, eps)
+    v_rms.copy_(v_new)
+    if wd > 0.0:
+        g_hat = g_hat + wd * grid.tables(idx.device).values[idx.long()]
+    delta = (-lr * g_hat) / grid.na.expand_scale(scale, tscale)
+    new, over = grid.move(idx, delta, None, umode, return_clip=True)
+    clip_buf.copy_(over.float().mean())
+    idx.copy_(new.to(idx.dtype))
+
+
+def _op_bwd_impl(dy, x, idx, scale, tscale, v_rms, clip_buf, needs_dx, k, m, gemm, dx_gemm, triton_on, umode, lr, beta,
+                 eps, wd, track_clip):
+    grid = get_grid(k, m)
+    dy = dy.to(x.dtype)
+    dx = _op_dx(dy, idx, scale, tscale, grid, gemm, dx_gemm, triton_on) if needs_dx else x.new_empty(0)
+    grad_w = dy.t() @ x
+    _op_update_(grad_w, idx, scale, tscale, v_rms, clip_buf, grid, triton_on, umode, lr, beta, eps, wd, track_clip)
+    return dx
+
+
+_LG_LIB = None
+HAS_LG_OPS = False
+
+
+def _register_lg_ops() -> bool:
+    global _LG_LIB
+    if not (hasattr(torch.library, "register_autograd") and hasattr(torch.library, "register_fake")):
+        return False
+    try:
+        if hasattr(torch.ops.mx6, "lg_linear") and hasattr(torch.ops.mx6, "lg_linear_bwd"):
+            return True                                   # already registered by an earlier import of this module
+    except (AttributeError, RuntimeError):
+        pass
+    try:
+        lib = torch.library.Library("mx6", "FRAGMENT")
+        lib.define("lg_linear(Tensor x, Tensor idx, Tensor scale, Tensor tscale, Tensor v_rms, Tensor clip_buf, "
+                   "Tensor token, " + _CFG_SCHEMA + ") -> Tensor")
+        lib.define("lg_linear_bwd(Tensor dy, Tensor x, Tensor(a!) idx, Tensor scale, Tensor tscale, Tensor(b!) v_rms, "
+                   "Tensor(c!) clip_buf, bool needs_dx, " + _CFG_SCHEMA + ") -> Tensor")
+        lib.impl("lg_linear", _op_fwd_impl, "CompositeExplicitAutograd")
+        lib.impl("lg_linear_bwd", _op_bwd_impl, "CompositeExplicitAutograd")
+
+        @torch.library.register_fake("mx6::lg_linear")
+        def _fake_fwd(x, idx, scale, tscale, v_rms, clip_buf, token, k, m, gemm, dx_gemm, triton_on, umode, lr, beta,
+                      eps, wd, track_clip):
+            return x.new_empty(x.shape[0], idx.shape[0])
+
+        @torch.library.register_fake("mx6::lg_linear_bwd")
+        def _fake_bwd(dy, x, idx, scale, tscale, v_rms, clip_buf, needs_dx, k, m, gemm, dx_gemm, triton_on, umode, lr,
+                      beta, eps, wd, track_clip):
+            return x.new_empty(x.shape) if needs_dx else x.new_empty(0)
+
+        def _setup(ctx, inputs, output):
+            x, idx, scale, tscale, v_rms, clip_buf = inputs[:6]
+            ctx.save_for_backward(x, idx, scale, tscale, v_rms, clip_buf)
+            ctx.cfg = tuple(inputs[7:])
+            ctx.needs_dx = bool(ctx.needs_input_grad[0])
+
+        def _backward(ctx, dy):
+            x, idx, scale, tscale, v_rms, clip_buf = ctx.saved_tensors
+            dx = torch.ops.mx6.lg_linear_bwd(dy, x, idx, scale, tscale, v_rms, clip_buf, ctx.needs_dx, *ctx.cfg)
+            return (dx if ctx.needs_dx else None,) + (None,) * (6 + len(ctx.cfg))
+
+        torch.library.register_autograd("mx6::lg_linear", _backward, setup_context=_setup)
+        _LG_LIB = lib
+        return True
+    except Exception:                                     # noqa: BLE001 - old torch / odd build: ops path unavailable
+        return False
+
+
+HAS_LG_OPS = _register_lg_ops()
+
+
+def lg_layers(model: nn.Module):
+    return [m for m in model.modules() if isinstance(m, LatentGridLinear)]
+
+
+def prepare_lg_for_compile(model: nn.Module, mode: str = "op") -> dict:
+    """Make the LatentGridLinear layers of `model` safe for torch.compile(model) (regional compile).
+    mode "op"     : forward = torch.ops.mx6.lg_linear (opaque node, declared mutation in the backward op): NO graph breaks.
+    mode "disable": forward wrapped in torch.compiler.disable (eager island; ~2 graph breaks per layer, always works).
+    Returns {'mode', 'layers'}; raises if mode "op" is requested but the ops are unavailable."""
+    if mode not in ("op", "disable"):
+        raise ValueError("mode must be 'op' or 'disable'")
+    ls = lg_layers(model)
+    if mode == "op" and not HAS_LG_OPS:
+        raise RuntimeError("custom ops unavailable in this torch (need torch.library.register_autograd / register_fake)")
+    for m in ls:
+        m.use_custom_op = mode == "op"
+        if mode == "disable":
+            m.forward = torch.compiler.disable(type(m).forward.__get__(m))
+    return {"mode": mode, "layers": len(ls)}
 
 
 class LatentGridLinear(nn.Module):
@@ -212,8 +419,39 @@ class LatentGridLinear(nn.Module):
     def __init__(self, in_features: int, out_features: int, k: int = 8, lr: float = 0.01,
                  rms_beta: float = 0.9, rms_eps: float = 1e-3, headroom: float = 1.0,
                  weight_decay: float = 0.0, update_mode: str = "exact", init: str = "fine",
-                 grid: LatentGrid | None = None):
+                 grid: LatentGrid | None = None, backend: str = "auto", cache_weight: bool | None = None,
+                 track_clip: bool = True, native="auto", gemm: str = "cublas_bf16", dx_gemm: str = "bf16",
+                 save_weight: bool = False):
         super().__init__()
+        if backend not in BACKENDS:
+            raise ValueError(f"backend must be one of {BACKENDS}, got {backend!r}")
+        if native not in NATIVE_MODES:
+            raise ValueError(f"native must be one of {NATIVE_MODES}, got {native!r}")
+        if gemm not in GEMMS:
+            raise ValueError(f"gemm must be one of {GEMMS}, got {gemm!r}")
+        if dx_gemm not in ("bf16", "nvfp4"):
+            raise ValueError("dx_gemm must be 'bf16' or 'nvfp4'")
+        #: native: "auto" = the custom low-precision path whenever the triton backend is active (CUDA), True = force it
+        #: (also on the torch backend / CPU, for tests), False = the legacy path (fp32 weight on the torch backend,
+        #: x.dtype decode on triton) that needs an fp32 island under autocast.
+        self.native = native
+        #: forward GEMM: cublas_bf16 (exact, default) | triton_bf16 (fp4 nibbles -> bf16 tensor cores, exact) |
+        #: nvfp4_scaled_mm (cuBLASLt NVFP4; x is quantized to NVFP4 on the fly: APPROXIMATE activations).
+        self.gemm = gemm
+        #: backward dx GEMM: "bf16" exact (default) | "nvfp4" (only with gemm=nvfp4_scaled_mm; dy quantized and W^T
+        #: RE-quantized: doubly approximate, slow because W^T is rebuilt every step).
+        self.dx_gemm = dx_gemm
+        #: keep the decoded bf16 weight from forward to backward (+2 B/param transient per layer for the whole forward
+        #: pass) instead of re-decoding in backward (default: re-decode).
+        self.save_weight = bool(save_weight)
+        self.fp4_fallbacks = 0                                   # times an fp4 GEMM was unsupported and bf16 ran instead
+        if backend == "triton" and update_mode != "exact":
+            raise ValueError("the triton backend implements update_mode='exact' only")
+        self.backend = backend
+        #: triton path only: keep ONE bf16/x.dtype deployed weight between updates (+2 B/param resident). Default off.
+        self.cache_weight = bool(cache_weight) if cache_weight is not None else False
+        self.track_clip = bool(track_clip)
+        self._step = 0
         if in_features % NVFP4_BLOCK:
             raise ValueError(f"in_features must be a multiple of {NVFP4_BLOCK}")
         if update_mode not in UPDATE_MODES:
@@ -228,7 +466,10 @@ class LatentGridLinear(nn.Module):
         self.update_mode, self.init_mode = update_mode, init
         self.fmt = grid if grid is not None else get_grid(k)
         self.generator: torch.Generator | None = None           # None = global RNG (harness seeding)
-        self.last_clip_frac: torch.Tensor | None = None          # 0-dim: fraction of requests beyond the grid
+        self._lcf: torch.Tensor | None = None                    # backing of `last_clip_frac` (legacy / Function path)
+        #: forward through torch.ops.mx6.lg_linear (opaque to torch.compile, see prepare_lg_for_compile). Default off:
+        #: the autograd.Function path is the reference. Needs native_enabled(), generator=None and HAS_LG_OPS.
+        self.use_custom_op = False
         bound = 1.0 / in_features ** 0.5
         init_w = torch.empty(out_features, in_features).uniform_(-bound, bound)   # same RNG call as MXNLinear
         sb, ts, idx = self._fit(init_w)
@@ -236,10 +477,22 @@ class LatentGridLinear(nn.Module):
         self.register_buffer("_scale", sb)                       # uint8 [out, in/16] E4M3 bytes, frozen
         self.register_buffer("_tscale", ts)                      # fp32 0-dim, frozen
         self.register_buffer("v_rms", torch.full((out_features, 1), rms_eps, dtype=torch.float32))
+        self.register_buffer("_clip_buf", torch.zeros(()), persistent=False)   # ops path: fraction beyond the grid
         self._token = torch.zeros(0, requires_grad=True)
         self._pending = False
         self._weight_cache: torch.Tensor | None = None
         self._scale_cache: torch.Tensor | None = None
+
+    @property
+    def last_clip_frac(self) -> torch.Tensor | None:
+        """0-dim: fraction of update requests beyond the grid at the last update (None before it / track_clip off)."""
+        if self._lcf is None and self.use_custom_op and self.track_clip:
+            return self._clip_buf
+        return self._lcf
+
+    @last_clip_frac.setter
+    def last_clip_frac(self, v) -> None:
+        self._lcf = v
 
     def _fit(self, w: torch.Tensor):
         na = self.fmt.na
@@ -284,21 +537,52 @@ class LatentGridLinear(nn.Module):
 
     # ── views of the state ────────────────────────────────────────────────────
 
-    def _scale_full(self) -> torch.Tensor:
-        if self._scale_cache is None:
-            self._scale_cache = self.fmt.na.expand_scale(self._scale, self._tscale)
-        return self._scale_cache
+    def _use_triton(self) -> bool:
+        if self.backend == "torch":
+            return False
+        ok = self.idx.is_cuda and HAS_TRITON and self.update_mode == "exact"
+        if self.backend == "triton" and not ok:
+            raise RuntimeError("backend='triton' needs a CUDA module, Triton installed and update_mode='exact'")
+        return ok
 
-    def weight(self) -> torch.Tensor:
-        """The deployed weight: RTN_E2M1(G[idx]) * s (a function of idx only; cached until the next update)."""
-        if self._weight_cache is None:
-            T = self.fmt.tables(self.idx.device)
-            self._weight_cache = T.deploy[self.idx.long()] * self._scale_full()
-        return self._weight_cache
+    def _scale_full(self, cache: bool = True) -> torch.Tensor:
+        if self._scale_cache is not None:
+            return self._scale_cache
+        full = self.fmt.na.expand_scale(self._scale, self._tscale)
+        if cache:
+            self._scale_cache = full
+        return full
+
+    def weight(self, dtype: torch.dtype | None = None) -> torch.Tensor:
+        """The deployed weight: RTN_E2M1(G[idx]) * s (a function of idx only).
+
+        torch path: fp32, cached until the next update (resident +8 B/param with the fp32 scale cache).
+        triton path: decoded on the fly by one kernel into `dtype` (default bf16; forward passes x.dtype), NO fp32
+        scale cache; kept between updates only if cache_weight=True (+2 B/param for bf16)."""
+        if not self._use_triton():
+            if self._weight_cache is None:
+                T = self.fmt.tables(self.idx.device)
+                self._weight_cache = T.deploy[self.idx.long()] * self._scale_full()
+            return self._weight_cache
+        dt = dtype if dtype in (torch.bfloat16, torch.float16, torch.float32) else torch.bfloat16
+        c = self._weight_cache
+        if c is not None and c.dtype == dt:
+            return c
+        w = lg_decode(self.idx, self._scale, self._tscale, self.fmt.m, dt)
+        self._weight_cache = w if self.cache_weight else None
+        return w
 
     def latent_weight(self) -> torch.Tensor:
         """G[idx] * s, for analysis only (the forward never sees it)."""
-        return self.fmt.tables(self.idx.device).values[self.idx.long()] * self._scale_full()
+        return self.fmt.tables(self.idx.device).values[self.idx.long()] * self._scale_full(cache=not self._use_triton())
+
+    def resident_bytes(self) -> int:
+        """Bytes actually held between steps (state + whatever caches exist), excluding transients."""
+        n = sum(t.numel() * t.element_size() for t in (self.idx, self._scale, self._tscale, self.v_rms))
+        for c in (self._weight_cache, self._scale_cache):
+            if c is not None:
+                n += c.numel() * c.element_size()
+        return n
 
     def rung_index(self) -> torch.Tensor:
         """Deployed E2M1 rung (0..14, 7 = zero) of every weight, int64."""
@@ -325,6 +609,26 @@ class LatentGridLinear(nn.Module):
         if x.shape[-1] != self.in_features:
             raise ValueError(f"expected {self.in_features}, got {x.shape[-1]}")
         shape = x.shape
+        if self.native_enabled():
+            cdt = self._compute_dtype(x)
+            x2 = x.reshape(-1, shape[-1]).to(cdt)
+            if (self.use_custom_op and HAS_LG_OPS and self.generator is None
+                    and torch.is_grad_enabled() and self.training):
+                out = torch.ops.mx6.lg_linear(
+                    x2, self.idx, self._scale, self._tscale, self.v_rms, self._clip_buf, self._token,
+                    self.fmt.k, self.fmt.m, self.gemm, self.dx_gemm, self._use_triton(), self.update_mode,
+                    float(self.lr), float(self.rms_beta), float(self.rms_eps), float(self.weight_decay),
+                    self.track_clip)
+                return out.reshape(*shape[:-1], self.out_features)
+            if torch.is_grad_enabled() and self.training:
+                if self._pending:
+                    raise RuntimeError("LatentGridLinear forwarded twice before backward; exactly one forward per "
+                                       "backward is required (wrap measurement passes in torch.no_grad() / .eval())")
+                self._pending = True
+                out = _LGNativeFunction.apply(x2, self, self._token)
+            else:
+                out = self._gemm_fwd(x2)[0]
+            return out.reshape(*shape[:-1], self.out_features)
         if torch.is_grad_enabled() and self.training:
             if self._pending:
                 raise RuntimeError("LatentGridLinear forwarded twice before backward; exactly one forward per "
@@ -332,12 +636,87 @@ class LatentGridLinear(nn.Module):
             self._pending = True
             out = _LGFunction.apply(x.reshape(-1, shape[-1]), self, self._token)
             return out.reshape(*shape[:-1], self.out_features)
-        return x @ self.weight().t()
+        return x @ self.decode_weight(x.dtype).t()
+
+    # ── native low-precision path ─────────────────────────────────────────────
+
+    def native_enabled(self) -> bool:
+        """True if forward/backward run on the native path (`_LGNativeFunction`): `native=True`, or `native="auto"` with
+        the triton backend active. e1_quality.fp32_islands skips such layers (no fp32 island needed under autocast)."""
+        if self.native is True:
+            return True
+        if self.native is False:
+            return False
+        return self.backend != "torch" and self.idx.is_cuda and HAS_TRITON and self.update_mode == "exact"
+
+    def _compute_dtype(self, x: torch.Tensor) -> torch.dtype:
+        """Autocast dtype if autocast is on for x's device, else x.dtype (fp32 stays fp32, bf16 stays bf16)."""
+        dev = x.device.type
+        try:
+            if torch.is_autocast_enabled(dev):
+                return torch.get_autocast_dtype(dev)
+        except (TypeError, AttributeError):                       # older torch: cuda/cpu-specific getters
+            if dev == "cuda" and torch.is_autocast_enabled():
+                return torch.get_autocast_gpu_dtype()
+            if dev == "cpu" and torch.is_autocast_cpu_enabled():
+                return torch.get_autocast_cpu_dtype()
+        return x.dtype
+
+    def decode_weight(self, dtype: torch.dtype) -> torch.Tensor:
+        """Deployed weight as `dtype` [out, in]. Triton: one kernel, bf16/fp16/fp32 straight from the uint8 index (no
+        fp32 intermediate). Torch backend: the (fp32, cached) reference weight cast to dtype."""
+        if self._use_triton():
+            return self.weight(dtype)
+        w = self.weight()
+        return w if w.dtype == dtype else w.to(dtype)
+
+    def fp4_weight(self):
+        """The deployed weight as an `Fp4Weight` (nibbles from the index by one kernel, the frozen E4M3 block scales and
+        tensor scale). LOSSLESS: the deployed weight is exactly E2M1 * scale."""
+        from . import fp4_gemm as fg
+        from .lg_update_kernel import lg_pack_nibbles, pack_nibbles_cf
+        nib = lg_pack_nibbles(self.idx, self.fmt.m) if self._use_triton() else pack_nibbles_cf(self.idx, self.fmt.m)
+        return fg.Fp4Weight(nib, self._scale, self._tscale)
+
+    def _gemm_fwd(self, x: torch.Tensor):
+        """y = x W^T for x [N, in] in the compute dtype -> (y, W or None). W is the decoded weight (None for fp4 GEMMs)."""
+        dt = x.dtype
+        if self.gemm != "cublas_bf16":
+            from . import fp4_gemm as fg
+            try:
+                if not x.is_cuda:
+                    raise fg.Fp4Unsupported("fp4 GEMMs need CUDA")
+                q = self.fp4_weight()
+                be = "triton_bf16" if self.gemm == "triton_bf16" else "torch_scaled_mm"
+                return fg.fp4_matmul(x.contiguous(), q, be, dt), None
+            except fg.Fp4Unsupported:
+                self.fp4_fallbacks += 1
+        w = self.decode_weight(dt)
+        return x @ w.t(), w
+
+    def _gemm_dx(self, dy: torch.Tensor, w):
+        """dx = dy W. Exact bf16 by default; triton_bf16 forward -> the exact Triton dx kernel on the nibbles; the NVFP4
+        dx (dx_gemm="nvfp4", approximate) only when gemm=nvfp4_scaled_mm."""
+        if self.gemm != "cublas_bf16" and dy.is_cuda:
+            from . import fp4_gemm as fg
+            try:
+                if self.gemm == "triton_bf16":
+                    return fg.fp4_matmul_dx(dy.contiguous(), self.fp4_weight(), "triton_bf16", dy.dtype)
+                if self.dx_gemm == "nvfp4":
+                    return fg.fp4_matmul_dx(dy.contiguous(), self.fp4_weight(), "torch_scaled_mm", dy.dtype)
+            except fg.Fp4Unsupported:
+                self.fp4_fallbacks += 1
+        if w is None:
+            w = self.decode_weight(dy.dtype)
+        return dy @ w
 
     def apply_update_(self, grad_w: torch.Tensor) -> None:
         """In-place update of the index, called from backward. No optimizer, no momentum, no counter."""
         if grad_w.shape != self.idx.shape:
             raise ValueError(f"grad shape {tuple(grad_w.shape)} != state {tuple(self.idx.shape)}")
+        if self._use_triton():
+            self._apply_update_triton(grad_w)
+            return
         self.v_rms, g_hat = mx_update.rms_update(grad_w.detach().float(), self.v_rms, self.rms_beta, self.rms_eps)
         if self.weight_decay > 0.0:
             g_hat = g_hat + self.weight_decay * self.fmt.tables(self.idx.device).values[self.idx.long()]
@@ -345,6 +724,20 @@ class LatentGridLinear(nn.Module):
         new, over = self.fmt.move(self.idx, delta, self.generator, self.update_mode, return_clip=True)
         self.last_clip_frac = over.float().mean()
         self.idx.copy_(new.to(self.idx.dtype))
+        self._weight_cache = None
+
+    def _next_seed(self) -> int:
+        """31-bit Philox seed for this update: drawn from `generator` (or the global CPU RNG, so torch.manual_seed
+        makes runs reproducible). The per-element counter is row*cols+col, so (seed, step order) fixes the noise."""
+        gen = self.generator
+        dev = gen.device if gen is not None else "cpu"
+        return int(torch.randint(0, 2 ** 31 - 1, (1,), generator=gen, device=dev).item())
+
+    def _apply_update_triton(self, grad_w: torch.Tensor) -> None:
+        clip = lg_update_(grad_w, self.idx, self._scale, self._tscale, self.v_rms, lr=self.lr, beta=self.rms_beta,
+                          eps=self.rms_eps, weight_decay=self.weight_decay, m=self.fmt.m, seed=self._next_seed(),
+                          track_clip=self.track_clip)
+        self.last_clip_frac = (clip.sum(dtype=torch.float32) / self.idx.numel()) if clip is not None else None
         self._weight_cache = None
 
     def extra_repr(self) -> str:

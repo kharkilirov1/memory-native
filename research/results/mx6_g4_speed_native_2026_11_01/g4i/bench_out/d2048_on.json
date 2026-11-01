@@ -1,0 +1,701 @@
+{
+ "meta": {
+  "device": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+  "torch": "2.11.0+cu130",
+  "triton": "3.6.0",
+  "cuda": "13.0",
+  "batch": 8,
+  "seq": 512,
+  "layers": 16,
+  "warmup": 30,
+  "steps": 100,
+  "matmul_precision": "highest",
+  "arms": [
+   "dense_strong",
+   "lg6_fp4_h2",
+   "lg6_fp4_h2_nvfp4fwd"
+  ],
+  "widths": [
+   2048
+  ],
+  "fused": "off",
+  "headroom": 2.0,
+  "lr": 0.01,
+  "tern_lr": 0.03,
+  "adam_lr": 0.003,
+  "precision": "bf16",
+  "adam_impl": "fused",
+  "grad_checkpoint": false,
+  "preset": "d2048",
+  "sdpa": true,
+  "lg_compile": "op",
+  "params": {
+   "2048": 807538688
+  },
+  "time": "2026-11-01T04:41:57",
+  "args": {
+   "arms": "dense_strong,lg6_fp4_h2,lg6_fp4_h2_nvfp4fwd",
+   "preset": "d2048",
+   "d": "2048",
+   "batch": 8,
+   "seq": 512,
+   "layers": 16,
+   "heads": 32,
+   "precision": "bf16",
+   "adam_impl": "fused",
+   "grad_checkpoint": false,
+   "vocab": 256,
+   "warmup": 30,
+   "steps": 100,
+   "phase_steps": 20,
+   "topk": 10,
+   "no_profile": false,
+   "lr": 0.01,
+   "tern_lr": 0.03,
+   "adam_lr": 0.003,
+   "headroom": 2.0,
+   "lg_native": "auto",
+   "lg_gemm": "cublas_bf16",
+   "lg_save_weight": false,
+   "sdpa": "on",
+   "lg_compile": "op",
+   "compile": true,
+   "fused": "off",
+   "fast_pack": false,
+   "matmul_precision": "highest",
+   "device": "auto",
+   "seed": 0,
+   "out": "bench_out/d2048_on",
+   "sdpa_on": true
+  }
+ },
+ "results": [
+  {
+   "arm": "dense_strong",
+   "label": "dense_strong",
+   "variant": "compile",
+   "d": 2048,
+   "layers": 16,
+   "heads": 32,
+   "batch": 8,
+   "seq": 512,
+   "precision": "bf16",
+   "adam_impl": "fused",
+   "grad_checkpoint": false,
+   "error": null,
+   "fp32_islands": 0,
+   "n_total": 807538688,
+   "n_lin": 805306368,
+   "n_other": 2232320,
+   "bits": 96.0,
+   "state_bytes": 9663676416.0,
+   "grad_bytes": 3221225472.0,
+   "other_state_bytes": 26787840.0,
+   "state_mb": 9216.0,
+   "state_grad_mb": 12288.0,
+   "other_state_mb": 25.546875,
+   "resident_mb": 12330.7529296875,
+   "graphs": 1,
+   "graph_breaks": 0,
+   "final_loss": 5.686227798461914,
+   "finite": true,
+   "peak_mem_mb": 18551.3037109375,
+   "peak_mem_abs_mb": 18559.4287109375,
+   "ms_step": 87.03293634999909,
+   "ms_step_ev_mean": 87.03139045715332,
+   "ms_step_ev_median": 87.03112030029297,
+   "ms_step_ev_min": 86.94169616699219,
+   "tokens_per_s": 47062.64285428815,
+   "model_tflops": 228.02942918618658,
+   "instrumented": {},
+   "fwd_ms": 25.188655853271484,
+   "bwd_ms": 46.26908874511719,
+   "opt_ms": 15.54753589630127,
+   "update_ms": null,
+   "decode_ms": null,
+   "profile": {
+    "unit": "cuda_kernels",
+    "total_ms": 101.67392799999996,
+    "launches": 785,
+    "top": [
+     {
+      "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x256_32x3_tn_align8>(cutlass_80_tensoro",
+      "ms": 18.006252999999994,
+      "pct": 17.70980363815589,
+      "count": 64
+     },
+     {
+      "name": "Optimizer.step#AdamW.step",
+      "ms": 15.542023,
+      "pct": 15.286143956196918,
+      "count": 1
+     },
+     {
+      "name": "void at::native::(anonymous namespace)::multi_tensor_apply_kernel<at::native::(anonymous namespace)::FusedOpti",
+      "ms": 15.481762999999992,
+      "pct": 15.226876058137536,
+      "count": 39
+     },
+     {
+      "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_256x128_32x3_nn_align8>(cutlass_80_tensoro",
+      "ms": 13.012068000000006,
+      "pct": 12.79784135024272,
+      "count": 49
+     },
+     {
+      "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x256_32x3_nt_align8>(cutlass_80_tensoro",
+      "ms": 12.77151999999999,
+      "pct": 12.561253657869885,
+      "count": 48
+     },
+     {
+      "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_256x128_32x3_nt_align8>(cutlass_80_tensoro",
+      "ms": 4.887886000000003,
+      "pct": 4.80741336166338,
+      "count": 16
+     },
+     {
+      "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x256_32x3_nn_align8>(cutlass_80_tensoro",
+      "ms": 4.392492999999991,
+      "pct": 4.320176358289209,
+      "count": 16
+     },
+     {
+      "name": "triton_poi_fused__to_copy_12",
+      "ms": 2.168073999999993,
+      "pct": 2.1323795024423506,
+      "count": 32
+     },
+     {
+      "name": "triton_poi_fused__to_copy_t_6",
+      "ms": 2.1390769999999915,
+      "pct": 2.103859900052246,
+      "count": 32
+     },
+     {
+      "name": "triton_per_fused__to_copy_add_native_layer_norm_backward_view_6",
+      "ms": 2.129575000000001,
+      "pct": 2.094514338031675,
+      "count": 31
+     }
+    ],
+    "categories": {
+     "gemm": 55.98558999999993,
+     "other": 15.542023,
+     "elementwise": 15.485091,
+     "copy/cast": 6.974834000000022,
+     "reduce": 4.361104000000001,
+     "triton": 3.181861999999985,
+     "index/gather": 0.14342400000001201
+    }
+   },
+   "oom": false
+  },
+  {
+   "arm": "lg6_fp4_h2",
+   "label": "lg6_fp4_h2",
+   "variant": "eager",
+   "d": 2048,
+   "layers": 16,
+   "heads": 32,
+   "batch": 8,
+   "seq": 512,
+   "precision": "bf16",
+   "adam_impl": "fused",
+   "grad_checkpoint": false,
+   "error": null,
+   "lg_layers": 64,
+   "native_lg": 64,
+   "lg_gemm": "cublas_bf16",
+   "fp32_islands": 0,
+   "n_total": 807538688,
+   "n_lin": 805306368,
+   "n_other": 2232320,
+   "bits": 6.511721293131511,
+   "state_bytes": 655491328.0,
+   "grad_bytes": 67108864.0,
+   "other_state_bytes": 26787840.0,
+   "state_mb": 625.125244140625,
+   "state_grad_mb": 689.125244140625,
+   "other_state_mb": 25.546875,
+   "resident_mb": 851.8154296875,
+   "updates_per_step": 64,
+   "lg_layers_n": 64,
+   "final_loss": 5.702619552612305,
+   "finite": true,
+   "peak_mem_mb": 5608.35205078125,
+   "peak_mem_abs_mb": 5624.60205078125,
+   "ms_step": 73.0133809899985,
+   "ms_step_ev_mean": 73.01224647521973,
+   "ms_step_ev_median": 73.01331329345703,
+   "ms_step_ev_min": 72.95782470703125,
+   "tokens_per_s": 56099.305969149376,
+   "model_tflops": 271.8141596402248,
+   "instrumented": {
+    "update": 64,
+    "decode": 64
+   },
+   "fwd_ms": 23.40438461303711,
+   "bwd_ms": 50.02004814147949,
+   "opt_ms": 0.08011199906468391,
+   "update_ms": 4.2050255761481825,
+   "decode_ms": 3.4689488003961744,
+   "profile": {
+    "unit": "cuda_kernels",
+    "total_ms": 71.73132300000002,
+    "launches": 1133,
+    "top": [
+     {
+      "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x256_32x3_tn_align8>(cutlass_80_tensoro",
+      "ms": 17.789404999999984,
+      "pct": 24.80005143638572,
+      "count": 64
+     },
+     {
+      "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_256x128_32x3_nn_align8>(cutlass_80_tensoro",
+      "ms": 12.884714999999982,
+      "pct": 17.96246668976115,
+      "count": 49
+     },
+     {
+      "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x256_32x3_nt_align8>(cutlass_80_tensoro",
+      "ms": 12.663082999999988,
+      "pct": 17.653491487951484,
+      "count": 48
+     },
+     {
+      "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_256x128_32x3_nt_align8>(cutlass_80_tensoro",
+      "ms": 4.732816000000002,
+      "pct": 6.597976730472406,
+      "count": 16
+     },
+     {
+      "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x256_32x3_nn_align8>(cutlass_80_tensoro",
+      "ms": 4.298894999999989,
+      "pct": 5.993051320132473,
+      "count": 16
+     },
+     {
+      "name": "_lg_update_kernel",
+      "ms": 3.35914699999999,
+      "pct": 4.682956983799099,
+      "count": 64
+     },
+     {
+      "name": "_lg_decode_kernel",
+      "ms": 3.1957839999999806,
+      "pct": 4.4552140771193915,
+      "count": 128
+     },
+     {
+      "name": "void at::native::vectorized_elementwise_kernel<4, at::native::GeluBackwardCUDAKernelImpl(at::TensorIteratorBas",
+      "ms": 2.1098950000000114,
+      "pct": 2.9413858712741305,
+      "count": 16
+     },
+     {
+      "name": "void pytorch_flash::flash_bwd_dq_dk_dv_loop_seqk_parallel_kernel<Flash_bwd_kernel_traits<64, 64, 128, 8, 2, 4,",
+      "ms": 1.8411590000000289,
+      "pct": 2.566743401623902,
+      "count": 16
+     },
+     {
+      "name": "void at::native::(anonymous namespace)::layer_norm_grad_input_kernel_vectorized<float, float, false>(float con",
+      "ms": 1.2375760000000156,
+      "pct": 1.7252937046762895,
+      "count": 33
+     }
+    ],
+    "categories": {
+     "gemm": 55.30432199999993,
+     "other": 7.273879999999954,
+     "elementwise": 4.023053000000022,
+     "copy/cast": 3.0467610000000582,
+     "reduce": 2.049645000000023,
+     "index/gather": 0.03366200000001038
+    }
+   },
+   "oom": false
+  },
+  {
+   "arm": "lg6_fp4_h2",
+   "label": "lg6_fp4_h2+compile",
+   "variant": "compile",
+   "d": 2048,
+   "layers": 16,
+   "heads": 32,
+   "batch": 8,
+   "seq": 512,
+   "precision": "bf16",
+   "adam_impl": "fused",
+   "grad_checkpoint": false,
+   "error": null,
+   "lg_layers": 64,
+   "native_lg": 64,
+   "lg_gemm": "cublas_bf16",
+   "fp32_islands": 0,
+   "lg_compile": "op",
+   "n_total": 807538688,
+   "n_lin": 805306368,
+   "n_other": 2232320,
+   "bits": 6.511721293131511,
+   "state_bytes": 655491328.0,
+   "grad_bytes": 67108864.0,
+   "other_state_bytes": 26787840.0,
+   "state_mb": 625.125244140625,
+   "state_grad_mb": 689.125244140625,
+   "other_state_mb": 25.546875,
+   "resident_mb": 851.7841796875,
+   "graphs": 1,
+   "graph_breaks": 0,
+   "updates_per_step": 64,
+   "lg_layers_n": 64,
+   "final_loss": 5.5712480545043945,
+   "finite": true,
+   "peak_mem_mb": 5623.75390625,
+   "peak_mem_abs_mb": 5640.00390625,
+   "ms_step": 72.11597730999983,
+   "ms_step_ev_mean": 72.11498664855957,
+   "ms_step_ev_median": 72.11170959472656,
+   "ms_step_ev_min": 72.03801727294922,
+   "tokens_per_s": 56797.399865952255,
+   "model_tflops": 275.19658661737475,
+   "instrumented": {},
+   "fwd_ms": 23.43596839904785,
+   "bwd_ms": 48.62091255187988,
+   "opt_ms": 0.07977599650621414,
+   "update_ms": null,
+   "decode_ms": null,
+   "profile": {
+    "unit": "cuda_kernels",
+    "total_ms": 71.00796600000011,
+    "launches": 1067,
+    "top": [
+     {
+      "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x256_32x3_tn_align8>(cutlass_80_tensoro",
+      "ms": 17.844172000000007,
+      "pct": 25.12981712502507,
+      "count": 64
+     },
+     {
+      "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_256x128_32x3_nn_align8>(cutlass_80_tensoro",
+      "ms": 12.935784000000032,
+      "pct": 18.217370146893114,
+      "count": 49
+     },
+     {
+      "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x256_32x3_nt_align8>(cutlass_80_tensoro",
+      "ms": 12.705283999999981,
+      "pct": 17.892758680061277,
+      "count": 48
+     },
+     {
+      "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_256x128_32x3_nt_align8>(cutlass_80_tensoro",
+      "ms": 4.732399999999965,
+      "pct": 6.664604362840019,
+      "count": 16
+     },
+     {
+      "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x256_32x3_nn_align8>(cutlass_80_tensoro",
+      "ms": 4.3001679999999975,
+      "pct": 6.055895193505459,
+      "count": 16
+     },
+     {
+      "name": "_lg_update_kernel",
+      "ms": 3.359878000000037,
+      "pct": 4.731691652736584,
+      "count": 64
+     },
+     {
+      "name": "_lg_decode_kernel",
+      "ms": 3.076424000000054,
+      "pct": 4.3325054543881025,
+      "count": 128
+     },
+     {
+      "name": "triton_per_fused__to_copy_add_native_layer_norm_backward_view_4",
+      "ms": 2.1941490000000194,
+      "pct": 3.0900040144791867,
+      "count": 31
+     },
+     {
+      "name": "triton_poi_fused_gelu_gelu_backward_view_3",
+      "ms": 2.0432689999999822,
+      "pct": 2.8775208122423606,
+      "count": 16
+     },
+     {
+      "name": "void pytorch_flash::flash_bwd_dq_dk_dv_loop_seqk_parallel_kernel<Flash_bwd_kernel_traits<64, 64, 128, 8, 2, 4,",
+      "ms": 1.8549769999999952,
+      "pct": 2.6123505635973188,
+      "count": 16
+     }
+    ],
+    "categories": {
+     "gemm": 55.478135999999964,
+     "other": 6.514158000000091,
+     "reduce": 4.924560000000017,
+     "triton": 3.210984999999983,
+     "copy/cast": 0.5876170000000416,
+     "elementwise": 0.1580150000000067,
+     "index/gather": 0.13449499999999806
+    }
+   },
+   "oom": false
+  },
+  {
+   "arm": "lg6_fp4_h2_nvfp4fwd",
+   "label": "lg6_fp4_h2_nvfp4fwd",
+   "variant": "eager",
+   "d": 2048,
+   "layers": 16,
+   "heads": 32,
+   "batch": 8,
+   "seq": 512,
+   "precision": "bf16",
+   "adam_impl": "fused",
+   "grad_checkpoint": false,
+   "error": null,
+   "lg_layers": 64,
+   "native_lg": 64,
+   "lg_gemm": "nvfp4_scaled_mm",
+   "fp32_islands": 0,
+   "n_total": 807538688,
+   "n_lin": 805306368,
+   "n_other": 2232320,
+   "bits": 6.511721293131511,
+   "state_bytes": 655491328.0,
+   "grad_bytes": 67108864.0,
+   "other_state_bytes": 26787840.0,
+   "state_mb": 625.125244140625,
+   "state_grad_mb": 689.125244140625,
+   "other_state_mb": 25.546875,
+   "resident_mb": 852.8154296875,
+   "updates_per_step": 64,
+   "lg_layers_n": 64,
+   "final_loss": 5.563117027282715,
+   "finite": true,
+   "peak_mem_mb": 5609.35205078125,
+   "peak_mem_abs_mb": 5625.60205078125,
+   "ms_step": 68.34113468999931,
+   "ms_step_ev_mean": 68.3396588897705,
+   "ms_step_ev_median": 68.33251190185547,
+   "ms_step_ev_min": 68.28368377685547,
+   "tokens_per_s": 59934.620907009725,
+   "model_tflops": 290.397150798144,
+   "instrumented": {
+    "update": 64,
+    "decode": 64
+   },
+   "fwd_ms": 18.580368041992188,
+   "bwd_ms": 49.97526550292969,
+   "opt_ms": 0.07993599772453308,
+   "update_ms": 4.193284772150219,
+   "decode_ms": 1.6962896008044481,
+   "profile": {
+    "unit": "cuda_kernels",
+    "total_ms": 66.3967199999999,
+    "launches": 1789,
+    "top": [
+     {
+      "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_256x128_32x3_nn_align8>(cutlass_80_tensoro",
+      "ms": 12.899688000000005,
+      "pct": 19.428200670153622,
+      "count": 49
+     },
+     {
+      "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x256_32x3_nt_align8>(cutlass_80_tensoro",
+      "ms": 12.66003600000003,
+      "pct": 19.0672611538643,
+      "count": 48
+     },
+     {
+      "name": "cutlass3x_sm120_bstensorop_s16864gemm_block_scaled_ue4m3xe2m1_ue4m3xe2m1_f32_bf16_bf16_128x128x256_1x1x1_0_tnn",
+      "ms": 5.118671000000002,
+      "pct": 7.709222684494067,
+      "count": 64
+     },
+     {
+      "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_256x128_32x3_nt_align8>(cutlass_80_tensoro",
+      "ms": 4.72285999999999,
+      "pct": 7.11309233347671,
+      "count": 16
+     },
+     {
+      "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x256_32x3_nn_align8>(cutlass_80_tensoro",
+      "ms": 4.300332999999995,
+      "pct": 6.476725055093085,
+      "count": 16
+     },
+     {
+      "name": "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl<at::native::BinaryFunctor<c10::BFloat1",
+      "ms": 3.4210319999999848,
+      "pct": 5.152411143201034,
+      "count": 64
+     },
+     {
+      "name": "_lg_update_kernel",
+      "ms": 3.3494410000000316,
+      "pct": 5.044588045915576,
+      "count": 64
+     },
+     {
+      "name": "_quant_act_kernel",
+      "ms": 3.052585999999996,
+      "pct": 4.597495177472623,
+      "count": 64
+     },
+     {
+      "name": "void at::native::vectorized_elementwise_kernel<4, at::native::GeluBackwardCUDAKernelImpl(at::TensorIteratorBas",
+      "ms": 2.109864999999998,
+      "pct": 3.1776644990897154,
+      "count": 16
+     },
+     {
+      "name": "void pytorch_flash::flash_bwd_dq_dk_dv_loop_seqk_parallel_kernel<Flash_bwd_kernel_traits<64, 64, 128, 8, 2, 4,",
+      "ms": 1.8361019999999881,
+      "pct": 2.7653504570707574,
+      "count": 16
+     }
+    ],
+    "categories": {
+     "gemm": 42.611425,
+     "other": 9.83332899999997,
+     "elementwise": 7.627163999999955,
+     "copy/cast": 3.6123490000000382,
+     "reduce": 2.6793969999999523,
+     "index/gather": 0.033055999999994694
+    }
+   },
+   "oom": false
+  },
+  {
+   "arm": "lg6_fp4_h2_nvfp4fwd",
+   "label": "lg6_fp4_h2_nvfp4fwd+compile",
+   "variant": "compile",
+   "d": 2048,
+   "layers": 16,
+   "heads": 32,
+   "batch": 8,
+   "seq": 512,
+   "precision": "bf16",
+   "adam_impl": "fused",
+   "grad_checkpoint": false,
+   "error": null,
+   "lg_layers": 64,
+   "native_lg": 64,
+   "lg_gemm": "nvfp4_scaled_mm",
+   "fp32_islands": 0,
+   "lg_compile": "op",
+   "n_total": 807538688,
+   "n_lin": 805306368,
+   "n_other": 2232320,
+   "bits": 6.511721293131511,
+   "state_bytes": 655491328.0,
+   "grad_bytes": 67108864.0,
+   "other_state_bytes": 26787840.0,
+   "state_mb": 625.125244140625,
+   "state_grad_mb": 689.125244140625,
+   "other_state_mb": 25.546875,
+   "resident_mb": 851.7841796875,
+   "graphs": 1,
+   "graph_breaks": 0,
+   "updates_per_step": 64,
+   "lg_layers_n": 64,
+   "final_loss": null,
+   "finite": false,
+   "peak_mem_mb": 5613.83642578125,
+   "peak_mem_abs_mb": 5631.08642578125,
+   "ms_step": 68.97614865999913,
+   "ms_step_ev_mean": 68.97508041381836,
+   "ms_step_ev_median": 68.96851348876953,
+   "ms_step_ev_min": 68.92940521240234,
+   "tokens_per_s": 59382.845803557684,
+   "model_tflops": 287.72367233946767,
+   "instrumented": {},
+   "fwd_ms": 20.672319412231445,
+   "bwd_ms": 48.185007095336914,
+   "opt_ms": 0.12430400028824806,
+   "update_ms": null,
+   "decode_ms": null,
+   "profile": {
+    "unit": "cuda_kernels",
+    "total_ms": 67.13201099999982,
+    "launches": 1723,
+    "top": [
+     {
+      "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_256x128_32x3_nn_align8>(cutlass_80_tensoro",
+      "ms": 12.79807,
+      "pct": 19.06403489089584,
+      "count": 49
+     },
+     {
+      "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x256_32x3_nt_align8>(cutlass_80_tensoro",
+      "ms": 12.473975000000003,
+      "pct": 18.581262223769873,
+      "count": 48
+     },
+     {
+      "name": "cutlass3x_sm120_bstensorop_s16864gemm_block_scaled_ue4m3xe2m1_ue4m3xe2m1_f32_bf16_bf16_128x128x256_1x1x1_0_tnn",
+      "ms": 4.993193000000003,
+      "pct": 7.437871926702772,
+      "count": 64
+     },
+     {
+      "name": "_quant_act_kernel",
+      "ms": 4.716169999999997,
+      "pct": 7.025217820452317,
+      "count": 64
+     },
+     {
+      "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_256x128_32x3_nt_align8>(cutlass_80_tensoro",
+      "ms": 4.670313999999995,
+      "pct": 6.95691061601001,
+      "count": 16
+     },
+     {
+      "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x256_32x3_nn_align8>(cutlass_80_tensoro",
+      "ms": 4.247238999999998,
+      "pct": 6.326697110265338,
+      "count": 16
+     },
+     {
+      "name": "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl<at::native::BinaryFunctor<c10::BFloat1",
+      "ms": 3.473703999999999,
+      "pct": 5.174437571965494,
+      "count": 64
+     },
+     {
+      "name": "_lg_update_kernel",
+      "ms": 3.3907259999999986,
+      "pct": 5.0508333498306905,
+      "count": 64
+     },
+     {
+      "name": "triton_per_fused__to_copy_add_native_layer_norm_backward_view_4",
+      "ms": 2.2568059999999934,
+      "pct": 3.3617434758508864,
+      "count": 31
+     },
+     {
+      "name": "triton_poi_fused_gelu_gelu_backward_view_3",
+      "ms": 2.0454120000000184,
+      "pct": 3.0468504809129344,
+      "count": 16
+     }
+    ],
+    "categories": {
+     "gemm": 42.05393900000001,
+     "other": 10.763605000000025,
+     "reduce": 5.9844189999999315,
+     "elementwise": 4.0142259999999395,
+     "triton": 3.1099889999999997,
+     "copy/cast": 1.0699309999999234,
+     "index/gather": 0.1359019999999898
+    }
+   },
+   "oom": false
+  }
+ ]
+}

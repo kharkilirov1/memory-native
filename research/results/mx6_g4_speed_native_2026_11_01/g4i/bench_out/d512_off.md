@@ -1,0 +1,87 @@
+### bench_train_step -- NVIDIA RTX PRO 6000 Blackwell Server Edition | torch 2.11.0+cu130 | triton 3.6.0 | batch 32 x seq 256 | 8 layers | warmup 30 + 100 timed steps | matmul precision highest | --precision bf16 | adam fused | grad-checkpoint False | sdpa False | preset d512
+
+| arm | d | heads | total params | block-linear params | bits | ms/step | (ev median) | tok/s | model TFLOPS | vs dense_strong | vs dense | fwd | bwd | opt | update (in bwd) | decode (in fwd) | peak MB | resident MB | state MB | +grad MB | note |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| dense_strong | 512 | 8 | 25,707,520 | 25,165,824 | 96.00 | 9.24 | 9.23 | 887,017 | 136.8 | 1.00x | - | 3.19 | 5.56 | 0.50 | - | - | 2179 | 411 | 288.00 | 384.00 | compile: 1 graph(s), 0 break(s) |
+| lg6_fp4_h2 | 512 | 8 | 25,707,520 | 25,165,824 | 6.55 | 14.44 | 14.44 | 567,297 | 87.5 | 1.56x | - | 4.76 | 9.83 | 0.10 | 0.59 | 0.43 | 2039 | 35 | 19.64 | 23.64 | native bf16 lg (cublas_bf16) updates/step 32/32 |
+| lg6_fp4_h2+compile | 512 | 8 | 25,707,520 | 25,165,824 | 6.55 | 9.43 | 9.42 | 868,803 | 134.0 | 1.02x | - | 3.10 | 6.19 | 0.10 | - | - | 1851 | 35 | 19.64 | 23.64 | native bf16 lg (cublas_bf16) compile: 1 graph(s), 0 break(s), lg=op updates/step 32/32 |
+| lg6_fp4_h2_nvfp4fwd | 512 | 8 | 25,707,520 | 25,165,824 | 6.55 | 17.09 | 17.06 | 479,312 | 73.9 | 1.85x | - | 8.40 | 10.30 | 0.10 | 0.61 | 0.28 | 2040 | 36 | 19.64 | 23.64 | native bf16 lg (nvfp4_scaled_mm) updates/step 32/32 APPROX: NVFP4 activations |
+| lg6_fp4_h2_nvfp4fwd+compile | 512 | 8 | 25,707,520 | 25,165,824 | 6.55 | 13.45 | 13.43 | 609,160 | 94.0 | 1.46x | - | 6.75 | 6.61 | 0.10 | - | - | 1769 | 35 | 19.64 | 23.64 | native bf16 lg (nvfp4_scaled_mm) compile: 1 graph(s), 0 break(s), lg=op updates/step 32/32 APPROX: NVFP4 activations |
+
+ms/step = wall clock of the synchronized timed window / steps (headline); ev median = median of per-step CUDA events. fwd/bwd/opt = median of the phase steps; update = time inside apply_update_ (tern: the fused-kernel call only), decode = weight()/quantized_weight(); both are subsets of bwd / fwd. peak/resident = CUDA memory above what was allocated before the model (nan on CPU); state/+grad = analytic (bits/8 x block-linear params; +grad = resident gradient bytes), see e1_quality's docstring. model TFLOPS = 6 x total params x tok/s (attention FLOPs not counted). vs dense_strong / vs dense = ms/step ratio (<1 = faster). 'fp32 linears' = under --precision bf16 this arm's custom-autograd block linears run as fp32 islands (no tensor cores), the rest is autocast.
+
+#### dense_strong d=512: top 10 cuda_kernels of one step (total 9.08 ms in 432 launches; gemm 5.52 ms, reduce 1.61 ms, triton 0.64 ms, other 0.49 ms, elementwise 0.49 ms, copy/cast 0.27 ms)
+
+| kernel | ms | % | calls |
+|---|---|---|---|
+| `void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_256x128_32x3_nn_align8>(cutlass_80_tensoro` | 1.602 | 17.6 | 41 |
+| `void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x128_32x4_nt_align8>(cutlass_80_tensoro` | 1.022 | 11.3 | 17 |
+| `void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x256_32x3_tn_align8>(cutlass_80_tensoro` | 0.885 | 9.7 | 16 |
+| `void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_256x128_32x3_tn_align8>(cutlass_80_tensoro` | 0.828 | 9.1 | 24 |
+| `Optimizer.step#AdamW.step` | 0.494 | 5.4 | 1 |
+| `void at::native::(anonymous namespace)::multi_tensor_apply_kernel<at::native::(anonymous namespace)::FusedOpti` | 0.488 | 5.4 | 2 |
+| `void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x128_32x5_nt_align8>(cutlass_80_tensoro` | 0.487 | 5.4 | 16 |
+| `triton_per_fused__to_copy_add_native_layer_norm_backward_view_6` | 0.486 | 5.3 | 15 |
+| `triton_poi_fused__unsafe_view_gelu_gelu_backward_view_5` | 0.270 | 3.0 | 8 |
+| `triton_per_fused__softmax__softmax_backward_data__to_copy_div_masked_fill_view_9` | 0.268 | 2.9 | 7 |
+
+#### lg6_fp4_h2 d=512: top 10 cuda_kernels of one step (total 13.46 ms in 757 launches; gemm 5.52 ms, copy/cast 3.33 ms, elementwise 1.75 ms, reduce 1.72 ms, other 1.13 ms, index/gather 0.02 ms)
+
+| kernel | ms | % | calls |
+|---|---|---|---|
+| `void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_256x128_32x3_nn_align8>(cutlass_80_tensoro` | 1.599 | 11.9 | 41 |
+| `void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x128_32x4_nt_align8>(cutlass_80_tensoro` | 1.029 | 7.6 | 17 |
+| `void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x256_32x3_tn_align8>(cutlass_80_tensoro` | 0.875 | 6.5 | 16 |
+| `void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_` | 0.874 | 6.5 | 56 |
+| `void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_256x128_32x3_tn_align8>(cutlass_80_tensoro` | 0.824 | 6.1 | 24 |
+| `void (anonymous namespace)::softmax_warp_backward<float, float, float, 8, false, false>(float*, float const*, ` | 0.773 | 5.7 | 8 |
+| `void at::native::vectorized_elementwise_kernel<4, at::native::BinaryFunctor<float, float, float, at::native::b` | 0.760 | 5.6 | 8 |
+| `void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{la` | 0.669 | 5.0 | 67 |
+| `void at::native::(anonymous namespace)::GammaBetaBackwardCUDAKernelTemplate<float, float, 32u, 32u, 256u, fals` | 0.531 | 3.9 | 17 |
+| `void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x128_32x5_nt_align8>(cutlass_80_tensoro` | 0.473 | 3.5 | 16 |
+
+#### lg6_fp4_h2+compile d=512: top 10 cuda_kernels of one step (total 8.70 ms in 592 launches; gemm 5.51 ms, reduce 1.65 ms, triton 0.66 ms, other 0.55 ms, copy/cast 0.13 ms, elementwise 0.13 ms)
+
+| kernel | ms | % | calls |
+|---|---|---|---|
+| `void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_256x128_32x3_nn_align8>(cutlass_80_tensoro` | 1.605 | 18.5 | 41 |
+| `void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x128_32x4_nt_align8>(cutlass_80_tensoro` | 1.027 | 11.8 | 17 |
+| `void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x256_32x3_tn_align8>(cutlass_80_tensoro` | 0.878 | 10.1 | 16 |
+| `void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_256x128_32x3_tn_align8>(cutlass_80_tensoro` | 0.822 | 9.4 | 24 |
+| `void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x128_32x5_nt_align8>(cutlass_80_tensoro` | 0.481 | 5.5 | 16 |
+| `triton_per_fused__to_copy_add_native_layer_norm_backward_view_5` | 0.461 | 5.3 | 15 |
+| `_lg_decode_kernel` | 0.285 | 3.3 | 64 |
+| `triton_per_fused__softmax__softmax_backward_data__to_copy_div_masked_fill_view_7` | 0.272 | 3.1 | 7 |
+| `triton_poi_fused_gelu_gelu_backward_view_4` | 0.258 | 3.0 | 8 |
+| `void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x256_32x4_nt_align8>(cutlass_80_tensorop` | 0.218 | 2.5 | 8 |
+
+#### lg6_fp4_h2_nvfp4fwd d=512: top 10 cuda_kernels of one step (total 14.74 ms in 1109 launches; gemm 4.59 ms, copy/cast 3.52 ms, elementwise 2.78 ms, reduce 1.95 ms, other 1.88 ms, index/gather 0.02 ms)
+
+| kernel | ms | % | calls |
+|---|---|---|---|
+| `void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_256x128_32x3_nn_align8>(cutlass_80_tensoro` | 1.598 | 10.8 | 41 |
+| `void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x128_32x4_nt_align8>(cutlass_80_tensoro` | 1.029 | 7.0 | 17 |
+| `void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl<at::native::BinaryFunctor<c10::BFloat1` | 0.869 | 5.9 | 32 |
+| `void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_` | 0.866 | 5.9 | 56 |
+| `void at::native::vectorized_elementwise_kernel<4, at::native::BinaryFunctor<float, float, float, at::native::b` | 0.805 | 5.5 | 40 |
+| `void (anonymous namespace)::softmax_warp_backward<float, float, float, 8, false, false>(float*, float const*, ` | 0.781 | 5.3 | 8 |
+| `_quant_act_kernel` | 0.774 | 5.2 | 32 |
+| `void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{la` | 0.678 | 4.6 | 67 |
+| `cutlass3x_sm120_bstensorop_s16864gemm_block_scaled_ue4m3xe2m1_ue4m3xe2m1_f32_bf16_bf16_128x128x256_1x1x1_0_tnn` | 0.538 | 3.6 | 32 |
+| `void at::native::(anonymous namespace)::GammaBetaBackwardCUDAKernelTemplate<float, float, 32u, 32u, 256u, fals` | 0.537 | 3.6 | 17 |
+
+#### lg6_fp4_h2_nvfp4fwd+compile d=512: top 10 cuda_kernels of one step (total 9.85 ms in 944 launches; gemm 4.55 ms, reduce 1.81 ms, other 1.25 ms, elementwise 1.19 ms, triton 0.67 ms, copy/cast 0.32 ms)
+
+| kernel | ms | % | calls |
+|---|---|---|---|
+| `void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_256x128_32x3_nn_align8>(cutlass_80_tensoro` | 1.599 | 16.2 | 41 |
+| `void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x128_32x4_nt_align8>(cutlass_80_tensoro` | 1.029 | 10.4 | 17 |
+| `void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl<at::native::BinaryFunctor<c10::BFloat1` | 0.892 | 9.1 | 32 |
+| `_quant_act_kernel` | 0.781 | 7.9 | 32 |
+| `cutlass3x_sm120_bstensorop_s16864gemm_block_scaled_ue4m3xe2m1_ue4m3xe2m1_f32_bf16_bf16_128x128x256_1x1x1_0_tnn` | 0.538 | 5.5 | 32 |
+| `void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x128_32x5_nt_align8>(cutlass_80_tensoro` | 0.487 | 4.9 | 16 |
+| `triton_per_fused__to_copy_add_native_layer_norm_backward_view_5` | 0.459 | 4.7 | 15 |
+| `triton_per_fused__softmax__softmax_backward_data__to_copy_div_masked_fill_view_7` | 0.275 | 2.8 | 7 |
+| `triton_poi_fused_gelu_gelu_backward_view_4` | 0.261 | 2.6 | 8 |
+| `void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x256_32x4_nt_align8>(cutlass_80_tensorop` | 0.217 | 2.2 | 8 |
+

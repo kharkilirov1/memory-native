@@ -1,0 +1,220 @@
+bench_train_step on NVIDIA RTX PRO 6000 Blackwell Server Edition (torch 2.11.0+cu130, triton 3.6.0), arms=['dense_strong', 'dense_nobias', 'qat_fp4', 'na_fp4_c8', 'lg6_fp4_h2', 'lg8_fp4_h2', 'tern_counter'], d=[128], 2 layers, batch 8 x seq 64, warmup 10 + 30 steps
+precision=bf16 adam=fused grad_checkpoint=False preset=tiny | params: d=128: 525,568
+/usr/local/lib/python3.13/dist-packages/torch/profiler/profiler.py:224: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+  d=128  dense_strong                     1.35 ms/step     379,757 tok/s  fwd 0.51 bwd 0.71 opt 0.15 (update -)  peak 146 MB
+  d=128  dense_nobias                     2.41 ms/step     212,411 tok/s  fwd 0.82 bwd 1.19 opt 0.14 (update -)  peak 16 MB
+  d=128  dense_nobias+compile             1.34 ms/step     380,677 tok/s  fwd 0.52 bwd 0.71 opt 0.13 (update -)  peak 16 MB
+  d=128  qat_fp4                          4.98 ms/step     102,885 tok/s  fwd 3.90 bwd 1.29 opt 0.16 (update -)  peak 17 MB
+  d=128  qat_fp4+compile                  1.57 ms/step     326,287 tok/s  fwd 0.71 bwd 0.72 opt 0.15 (update -)  peak 137 MB
+  d=128  na_fp4_c8                       13.08 ms/step      39,143 tok/s  fwd 4.10 bwd 9.73 opt 0.14 (update 7.85)  peak 23 MB
+  d=128  na_fp4_c8+compile                9.48 ms/step      54,023 tok/s  fwd 2.99 bwd 7.18 opt 0.14 (update 5.23)  peak 143 MB
+  d=128  lg6_fp4_h2                       3.21 ms/step     159,545 tok/s  fwd 1.48 bwd 2.06 opt 0.13 (update 0.57)  peak 14 MB
+  d=128  lg6_fp4_h2+compile               3.17 ms/step     161,673 tok/s  fwd 1.51 bwd 2.00 opt 0.13 (update 0.54)  peak 14 MB
+  d=128  lg8_fp4_h2                       3.19 ms/step     160,438 tok/s  fwd 1.48 bwd 2.00 opt 0.13 (update 0.55)  peak 14 MB
+  d=128  lg8_fp4_h2+compile               3.16 ms/step     162,217 tok/s  fwd 1.50 bwd 1.99 opt 0.13 (update 0.54)  peak 14 MB
+  d=128  tern_counter                     6.29 ms/step      81,415 tok/s  fwd 2.69 bwd 3.83 opt 0.15 (update 0.54)  peak 13 MB
+  d=128  tern_counter+compile         FAILED: RuntimeError: no compile path for this arm (in-backward state mutation is eager-only)
+
+### bench_train_step -- NVIDIA RTX PRO 6000 Blackwell Server Edition | torch 2.11.0+cu130 | triton 3.6.0 | batch 8 x seq 64 | 2 layers | warmup 10 + 30 timed steps | matmul precision highest | --precision bf16 | adam fused | grad-checkpoint False | preset tiny
+
+| arm | d | heads | total params | block-linear params | bits | ms/step | (ev median) | tok/s | model TFLOPS | vs dense_strong | vs dense | fwd | bwd | opt | update (in bwd) | decode (in fwd) | peak MB | resident MB | state MB | +grad MB | note |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| dense_strong | 128 | 2 | 525,568 | 393,216 | 96.00 | 1.35 | 1.34 | 379,757 | 1.2 | 1.00x | 0.56x | 0.51 | 0.71 | 0.15 | - | - | 146 | 16 | 4.50 | 6.00 |  |
+| dense_nobias | 128 | 2 | 525,568 | 393,216 | 96.00 | 2.41 | 2.39 | 212,411 | 0.7 | 1.79x | 1.00x | 0.82 | 1.19 | 0.14 | - | - | 16 | 8 | 4.50 | 6.00 |  |
+| dense_nobias+compile | 128 | 2 | 525,568 | 393,216 | 96.00 | 1.34 | 1.34 | 380,677 | 1.2 | 1.00x | 0.56x | 0.52 | 0.71 | 0.13 | - | - | 16 | 8 | 4.50 | 6.00 |  |
+| qat_fp4 | 128 | 2 | 525,568 | 393,216 | 96.00 | 4.98 | 4.96 | 102,885 | 0.3 | 3.69x | 2.06x | 3.90 | 1.29 | 0.16 | - | 2.77 | 17 | 8 | 4.50 | 6.00 |  |
+| qat_fp4+compile | 128 | 2 | 525,568 | 393,216 | 96.00 | 1.57 | 1.56 | 326,287 | 1.0 | 1.16x | 0.65x | 0.71 | 0.72 | 0.15 | - | - | 137 | 8 | 4.50 | 6.00 |  |
+| na_fp4_c8 | 128 | 2 | 525,568 | 393,216 | 8.69 | 13.08 | 13.06 | 39,143 | 0.1 | 9.70x | 5.43x | 4.10 | 9.73 | 0.14 | 7.85 | 1.84 | 23 | 3 | 0.41 | 0.66 | fp32 linears |
+| na_fp4_c8+compile | 128 | 2 | 525,568 | 393,216 | 8.69 | 9.48 | 9.45 | 54,023 | 0.2 | 7.03x | 3.93x | 2.99 | 7.18 | 0.14 | 5.23 | 0.74 | 143 | 3 | 0.41 | 0.66 | fp32 linears |
+| lg6_fp4_h2 | 128 | 2 | 525,568 | 393,216 | 6.69 | 3.21 | 3.17 | 159,545 | 0.5 | 2.38x | 1.33x | 1.48 | 2.06 | 0.13 | 0.57 | 0.28 | 14 | 3 | 0.31 | 0.56 | fp32 linears |
+| lg6_fp4_h2+compile | 128 | 2 | 525,568 | 393,216 | 6.69 | 3.17 | 3.15 | 161,673 | 0.5 | 2.35x | 1.31x | 1.51 | 2.00 | 0.13 | 0.54 | 0.29 | 14 | 3 | 0.31 | 0.56 | fp32 linears |
+| lg8_fp4_h2 | 128 | 2 | 525,568 | 393,216 | 8.69 | 3.19 | 3.16 | 160,438 | 0.5 | 2.37x | 1.32x | 1.48 | 2.00 | 0.13 | 0.55 | 0.30 | 14 | 3 | 0.41 | 0.66 | fp32 linears |
+| lg8_fp4_h2+compile | 128 | 2 | 525,568 | 393,216 | 8.69 | 3.16 | 3.14 | 162,217 | 0.5 | 2.34x | 1.31x | 1.50 | 1.99 | 0.13 | 0.54 | 0.29 | 14 | 3 | 0.41 | 0.66 | fp32 linears |
+| tern_counter | 128 | 2 | 525,568 | 393,216 | 6.56 | 6.29 | 6.28 | 81,415 | 0.3 | 4.66x | 2.61x | 2.69 | 3.83 | 0.15 | 0.54 | - | 13 | 2 | 0.31 | 0.56 | fp32 linears |
+| tern_counter+compile | 128 | 2 | | | | FAILED | | | | | | | | | | | | | | RuntimeError: no compile path for this arm (in-backward state mutation is eager-only) |
+
+ms/step = wall clock of the synchronized timed window / steps (headline); ev median = median of per-step CUDA events. fwd/bwd/opt = median of the phase steps; update = time inside apply_update_ (tern: the fused-kernel call only), decode = weight()/quantized_weight(); both are subsets of bwd / fwd. peak/resident = CUDA memory above what was allocated before the model (nan on CPU); state/+grad = analytic (bits/8 x block-linear params; +grad = resident gradient bytes), see e1_quality's docstring. model TFLOPS = 6 x total params x tok/s (attention FLOPs not counted). vs dense_strong / vs dense = ms/step ratio (<1 = faster). 'fp32 linears' = under --precision bf16 this arm's custom-autograd block linears run as fp32 islands (no tensor cores), the rest is autocast.
+
+#### dense_strong d=128: top 10 cuda_kernels of one step (total 0.36 ms in 119 launches; gemm 0.13 ms, other 0.07 ms, reduce 0.06 ms, elementwise 0.05 ms, copy/cast 0.02 ms, triton 0.02 ms)
+
+| kernel | ms | % | calls |
+|---|---|---|---|
+| `Optimizer.step#AdamW.step` | 0.074 | 20.4 | 1 |
+| `void at::native::(anonymous namespace)::multi_tensor_apply_kernel<at::native::(anonymous namespace)::FusedOpti` | 0.050 | 13.9 | 1 |
+| `void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_128x2_nt_align8>(cutlass_80_wmma_te` | 0.047 | 13.0 | 9 |
+| `void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_128x2_nn_align8>(cutlass_80_wmma_te` | 0.020 | 5.6 | 5 |
+| `triton_per_fused__to_copy_native_layer_norm_backward_view_3` | 0.012 | 3.3 | 10 |
+| `void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_32x1_nt_align2>(cutlass_80_wmma_ten` | 0.009 | 2.5 | 4 |
+| `void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_16x16_128x1_nn_align8>(cutlass_80_wmma_te` | 0.008 | 2.3 | 4 |
+| `void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_128x2_tn_align8>(cutlass_80_wmma_te` | 0.008 | 2.2 | 2 |
+| `void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_16x16_128x1_tn_align8>(cutlass_80_wmma_te` | 0.008 | 2.2 | 4 |
+| `triton_per_fused__to_copy_add_native_layer_norm_backward_view_6` | 0.008 | 2.1 | 3 |
+
+#### dense_nobias d=128: top 10 cuda_kernels of one step (total 0.49 ms in 164 launches; copy/cast 0.13 ms, gemm 0.13 ms, other 0.09 ms, elementwise 0.07 ms, reduce 0.05 ms, index/gather 0.02 ms)
+
+| kernel | ms | % | calls |
+|---|---|---|---|
+| `Optimizer.step#AdamW.step` | 0.070 | 14.3 | 1 |
+| `void at::native::(anonymous namespace)::multi_tensor_apply_kernel<at::native::(anonymous namespace)::FusedOpti` | 0.051 | 10.4 | 1 |
+| `void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_128x2_nt_align8>(cutlass_80_wmma_te` | 0.047 | 9.7 | 9 |
+| `void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{la` | 0.043 | 8.8 | 19 |
+| `void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_` | 0.028 | 5.8 | 14 |
+| `void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase` | 0.024 | 4.8 | 23 |
+| `void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_128x2_nn_align8>(cutlass_80_wmma_te` | 0.021 | 4.2 | 5 |
+| `void at::native::(anonymous namespace)::GammaBetaBackwardCUDAKernelTemplate<float, float, 32u, 32u, 256u, fals` | 0.018 | 3.7 | 5 |
+| `void at::native::(anonymous namespace)::embedding_backward_feature_kernel<float, float, long>(long const*, flo` | 0.014 | 2.9 | 2 |
+| `void at::native::(anonymous namespace)::vectorized_layer_norm_kernel<float, float, false>(int, float, float co` | 0.014 | 2.9 | 5 |
+
+#### dense_nobias+compile d=128: top 10 cuda_kernels of one step (total 0.36 ms in 119 launches; gemm 0.13 ms, other 0.07 ms, reduce 0.06 ms, elementwise 0.05 ms, copy/cast 0.02 ms, triton 0.02 ms)
+
+| kernel | ms | % | calls |
+|---|---|---|---|
+| `Optimizer.step#AdamW.step` | 0.069 | 19.2 | 1 |
+| `void at::native::(anonymous namespace)::multi_tensor_apply_kernel<at::native::(anonymous namespace)::FusedOpti` | 0.051 | 14.2 | 1 |
+| `void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_128x2_nt_align8>(cutlass_80_wmma_te` | 0.047 | 13.2 | 9 |
+| `void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_128x2_nn_align8>(cutlass_80_wmma_te` | 0.020 | 5.7 | 5 |
+| `triton_per_fused__to_copy_native_layer_norm_backward_view_3` | 0.012 | 3.3 | 10 |
+| `void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_32x1_nt_align2>(cutlass_80_wmma_ten` | 0.009 | 2.5 | 4 |
+| `void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_16x16_128x1_nn_align8>(cutlass_80_wmma_te` | 0.008 | 2.3 | 4 |
+| `void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_128x2_tn_align8>(cutlass_80_wmma_te` | 0.008 | 2.2 | 2 |
+| `void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_16x16_128x1_tn_align8>(cutlass_80_wmma_te` | 0.008 | 2.2 | 4 |
+| `triton_per_fused__to_copy_add_native_layer_norm_backward_view_6` | 0.008 | 2.1 | 3 |
+
+#### qat_fp4 d=128: top 10 cuda_kernels of one step (total 0.98 ms in 462 launches; elementwise 0.31 ms, copy/cast 0.24 ms, gemm 0.13 ms, other 0.12 ms, reduce 0.11 ms, index/gather 0.07 ms)
+
+| kernel | ms | % | calls |
+|---|---|---|---|
+| `Optimizer.step#AdamW.step` | 0.097 | 10.0 | 1 |
+| `void at::native::(anonymous namespace)::multi_tensor_apply_kernel<at::native::(anonymous namespace)::FusedOpti` | 0.077 | 7.9 | 2 |
+| `void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{la` | 0.077 | 7.8 | 35 |
+| `void at::native::reduce_kernel<512, 1, at::native::ReduceOp<float, at::native::func_wrapper_t<float, at::nativ` | 0.064 | 6.5 | 16 |
+| `void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_128x2_nt_align8>(cutlass_80_wmma_te` | 0.047 | 4.8 | 9 |
+| `void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl<at::native::(anonymous namespace)::pow` | 0.033 | 3.3 | 8 |
+| `void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_` | 0.028 | 2.9 | 14 |
+| `void at::native::(anonymous namespace)::searchsorted_cuda_kernel<float, long>(long*, float const*, float const` | 0.027 | 2.7 | 16 |
+| `void at::native::index_elementwise_kernel<128, 4, at::native::gpu_index_kernel<at::native::index_kernel_impl<a` | 0.027 | 2.7 | 8 |
+| `void at::native::vectorized_elementwise_kernel<4, at::native::AUnaryFunctor<float, float, float, at::native::b` | 0.025 | 2.5 | 24 |
+
+#### qat_fp4+compile d=128: top 10 cuda_kernels of one step (total 0.45 ms in 142 launches; gemm 0.13 ms, other 0.10 ms, elementwise 0.08 ms, reduce 0.06 ms, triton 0.04 ms, copy/cast 0.03 ms)
+
+| kernel | ms | % | calls |
+|---|---|---|---|
+| `Optimizer.step#AdamW.step` | 0.099 | 21.7 | 1 |
+| `void at::native::(anonymous namespace)::multi_tensor_apply_kernel<at::native::(anonymous namespace)::FusedOpti` | 0.077 | 16.9 | 2 |
+| `void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_128x2_nt_align8>(cutlass_80_wmma_te` | 0.048 | 10.5 | 9 |
+| `void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_128x2_nn_align8>(cutlass_80_wmma_te` | 0.020 | 4.5 | 5 |
+| `triton_per_fused__to_copy_native_layer_norm_backward_view_3` | 0.012 | 2.6 | 10 |
+| `triton_per_fused___rshift____to_copy_abs_add_amax_bitwise_and_clamp_clamp_min_div_eq_mul_pow_sub_view_where_20` | 0.012 | 2.6 | 4 |
+| `void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_32x1_nt_align2>(cutlass_80_wmma_ten` | 0.009 | 2.0 | 4 |
+| `void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_16x16_128x1_nn_align8>(cutlass_80_wmma_te` | 0.008 | 1.9 | 4 |
+| `void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_128x2_tn_align8>(cutlass_80_wmma_te` | 0.008 | 1.8 | 2 |
+| `void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_16x16_128x1_tn_align8>(cutlass_80_wmma_te` | 0.008 | 1.8 | 4 |
+
+#### na_fp4_c8 d=128: top 10 cuda_kernels of one step (total 2.35 ms in 1378 launches; elementwise 1.03 ms, copy/cast 0.64 ms, index/gather 0.21 ms, gemm 0.19 ms, reduce 0.18 ms, other 0.09 ms)
+
+| kernel | ms | % | calls |
+|---|---|---|---|
+| `void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{la` | 0.175 | 7.5 | 79 |
+| `void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{la` | 0.134 | 5.7 | 72 |
+| `void at::native::index_elementwise_kernel<128, 4, at::native::gpu_index_kernel<at::native::index_kernel_impl<a` | 0.131 | 5.6 | 48 |
+| `void at::native::vectorized_elementwise_kernel<2, at::native::BUnaryFunctor<long, long, long, at::native::bina` | 0.072 | 3.1 | 32 |
+| `void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<float>, std::array<char*, 3ul> >` | 0.070 | 3.0 | 64 |
+| `Optimizer.step#AdamW.step` | 0.069 | 3.0 | 1 |
+| `void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{la` | 0.067 | 2.9 | 40 |
+| `void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl<at::native::(anonymous namespace)::pow` | 0.066 | 2.8 | 16 |
+| `void at::native::vectorized_elementwise_kernel<4, at::native::AUnaryFunctor<float, float, float, at::native::b` | 0.065 | 2.8 | 64 |
+| `void at::native::reduce_kernel<512, 1, at::native::ReduceOp<float, at::native::MeanOps<float, float, float, fl` | 0.065 | 2.8 | 16 |
+
+#### na_fp4_c8+compile d=128: top 10 cuda_kernels of one step (total 1.30 ms in 690 launches; elementwise 0.39 ms, copy/cast 0.37 ms, gemm 0.19 ms, reduce 0.17 ms, other 0.09 ms, index/gather 0.07 ms)
+
+| kernel | ms | % | calls |
+|---|---|---|---|
+| `void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{la` | 0.087 | 6.7 | 39 |
+| `Optimizer.step#AdamW.step` | 0.069 | 5.3 | 1 |
+| `void at::native::reduce_kernel<512, 1, at::native::ReduceOp<float, at::native::MeanOps<float, float, float, fl` | 0.064 | 4.9 | 16 |
+| `void at::native::reduce_kernel<512, 1, at::native::ReduceOp<long, at::native::func_wrapper_t<long, at::native:` | 0.064 | 4.9 | 24 |
+| `void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl<at::native::BinaryFunctor<long, long, ` | 0.058 | 4.4 | 16 |
+| `void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<float>, std::array<char*, 3ul> >` | 0.053 | 4.0 | 48 |
+| `void at::native::(anonymous namespace)::multi_tensor_apply_kernel<at::native::(anonymous namespace)::FusedOpti` | 0.050 | 3.9 | 1 |
+| `void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{la` | 0.047 | 3.6 | 24 |
+| `void cutlass::Kernel2<cutlass_80_simt_sgemm_64x64_8x5_tn_align1>(cutlass_80_simt_sgemm_64x64_8x5_tn_align1::Pa` | 0.044 | 3.4 | 8 |
+| `void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{la` | 0.041 | 3.2 | 24 |
+
+#### lg6_fp4_h2 d=128: top 10 cuda_kernels of one step (total 0.59 ms in 210 launches; gemm 0.19 ms, other 0.12 ms, copy/cast 0.12 ms, elementwise 0.08 ms, reduce 0.06 ms, index/gather 0.02 ms)
+
+| kernel | ms | % | calls |
+|---|---|---|---|
+| `Optimizer.step#AdamW.step` | 0.069 | 11.7 | 1 |
+| `void at::native::(anonymous namespace)::multi_tensor_apply_kernel<at::native::(anonymous namespace)::FusedOpti` | 0.051 | 8.7 | 1 |
+| `void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{la` | 0.047 | 8.0 | 23 |
+| `void cutlass::Kernel2<cutlass_80_simt_sgemm_64x64_8x5_tn_align1>(cutlass_80_simt_sgemm_64x64_8x5_tn_align1::Pa` | 0.044 | 7.6 | 8 |
+| `void cublasLt::splitKreduce_kernel<32, 16, int, float, float, float, float, false, float, float, float, true, ` | 0.030 | 5.2 | 18 |
+| `void cutlass::Kernel2<cutlass_80_simt_sgemm_128x32_8x5_nn_align1>(cutlass_80_simt_sgemm_128x32_8x5_nn_align1::` | 0.026 | 4.4 | 4 |
+| `void cutlass::Kernel2<cutlass_80_simt_sgemm_64x64_8x5_nt_align1>(cutlass_80_simt_sgemm_64x64_8x5_nt_align1::Pa` | 0.024 | 4.0 | 6 |
+| `void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_` | 0.020 | 3.4 | 10 |
+| `void cutlass::Kernel2<cutlass_80_simt_sgemm_64x64_8x5_nn_align1>(cutlass_80_simt_sgemm_64x64_8x5_nn_align1::Pa` | 0.018 | 3.1 | 4 |
+| `void at::native::(anonymous namespace)::GammaBetaBackwardCUDAKernelTemplate<float, float, 32u, 32u, 256u, fals` | 0.018 | 3.0 | 5 |
+
+#### lg6_fp4_h2+compile d=128: top 10 cuda_kernels of one step (total 0.59 ms in 210 launches; gemm 0.19 ms, other 0.12 ms, copy/cast 0.12 ms, elementwise 0.08 ms, reduce 0.06 ms, index/gather 0.02 ms)
+
+| kernel | ms | % | calls |
+|---|---|---|---|
+| `Optimizer.step#AdamW.step` | 0.068 | 11.6 | 1 |
+| `void at::native::(anonymous namespace)::multi_tensor_apply_kernel<at::native::(anonymous namespace)::FusedOpti` | 0.051 | 8.7 | 1 |
+| `void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{la` | 0.047 | 8.0 | 23 |
+| `void cutlass::Kernel2<cutlass_80_simt_sgemm_64x64_8x5_tn_align1>(cutlass_80_simt_sgemm_64x64_8x5_tn_align1::Pa` | 0.044 | 7.5 | 8 |
+| `void cublasLt::splitKreduce_kernel<32, 16, int, float, float, float, float, false, float, float, float, true, ` | 0.030 | 5.2 | 18 |
+| `void cutlass::Kernel2<cutlass_80_simt_sgemm_128x32_8x5_nn_align1>(cutlass_80_simt_sgemm_128x32_8x5_nn_align1::` | 0.026 | 4.4 | 4 |
+| `void cutlass::Kernel2<cutlass_80_simt_sgemm_64x64_8x5_nt_align1>(cutlass_80_simt_sgemm_64x64_8x5_nt_align1::Pa` | 0.024 | 4.0 | 6 |
+| `void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_` | 0.020 | 3.4 | 10 |
+| `void cutlass::Kernel2<cutlass_80_simt_sgemm_64x64_8x5_nn_align1>(cutlass_80_simt_sgemm_64x64_8x5_nn_align1::Pa` | 0.018 | 3.2 | 4 |
+| `void at::native::(anonymous namespace)::GammaBetaBackwardCUDAKernelTemplate<float, float, 32u, 32u, 256u, fals` | 0.018 | 3.0 | 5 |
+
+#### lg8_fp4_h2 d=128: top 10 cuda_kernels of one step (total 0.59 ms in 210 launches; gemm 0.19 ms, copy/cast 0.12 ms, other 0.12 ms, elementwise 0.08 ms, reduce 0.06 ms, index/gather 0.02 ms)
+
+| kernel | ms | % | calls |
+|---|---|---|---|
+| `Optimizer.step#AdamW.step` | 0.069 | 11.8 | 1 |
+| `void at::native::(anonymous namespace)::multi_tensor_apply_kernel<at::native::(anonymous namespace)::FusedOpti` | 0.051 | 8.6 | 1 |
+| `void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{la` | 0.047 | 8.0 | 23 |
+| `void cutlass::Kernel2<cutlass_80_simt_sgemm_64x64_8x5_tn_align1>(cutlass_80_simt_sgemm_64x64_8x5_tn_align1::Pa` | 0.044 | 7.5 | 8 |
+| `void cublasLt::splitKreduce_kernel<32, 16, int, float, float, float, float, false, float, float, float, true, ` | 0.030 | 5.1 | 18 |
+| `void cutlass::Kernel2<cutlass_80_simt_sgemm_128x32_8x5_nn_align1>(cutlass_80_simt_sgemm_128x32_8x5_nn_align1::` | 0.026 | 4.4 | 4 |
+| `void cutlass::Kernel2<cutlass_80_simt_sgemm_64x64_8x5_nt_align1>(cutlass_80_simt_sgemm_64x64_8x5_nt_align1::Pa` | 0.024 | 4.1 | 6 |
+| `void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_` | 0.020 | 3.4 | 10 |
+| `void cutlass::Kernel2<cutlass_80_simt_sgemm_64x64_8x5_nn_align1>(cutlass_80_simt_sgemm_64x64_8x5_nn_align1::Pa` | 0.018 | 3.1 | 4 |
+| `void at::native::(anonymous namespace)::GammaBetaBackwardCUDAKernelTemplate<float, float, 32u, 32u, 256u, fals` | 0.018 | 3.0 | 5 |
+
+#### lg8_fp4_h2+compile d=128: top 10 cuda_kernels of one step (total 0.59 ms in 210 launches; gemm 0.19 ms, copy/cast 0.12 ms, other 0.12 ms, elementwise 0.08 ms, reduce 0.06 ms, index/gather 0.02 ms)
+
+| kernel | ms | % | calls |
+|---|---|---|---|
+| `Optimizer.step#AdamW.step` | 0.069 | 11.7 | 1 |
+| `void at::native::(anonymous namespace)::multi_tensor_apply_kernel<at::native::(anonymous namespace)::FusedOpti` | 0.051 | 8.7 | 1 |
+| `void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{la` | 0.047 | 8.0 | 23 |
+| `void cutlass::Kernel2<cutlass_80_simt_sgemm_64x64_8x5_tn_align1>(cutlass_80_simt_sgemm_64x64_8x5_tn_align1::Pa` | 0.044 | 7.5 | 8 |
+| `void cublasLt::splitKreduce_kernel<32, 16, int, float, float, float, float, false, float, float, float, true, ` | 0.030 | 5.2 | 18 |
+| `void cutlass::Kernel2<cutlass_80_simt_sgemm_128x32_8x5_nn_align1>(cutlass_80_simt_sgemm_128x32_8x5_nn_align1::` | 0.026 | 4.4 | 4 |
+| `void cutlass::Kernel2<cutlass_80_simt_sgemm_64x64_8x5_nt_align1>(cutlass_80_simt_sgemm_64x64_8x5_nt_align1::Pa` | 0.024 | 4.1 | 6 |
+| `void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_` | 0.020 | 3.4 | 10 |
+| `void cutlass::Kernel2<cutlass_80_simt_sgemm_64x64_8x5_nn_align1>(cutlass_80_simt_sgemm_64x64_8x5_nn_align1::Pa` | 0.018 | 3.1 | 4 |
+| `void at::native::(anonymous namespace)::GammaBetaBackwardCUDAKernelTemplate<float, float, 32u, 32u, 256u, fals` | 0.018 | 3.0 | 5 |
+
+#### tern_counter d=128: top 10 cuda_kernels of one step (total 1.03 ms in 546 launches; copy/cast 0.42 ms, elementwise 0.25 ms, gemm 0.19 ms, other 0.11 ms, reduce 0.05 ms, index/gather 0.02 ms)
+
+| kernel | ms | % | calls |
+|---|---|---|---|
+| `void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{la` | 0.072 | 7.0 | 31 |
+| `Optimizer.step#AdamW.step` | 0.069 | 6.7 | 1 |
+| `void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<at::native::BUnaryFunctor<int, ` | 0.061 | 5.9 | 48 |
+| `void at::native::(anonymous namespace)::multi_tensor_apply_kernel<at::native::(anonymous namespace)::FusedOpti` | 0.051 | 4.9 | 1 |
+| `void at::native::vectorized_elementwise_kernel<4, at::native::AUnaryFunctor<int, int, int, at::native::Bitwise` | 0.049 | 4.7 | 48 |
+| `void cutlass::Kernel2<cutlass_80_simt_sgemm_64x64_8x5_tn_align1>(cutlass_80_simt_sgemm_64x64_8x5_tn_align1::Pa` | 0.044 | 4.3 | 8 |
+| `void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<at::native::BUnaryFunctor<int, ` | 0.042 | 4.1 | 32 |
+| `void at::native::vectorized_elementwise_kernel<4, at::native::BinaryFunctor<int, int, int, at::native::Bitwise` | 0.034 | 3.3 | 32 |
+| `void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctorOnSelf_add<short>, std::array<char*, ` | 0.032 | 3.1 | 32 |
+| `void cublasLt::splitKreduce_kernel<32, 16, int, float, float, float, float, false, float, float, float, true, ` | 0.031 | 3.0 | 18 |
+
+
+wrote bench_out/tiny.json and bench_out/tiny.md

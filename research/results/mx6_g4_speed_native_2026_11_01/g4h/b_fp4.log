@@ -1,0 +1,122 @@
+/usr/local/lib/python3.13/dist-packages/torch/autograd/graph.py:869: UserWarning: Attempting to run cuBLAS, but there was no current CUDA context! Attempting to set the primary context... (Triggered internally at /pytorch/aten/src/ATen/cuda/CublasHandlePool.cpp:335.)
+  return Variable._execution_engine.run_backward(  # Calls into the C++ engine to run the backward pass
+torch 2.11.0+cu130  triton 3.6.0  NVIDIA RTX PRO 6000 Blackwell Server Edition  sm_120
+  backend triton_bf16      AVAILABLE
+  backend dot_scaled       UNSUPPORTED: CompilationError: at 24:14:
+  backend dot_scaled_fp4   UNSUPPORTED: CompilationError: at 24:14:
+  backend torch_scaled_mm  AVAILABLE
+[N=2048 K=2048] parity triton_bf16: fwd 1.17e-06, dx 9.97e-07
+[N=2048 K=2048] parity torch_scaled_mm: fwd 5.47e-03, dx 5.74e-03
+[N=8192 K=2048] parity triton_bf16: fwd 1.23e-06, dx 5.82e-06
+[N=8192 K=2048] parity torch_scaled_mm: fwd 3.90e-03, dx 5.19e-03
+[N=2048 K=8192] parity triton_bf16: fwd 5.52e-06, dx 1.05e-06
+[N=2048 K=8192] parity torch_scaled_mm: fwd 4.88e-03, dx 5.56e-03
+[N=4096 K=4096] parity triton_bf16: fwd 2.37e-06, dx 2.95e-06
+[N=4096 K=4096] parity torch_scaled_mm: fwd 6.23e-03, dx 6.06e-03
+[N=16384 K=4096] parity triton_bf16: fwd 2.57e-06, dx 1.30e-05
+[N=16384 K=4096] parity torch_scaled_mm: fwd 7.56e-03, dx 4.37e-03
+
+     N      K      M   op          backend    mode       ms   TFLOPS vs cuBLAS
+  2048   2048   4096  fwd       dense_bf16            0.111    308.5     1.00x
+  2048   2048   4096  fwd      triton_bf16            0.454     75.8     0.25x
+  2048   2048   4096  fwd  torch_scaled_mm    gemm    0.073    472.1     1.53x
+  2048   2048   4096  fwd  torch_scaled_mm  +quant    0.599     57.4     0.19x
+  2048   2048   4096   dx       dense_bf16            0.110    313.4     1.00x
+  2048   2048   4096   dx      triton_bf16            0.356     96.7     0.31x
+  2048   2048   4096   dx  torch_scaled_mm    gemm    0.073    471.8     1.51x
+  2048   2048   4096   dx  torch_scaled_mm  +quant    0.612     56.1     0.18x
+  2048   2048  16384  fwd       dense_bf16            0.382    360.2     1.00x
+  2048   2048  16384  fwd      triton_bf16            1.416     97.1     0.27x
+  2048   2048  16384  fwd  torch_scaled_mm    gemm    0.218    631.1     1.75x
+  2048   2048  16384  fwd  torch_scaled_mm  +quant    4.135     33.2     0.09x
+  2048   2048  16384   dx       dense_bf16            0.373    368.7     1.00x
+  2048   2048  16384   dx      triton_bf16            1.115    123.3     0.33x
+  2048   2048  16384   dx  torch_scaled_mm    gemm    0.220    625.2     1.70x
+  2048   2048  16384   dx  torch_scaled_mm  +quant    4.139     33.2     0.09x
+  8192   2048   4096  fwd       dense_bf16            0.374    367.7     1.00x
+  8192   2048   4096  fwd      triton_bf16            1.394     98.6     0.27x
+  8192   2048   4096  fwd  torch_scaled_mm    gemm    0.216    635.7     1.73x
+  8192   2048   4096  fwd  torch_scaled_mm  +quant    0.754    182.2     0.50x
+  8192   2048   4096   dx       dense_bf16            0.359    382.8     1.00x
+  8192   2048   4096   dx      triton_bf16            1.011    135.9     0.36x
+  8192   2048   4096   dx  torch_scaled_mm    gemm    0.145    949.0     2.48x
+  8192   2048   4096   dx  torch_scaled_mm  +quant    4.076     33.7     0.09x
+  8192   2048  16384  fwd       dense_bf16            1.352    406.5     1.00x
+  8192   2048  16384  fwd      triton_bf16            5.131    107.1     0.26x
+  8192   2048  16384  fwd  torch_scaled_mm    gemm    0.839    655.1     1.61x
+  8192   2048  16384  fwd  torch_scaled_mm  +quant    4.754    115.6     0.28x
+  8192   2048  16384   dx       dense_bf16            1.377    399.3     1.00x
+  8192   2048  16384   dx      triton_bf16            3.436    160.0     0.40x
+  8192   2048  16384   dx  torch_scaled_mm    gemm    0.498   1103.7     2.76x
+  8192   2048  16384   dx  torch_scaled_mm  +quant   16.254     33.8     0.08x
+  2048   8192   4096  fwd       dense_bf16            0.366    375.6     1.00x
+  2048   8192   4096  fwd      triton_bf16            1.711     80.3     0.21x
+  2048   8192   4096  fwd  torch_scaled_mm    gemm    0.145    945.1     2.52x
+  2048   8192   4096  fwd  torch_scaled_mm  +quant    4.079     33.7     0.09x
+  2048   8192   4096   dx       dense_bf16            0.369    372.6     1.00x
+  2048   8192   4096   dx      triton_bf16            1.122    122.5     0.33x
+  2048   8192   4096   dx  torch_scaled_mm    gemm    0.217    634.6     1.70x
+  2048   8192   4096   dx  torch_scaled_mm  +quant    0.764    180.0     0.48x
+  2048   8192  16384  fwd       dense_bf16            1.414    388.8     1.00x
+  2048   8192  16384  fwd      triton_bf16            5.631     97.6     0.25x
+  2048   8192  16384  fwd  torch_scaled_mm    gemm    0.497   1105.8     2.84x
+  2048   8192  16384  fwd  torch_scaled_mm  +quant   16.258     33.8     0.09x
+  2048   8192  16384   dx       dense_bf16            1.357    405.2     1.00x
+  2048   8192  16384   dx      triton_bf16            3.981    138.1     0.34x
+  2048   8192  16384   dx  torch_scaled_mm    gemm    0.843    652.0     1.61x
+  2048   8192  16384   dx  torch_scaled_mm  +quant    4.762    115.4     0.28x
+  4096   4096   4096  fwd       dense_bf16            0.361    380.4     1.00x
+  4096   4096   4096  fwd      triton_bf16            1.388     99.1     0.26x
+  4096   4096   4096  fwd  torch_scaled_mm    gemm    0.170    807.5     2.12x
+  4096   4096   4096  fwd  torch_scaled_mm  +quant    1.785     77.0     0.20x
+  4096   4096   4096   dx       dense_bf16            0.356    386.5     1.00x
+  4096   4096   4096   dx      triton_bf16            0.996    138.1     0.36x
+  4096   4096   4096   dx  torch_scaled_mm    gemm    0.170    808.5     2.09x
+  4096   4096   4096   dx  torch_scaled_mm  +quant    1.776     77.4     0.20x
+  4096   4096  16384  fwd       dense_bf16            1.342    409.6     1.00x
+  4096   4096  16384  fwd      triton_bf16            5.154    106.7     0.26x
+  4096   4096  16384  fwd  torch_scaled_mm    gemm    0.609    902.7     2.20x
+  4096   4096  16384  fwd  torch_scaled_mm  +quant    8.472     64.9     0.16x
+  4096   4096  16384   dx       dense_bf16            1.308    420.2     1.00x
+  4096   4096  16384   dx      triton_bf16            3.622    151.8     0.36x
+  4096   4096  16384   dx  torch_scaled_mm    gemm    0.614    896.0     2.13x
+  4096   4096  16384   dx  torch_scaled_mm  +quant    8.479     64.8     0.15x
+ 16384   4096   4096  fwd       dense_bf16            1.322    416.0     1.00x
+ 16384   4096   4096  fwd      triton_bf16            5.189    106.0     0.25x
+ 16384   4096   4096  fwd  torch_scaled_mm    gemm    0.623    882.1     2.12x
+ 16384   4096   4096  fwd  torch_scaled_mm  +quant    2.230    246.5     0.59x
+ 16384   4096   4096   dx       dense_bf16            1.326    414.5     1.00x
+ 16384   4096   4096   dx      triton_bf16            3.193    172.2     0.42x
+ 16384   4096   4096   dx  torch_scaled_mm    gemm    0.466   1180.8     2.85x
+ 16384   4096   4096   dx  torch_scaled_mm  +quant    8.338     65.9     0.16x
+ 16384   4096  16384  fwd       dense_bf16            5.667    388.1     1.00x
+ 16384   4096  16384  fwd      triton_bf16           20.515    107.2     0.28x
+ 16384   4096  16384  fwd  torch_scaled_mm    gemm    2.383    922.7     2.38x
+ 16384   4096  16384  fwd  torch_scaled_mm  +quant   10.241    214.7     0.55x
+ 16384   4096  16384   dx       dense_bf16            5.556    395.8     1.00x
+ 16384   4096  16384   dx      triton_bf16           12.724    172.8     0.44x
+ 16384   4096  16384   dx  torch_scaled_mm    gemm    1.817   1210.0     3.06x
+ 16384   4096  16384   dx  torch_scaled_mm  +quant   33.514     65.6     0.17x
+last autotune winner fwd: BLOCK_M: 128, BLOCK_N: 256, BLOCK_K: 64, num_warps: 8, num_ctas: 1, num_stages: 3, maxnreg: None
+last autotune winner dx: BLOCK_M: 128, BLOCK_N: 64, BLOCK_K: 128, num_warps: 4, num_ctas: 1, num_stages: 3, maxnreg: None
+
+=== end-to-end layer step (fwd + bwd + weight update), M=16384 ===
+     N      K variant                                            step ms    fwd ms  vs nn.Linear fp32-master
+  2048   2048 nn.Linear autocast(fp32 master)+fusedAdamW           1.236     0.411                     1.00x
+  2048   2048 nn.Linear bf16 weights+fusedAdamW                    1.180     0.390                     0.95x
+  2048   2048 LatentGridLinear native gemm=cublas_bf16             1.217     0.413                     0.98x
+  2048   2048    its update kernel alone / decode alone            0.047     0.017    (update ms, decode ms)
+  2048   2048 LatentGridLinear native gemm=nvfp4_scaled_mm (APPROX)     4.989     4.198                     4.04x
+  2048   2048    its update kernel alone / decode alone            0.047     0.017    (update ms, decode ms)
+  8192   2048 nn.Linear autocast(fp32 master)+fusedAdamW           4.651     1.432                     1.00x
+  8192   2048 nn.Linear bf16 weights+fusedAdamW                    4.446     1.408                     0.96x
+  8192   2048 LatentGridLinear native gemm=cublas_bf16             4.266     1.483                     0.92x
+  8192   2048    its update kernel alone / decode alone            0.099     0.031    (update ms, decode ms)
+  8192   2048 LatentGridLinear native gemm=nvfp4_scaled_mm (APPROX)     7.657     4.819                     1.65x
+  8192   2048    its update kernel alone / decode alone            0.099     0.030    (update ms, decode ms)
+  2048   8192 nn.Linear autocast(fp32 master)+fusedAdamW           4.687     1.473                     1.00x
+  2048   8192 nn.Linear bf16 weights+fusedAdamW                    4.503     1.471                     0.96x
+  2048   8192 LatentGridLinear native gemm=cublas_bf16             4.271     1.523                     0.91x
+  2048   8192    its update kernel alone / decode alone            0.096     0.031    (update ms, decode ms)
+  2048   8192 LatentGridLinear native gemm=nvfp4_scaled_mm (APPROX)    19.126    16.311                     4.08x
+  2048   8192    its update kernel alone / decode alone            0.096     0.031    (update ms, decode ms)

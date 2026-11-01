@@ -1,0 +1,40 @@
+            val_ids = ids
+        cuda = _cuda_mem()
+        base_mem, peak = 0, 0
+        if cuda:                       # per-run peak: what is allocated now (corpus tensors, ...) is the baseline
+            torch.cuda.synchronize()
+            torch.cuda.reset_peak_memory_stats()
+            base_mem = torch.cuda.memory_allocated()
+        torch.manual_seed(seed)
+        model, opt = build_model_opt(arm, vocab, d, lr, adam_lr, blocks, heads)
+        if precision != "fp32":
+            fp32_islands(model)
+        bits = measured_bits(model, arm)
+        want = expected_bits(model, arm)
+        if abs(bits - want) > 0.02:
+            raise AssertionError(f"{arm}: measured {bits:.3f} bits != expected {want:.3f}")
+        mem = memory_accounting(model, arm, bits)
+        model.train()
+        t0 = time.time()
+        clips = []
+        # One schedule shape for everything: counter lr and every AdamW group (dense arm: all
+        # weights; quantized arms: embeddings / LN / head; qat arms: + the latent linear weights).
+        prev = snapshot_values(model)
+        tele_bytes = sum(t.numel() * t.element_size() for t, _ in prev)   # flip/edge snapshot: telemetry, not training memory
+        if cuda:                         # the training window starts here (the snapshot above used int64 temporaries)
+            torch.cuda.reset_peak_memory_stats()
+        curve = []                       # (step, val, lr, flip_rate, edge, clip) per eval
+        for step in range(steps):
+            cur_lr = sched_lr(sched, lr, step, steps, warmup_frac, lr_min_frac)
+            set_counter_lr(model, cur_lr, scale_frac=(cur_lr / lr if lr > 0 else 0.0))
+            for g in opt.param_groups:
+                g["lr"] = sched_lr(sched, g["base_lr"], step, steps, warmup_frac, lr_min_frac)
+            idx = torch.randint(0, len(ids) - seq - 1, (batch,), device=DEV)
+>           x = ids[idx.unsqueeze(1) + torch.arange(seq, device=DEV)]
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           RuntimeError: indices should be either on cpu or on the same device as the indexed tensor (cpu)
+
+probes/e1_quality.py:926: RuntimeError
+=========================== short test summary info ============================
+FAILED tests/test_latent_grid.py::test_wrapper_telemetry_flip_edge_hist_and_a_short_run
+1 failed, 118 passed, 18 skipped in 164.34s (0:02:44)

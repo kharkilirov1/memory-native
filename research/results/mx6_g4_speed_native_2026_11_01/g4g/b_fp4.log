@@ -1,0 +1,20 @@
+torch 2.11.0+cu130  triton 3.6.0  NVIDIA RTX PRO 6000 Blackwell Server Edition  sm_120
+  backend triton_bf16      AVAILABLE
+  backend dot_scaled       UNSUPPORTED: CompilationError: at 24:14:
+  backend dot_scaled_fp4   UNSUPPORTED: CompilationError: at 24:14:
+  backend torch_scaled_mm  AVAILABLE
+[N=2048 K=2048] triton_bf16: runtime failure at this shape: ValueError: Pointer argument (at 1) cannot be accessed from Triton (cpu tensor?)
+[N=2048 K=2048] torch_scaled_mm: runtime failure at this shape: Fp4Unsupported: torch_scaled_mm: needs CUDA
+Traceback (most recent call last):
+  File "/content/mx/mxfp4-native/probes/bench_fp4_gemm.py", line 168, in <module>
+    sys.exit(main())
+             ~~~~^^
+  File "/content/mx/mxfp4-native/probes/bench_fp4_gemm.py", line 134, in main
+    base = timeit(dense_fn, args.iters, args.warmup)
+  File "/content/mx/mxfp4-native/probes/bench_fp4_gemm.py", line 41, in timeit
+    fn()
+    ~~^^
+  File "/content/mx/mxfp4-native/probes/bench_fp4_gemm.py", line 128, in <lambda>
+    ops = [("fwd", lambda: torch.matmul(x, wd.t()), x, qx,
+                           ~~~~~~~~~~~~^^^^^^^^^^^
+RuntimeError: Expected all tensors to be on the same device, but got mat2 is on cpu, different from other tensors on cuda:0 (when checking argument in method wrapper_CUDA_mm)
