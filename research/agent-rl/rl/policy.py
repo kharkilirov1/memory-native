@@ -28,6 +28,12 @@ ACTION: {"op": "open_menu", "id": <k>}
 ACTION: {"op": "close_menu", "id": <k>}
 ACTION: {"op": "done"}
 
+<k> is ALWAYS the number in square brackets of the element you act on, never a name.
+Example: the tree has `[11] textfield (SetV,Type,SetF) {focused}` and the task is to write "hi" and save:
+step 1 -> ACTION: {"op": "type", "id": 11, "text": "hi"}
+step 2 -> ACTION: {"op": "press", "keys": "ctrl+s"}
+step 3 -> ACTION: {"op": "done"}
+
 You may include brief reasoning before the ACTION line."""
 
 
