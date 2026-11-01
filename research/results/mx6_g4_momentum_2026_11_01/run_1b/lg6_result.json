@@ -1,0 +1,15 @@
+{
+ "arm": "lg6_fp4_h2",
+ "steps": 5000,
+ "batch": 128,
+ "diverged": false,
+ "val_bpb": 0.9467818847453301,
+ "final_step": 5000,
+ "train_bpb_last": 0.9637229729949034,
+ "wall_s": 9693.036455499,
+ "ms_step_median": 1923.7127220799994,
+ "compile": {
+  "kind": "lg",
+  "backend": "inductor"
+ }
+}

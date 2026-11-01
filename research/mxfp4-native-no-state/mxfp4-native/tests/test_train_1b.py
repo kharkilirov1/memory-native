@@ -173,6 +173,26 @@ def test_resume_is_bit_exact(arm, corpus, tmp_path):
     assert (tmp_path / "A" / "result.json").exists()
 
 
+@needs_ops
+@pytest.mark.parametrize("mdt", ["bf16", "fp8"])
+def test_momentum_resume_is_bit_exact(mdt, corpus, tmp_path):
+    common = ["--arm", "lg6_fp4_h2", "--steps", "8", "--eval-every", "4", "--ckpt-every", "4",
+              "--momentum", "0.9", "--momentum-dtype", mdt, "--lr", "0.03"]
+    full = []
+    T.run_train(T.build_parser().parse_args(argv(corpus, tmp_path / "A", *common)), record=full)
+    assert len(full) == 8 and np.isfinite(full).all()
+    T.run_train(T.build_parser().parse_args(argv(corpus, tmp_path / "B", *common, "--stop-after", "4")))
+    ck4 = torch.load(tmp_path / "B" / "ckpt.pt", map_location="cpu", weights_only=True)
+    assert "lg_momentum" in ck4 and any(b.float().abs().sum() > 0 for b, _ in ck4["lg_momentum"])
+    post = []
+    T.run_train(T.build_parser().parse_args(argv(corpus, tmp_path / "B", *common, "--resume")), record=post)
+    assert post == full[4:], (post, full[4:])
+    bad = argv(corpus, tmp_path / "B", "--arm", "lg6_fp4_h2", "--steps", "8", "--eval-every", "4", "--ckpt-every", "4",
+               "--lr", "0.03", "--resume")                       # momentum dropped -> refused
+    with pytest.raises(ValueError, match="momentum"):
+        T.run_train(T.build_parser().parse_args(bad))
+
+
 def test_resume_rejects_changed_settings(corpus, tmp_path):
     common = ["--arm", "dense", "--steps", "4", "--ckpt-every", "2", "--eval-every", "100"]
     T.run_train(T.build_parser().parse_args(argv(corpus, tmp_path / "A", *common, "--stop-after", "2")))

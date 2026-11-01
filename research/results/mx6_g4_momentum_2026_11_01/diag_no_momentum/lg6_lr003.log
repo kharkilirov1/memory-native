@@ -1,0 +1,21 @@
+nohup: ignoring input
+lg_ab: lg6_fp4_h2 -> LatentGridLinear k=6 m=4 grid_points=57/64 headroom=2.0 init=fine gemm=cublas_bf16 bits=k+0.5+32/in+32/numel
+device=NVIDIA RTX PRO 6000 Blackwell Server Edition d=512 steps=3000 batch=128 seq=128 vocab=202 tokens=20000000 train_tokens=18000000 val_tokens=2000000 val_frac=0.1 epochs=2.73 (loss in bits/char) sched=cosine(warmup=0.02 min=0.1) lr=0.003 adam_lr=0.001 eval_every=250 scale_format=nvfp4
+data: dataset=enwik8 encoding=latin-1 (byte-level) path=/content/mx2/mxfp4-native/data/enwik8 chars=20000000 (--chars 20000000) vocab=202
+model: d=512 layers=4 heads=8 head_dim=64 mlp=4d seq=128 | params total=13,061,120 block_linears(counter layers)=12,582,912 other(emb/pos/LN/head)=478,208 | AdamW state 12 B/param (fp32 master+m+v)
+  lg6_fp4_h2        seed=0 bits=6.547 val=2.0866 train=1.9670 gap=+0.1196 best=2.0866 clip=1.31% flip%(start/mid/end)=59.11/56.93/33.08 edge=7.98% grown=0 (52s)
+      compile: kind=lg backend=inductor graphs=1 graph_breaks=0
+      weights: kurt=2.98 tail3=0.00% zero=5.8%
+      memory: params total=13,061,120 block_linears=12,582,912 | state=9.8MB (+grad 13.8MB) | peak=1463MB (+1310MB over run start)
+      curve: 250:3.712 500:3.129 750:2.859 1000:2.611 1250:2.440 1500:2.340 1750:2.273 2000:2.211 2250:2.164 2500:2.121 2750:2.102 3000:2.087
+
+arm                 bits  mean val   train     gap      sd  clip%    best  flip%e  edge%  seeds
+lg6_fp4_h2         6.547    2.0866  1.9670 +0.1196  0.0000   1.31  2.0866   33.08   7.98  [2.0866]
+
+deployed weights of the 4 block linears (pooled over rows & layers; mean over seeds): kurt = E[w^4]/E[w^2]^2 per row (Gaussian 3, uniform 1.8); tail3 = frac |w| > 3*rms_row (Gaussian 0.27%); zero = frac exactly 0
+arm                  kurt  tail3%  zero%
+lg6_fp4_h2           2.98    0.00    5.8
+
+memory per arm, MB (block linears: 12,582,912 params; formulas in the module docstring)
+arm                 bits  B/param     state     +grad    other      peak  peak-run
+lg6_fp4_h2         6.547    0.818      9.82     13.82     5.47      1463      1310

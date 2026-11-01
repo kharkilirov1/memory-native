@@ -17,8 +17,11 @@ Optimizer notes
     * lg: block linears update INSIDE backward (RMS-normalised counter step, lr = --lr, no AdamW, no momentum), so a GLOBAL grad
       clip is impossible: --clip only covers the FP params (emb/pos/LN/head, AdamW). This is an inherent asymmetry; the logged
       gnorm of lg is therefore NOT comparable with dense (it excludes the 24*4 big matrices).
-    * lg => NO gradient accumulation (each backward applies the update): the whole --batch is ONE micro-batch, hence the
-      per-block gradient checkpointing (default on for both arms; --no-grad-checkpoint to disable).
+    * lg => by default NO gradient accumulation (each backward applies the update): the whole --batch is ONE micro-batch, hence
+      the per-block gradient checkpointing (default on for both arms; --no-grad-checkpoint to disable).
+      OPT-IN accumulation (mx6/lg_accum.py): --accum N [--accum-mode buffer|latent] [--accum-dtype bf16|fp8]: --batch is then the
+      MICRO-batch, effective batch = batch*N (the data of step s is the same windows as a no-accum run with --batch batch*N).
+      buffer: ONE lg update per optimizer step on the accumulated gradient (== one big batch); latent: N updates with lr/N.
     * data: batch for step s = default_rng([seed, s]) windows => stateless, resume needs no data-RNG state.
 
 Modes
@@ -270,6 +273,22 @@ class Engine:
                 if not m.native_enabled():              # CPU / no Triton: torch backend, same op path
                     m.native = True
             prepare_lg_for_compile(model, "op")         # update lives only in the backward op => checkpoint-safe
+        #: opt-in gradient accumulation (default --accum 1 = off, nothing below runs). lg: mx6/lg_accum.set_accum (buffer or
+        #: latent); dense: plain autograd accumulation. --batch is the MICRO-batch; effective batch = batch * accum.
+        self.accum = int(getattr(args, "accum", 1))
+        self.acc_state = None
+        if self.accum > 1 and self.is_lg:
+            from mx6.lg_accum import set_accum
+            self.acc_state = set_accum(model, self.accum, getattr(args, "accum_mode", "buffer"),
+                                       getattr(args, "accum_dtype", "bf16"), loss_scaled=True)
+        #: opt-in per-weight momentum for lg (mx6/lg_accum.set_momentum): the EMA of grad_w feeds the RMS-normalised update.
+        self.momentum = float(getattr(args, "momentum", 0.0) or 0.0)
+        if self.momentum > 0.0 and self.is_lg:
+            if self.accum > 1:
+                raise ValueError("--momentum and --accum both use the per-layer lg buffer; pick one")
+            from mx6.lg_accum import set_momentum
+            self.acc_state = set_momentum(model, self.momentum, getattr(args, "momentum_dtype", "bf16"),
+                                          bool(getattr(args, "nesterov", False)))
         if args.grad_checkpoint:
             why = _bts().checkpoint_refusal(model, "compile" if args.compile else "eager", "op")
             if why:
@@ -300,6 +319,8 @@ class Engine:
             m.lr = c_lr
         for g in self.opt.param_groups:
             g["lr"] = self.sched(g["base_lr"], step)
+        if self.accum > 1:
+            return self._train_step_accum(x, y)
         with self.e1.autocast_ctx(a.precision, self.dev):
             logits = self.fwd(x)
         loss = F.cross_entropy(logits.float().reshape(-1, VOCAB), y.reshape(-1))
@@ -308,6 +329,31 @@ class Engine:
         gn = torch.nn.utils.clip_grad_norm_(self.params, a.clip) if a.clip > 0 else None
         self.opt.step()
         return loss.detach(), (gn.detach() if gn is not None else None)
+
+    def _train_step_accum(self, x, y):
+        """x, y: [batch*accum, seq] = the ONE effective batch of this optimizer step (same windows as a no-accum run with
+        --batch batch*accum); split into `accum` micro-batches. Loss of each micro-batch / accum (lg_accum convention and FP
+        params: autograd sums the grads = the big-batch mean); ONE AdamW step per call, lg buffer-mode updates once (on the last
+        micro-batch), latent mode accum times. -> (mean loss, grad_norm|None)."""
+        a, n = self.args, self.accum
+        xs, ys = x.chunk(n), y.chunk(n)
+        self.opt.zero_grad(set_to_none=True)
+        tot = torch.zeros((), device=x.device)
+        from contextlib import nullcontext
+        ctx = None
+        if self.acc_state is not None:
+            from mx6.lg_accum import lg_accumulate
+            ctx = lg_accumulate(self.model, n)
+        with (ctx if ctx is not None else nullcontext()) as acc:
+            for i in (acc.micro_batches() if acc is not None else range(n)):
+                with self.e1.autocast_ctx(a.precision, self.dev):
+                    logits = self.fwd(xs[i])
+                loss = F.cross_entropy(logits.float().reshape(-1, VOCAB), ys[i].reshape(-1))
+                (loss / n).backward()
+                tot += loss.detach() / n
+        gn = torch.nn.utils.clip_grad_norm_(self.params, a.clip) if a.clip > 0 else None
+        self.opt.step()
+        return tot, (gn.detach() if gn is not None else None)
 
     def new_optimizer(self):
         self.opt = None
@@ -362,6 +408,29 @@ def plain_args(args) -> dict:
     return {k: v for k, v in vars(args).items() if isinstance(v, (int, float, str, bool, type(None)))}
 
 
+def lg_momentum_buffers(model) -> list:
+    """CPU copies of every lg layer's momentum buffer (+ fp8 row scale), in lg_layers order; [] if momentum is off."""
+    from mx6.latent_grid import lg_layers
+    out = []
+    for m in lg_layers(model):
+        st = getattr(m, "_acc", None)
+        if st is None or st.mode != "ema":
+            return []
+        out.append([m._acc_buf.detach().cpu(), m._acc_scale.detach().cpu()])
+    return out
+
+
+def load_lg_momentum_buffers(model, bufs) -> None:
+    from mx6.latent_grid import lg_layers
+    layers = list(lg_layers(model))
+    if len(layers) != len(bufs):
+        raise ValueError(f"momentum buffers: ckpt has {len(bufs)} layers, model {len(layers)}")
+    for m, (b, sc) in zip(layers, bufs):
+        m._acc_buf.copy_(b.to(m._acc_buf.device))
+        if sc.numel():
+            m._acc_scale.copy_(sc.to(m._acc_scale.device))
+
+
 def save_ckpt(path: Path, eng: Engine, step: int, args) -> float:
     """Atomic: write <path>.tmp, fsync, os.replace. Holds model (incl. lg idx/v_rms/scale buffers), AdamW state, RNG states."""
     t0 = time.time()
@@ -370,6 +439,9 @@ def save_ckpt(path: Path, eng: Engine, step: int, args) -> float:
            "data": {"seed": args.seed, "scheme": "default_rng([seed, 0xDA7A, step])"}}
     if torch.cuda.is_available():
         obj["rng_cuda"] = torch.cuda.get_rng_state_all()
+    mom = lg_momentum_buffers(eng.model)
+    if mom:
+        obj["lg_momentum"] = mom
     tmp = path.with_name(path.name + ".tmp")
     with open(tmp, "wb") as f:
         torch.save(obj, f)
@@ -383,9 +455,20 @@ def load_ckpt(path: Path, eng: Engine, args) -> int:
     ck = torch.load(path, map_location="cpu", weights_only=True)
     old = ck["args"]
     bad = [f"{k}: ckpt={old.get(k)!r} now={getattr(args, k)!r}" for k in CKPT_KEYS if old.get(k) != getattr(args, k)]
+    # accumulation keys: absent in older checkpoints (= 1 / buffer / bf16); mode / dtype only matter when accum > 1
+    if int(old.get("accum", 1)) != int(getattr(args, "accum", 1)):
+        bad.append(f"accum: ckpt={old.get('accum', 1)!r} now={getattr(args, 'accum', 1)!r}")
+    elif int(getattr(args, "accum", 1)) > 1:
+        bad += [f"{k}: ckpt={old.get(k, d)!r} now={getattr(args, k, d)!r}"
+                for k, d in (("accum_mode", "buffer"), ("accum_dtype", "bf16")) if old.get(k, d) != getattr(args, k, d)]
+    for k, d in (("momentum", 0.0), ("momentum_dtype", "bf16"), ("nesterov", False)):
+        if old.get(k, d) != getattr(args, k, d):
+            bad.append(f"{k}: ckpt={old.get(k, d)!r} now={getattr(args, k, d)!r}")
     if bad:
         raise ValueError("--resume with different settings: " + "; ".join(bad))
     eng.model.load_state_dict(ck["model"])
+    if "lg_momentum" in ck:
+        load_lg_momentum_buffers(eng.model, ck["lg_momentum"])
     eng.opt.load_state_dict(ck["opt"])
     torch.set_rng_state(ck["rng_cpu"].cpu())
     if "rng_cuda" in ck and torch.cuda.is_available():
@@ -433,11 +516,19 @@ def run_train(args, record: list | None = None) -> dict:
             log.line(f"--resume: no {ck_path}, starting from step 0")
     end = args.steps if not args.stop_after else min(args.steps, args.stop_after)
     pc = e1.analytic_params(args.d, args.layers, VOCAB)
-    tok_step = args.batch * args.seq
+    tok_step = args.batch * eng.accum * args.seq
+    if eng.accum > 1:
+        from mx6.lg_accum import accum_resident_bytes
+        acc_desc = (f"batch={args.batch} x accum={eng.accum} = effective batch {args.batch * eng.accum} "
+                    f"(accum_mode={args.accum_mode if eng.is_lg else 'plain autograd (dense)'}"
+                    + (f", accum_dtype={args.accum_dtype}, buffer {accum_resident_bytes(eng.model) / 2 ** 20:.0f} MiB"
+                       if eng.is_lg and args.accum_mode == "buffer" else "") + ")")
+    else:
+        acc_desc = f"batch={args.batch} (one micro-batch, no accumulation)"
     log.line(f"arm={args.arm} ({eng.base}) device={dev} torch={torch.__version__} "
              f"{torch.cuda.get_device_name(0) if cuda_ok(dev) else 'cpu'}")
     log.line(f"model d={args.d} layers={args.layers} heads={args.heads} seq={args.seq} params={pc['total']:,} "
-             f"| batch={args.batch} (one micro-batch, no accumulation) tokens/step={tok_step} steps={args.steps} "
+             f"| {acc_desc} tokens/step={tok_step} steps={args.steps} "
              f"tokens={tok_step * args.steps:,} epochs={tok_step * args.steps / len(tr):.3f} "
              f"train_bytes={len(tr):,} val_bytes={len(va):,}")
     log.line(f"optim: adam_lr={args.adam_lr:g} lr(counter)={args.lr:g} wd={args.weight_decay:g} clip={args.clip:g} "
@@ -455,7 +546,7 @@ def run_train(args, record: list | None = None) -> dict:
     result = {"arm": args.arm, "steps": args.steps, "batch": args.batch, "diverged": False}
     try:
         for step in range(start, end):
-            x, y = get_batch(tr, args.seed, step, args.batch, args.seq, dev)
+            x, y = get_batch(tr, args.seed, step, args.batch * eng.accum, args.seq, dev)   # accum>1: the SAME windows as --batch B*accum
             loss, gn = eng.train_step(x, y, step)
             if record is not None:
                 record.append(float(loss))
@@ -560,7 +651,7 @@ def run_probe_batch(args) -> dict:
                 g = torch.Generator().manual_seed(0)
                 times = []
                 for i in range(max(args.probe_n, 2)):
-                    t = torch.randint(0, VOCAB, (B, args.seq + 1), generator=g)
+                    t = torch.randint(0, VOCAB, (B * eng.accum, args.seq + 1), generator=g)
                     x, y = t[:, :-1].contiguous().to(dev), t[:, 1:].contiguous().to(dev)
                     _sync(dev)
                     t0 = time.perf_counter()
@@ -628,7 +719,7 @@ def run_lr_probe(args) -> dict:
         _sync(dev)
         t0 = time.perf_counter()
         for step in range(args.probe_steps):
-            x, y = get_batch(tr, args.seed, step, args.batch, args.seq, dev)
+            x, y = get_batch(tr, args.seed, step, args.batch * eng.accum, args.seq, dev)
             loss, _ = eng.train_step(x, y, step)
             losses.append(loss)
         _sync(dev)
@@ -677,6 +768,19 @@ def build_parser():
     ap.add_argument("--seq", type=int, default=512)
     ap.add_argument("--batch", type=int, default=128)
     ap.add_argument("--steps", type=int, default=5000)
+    ap.add_argument("--accum", type=int, default=1,
+                    help="gradient accumulation: N micro-batches of --batch per OPTIMIZER step (effective batch = batch*N); "
+                         "1 = off (default, unchanged behaviour). lg arms need --accum-mode; dense = plain autograd accumulation")
+    ap.add_argument("--accum-mode", default="buffer", choices=["buffer", "latent"],
+                    help="lg only. buffer: per-layer grad buffer, ONE update per optimizer step (== a big batch); latent: no "
+                         "buffer, every micro-batch updates with lr/N and beta^(1/N) (see mx6/lg_accum.py)")
+    ap.add_argument("--accum-dtype", default="bf16", choices=["bf16", "fp8"],
+                    help="lg buffer mode: bf16 (+2 B/param) or fp8 e4m3 with per-row scale + stochastic rounding (+~1 B/param)")
+    ap.add_argument("--momentum", type=float, default=0.0,
+                    help="lg only: per-weight momentum mu (EMA of grad fed to the update), 0 = off. d512 best: 0.9 with ~3x lr")
+    ap.add_argument("--momentum-dtype", default="bf16", choices=["bf16", "fp8"],
+                    help="lg momentum buffer: bf16 (+2 B/param) or fp8 e4m3 + row scale + SR (+~1 B/param)")
+    ap.add_argument("--nesterov", action="store_true", help="lg momentum: nesterov direction")
     ap.add_argument("--warmup-frac", type=float, default=0.02)
     ap.add_argument("--lr-min-frac", type=float, default=0.1)
     ap.add_argument("--adam-lr", type=float, default=6e-4, help="AdamW lr: dense weights AND lg's emb/pos/LN/head")
