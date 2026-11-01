@@ -179,8 +179,9 @@ def main() -> None:
         for step in range(args.steps):
             t0 = time.time()
             eps = []
-            for _ in range(args.B):
-                kind, seed = rng.choice(args.kinds), rng.randrange(10 ** 6)
+            for b in range(args.B):
+                # round-robin over kinds so every kind shows up (random choice repeated one kind)
+                kind, seed = args.kinds[(step * args.B + b) % len(args.kinds)], rng.randrange(10 ** 6)
                 eps += run_group(session, policy, kind, seed, args.G, args.max_turns)
             t_roll = time.time() - t0
             turns = []
