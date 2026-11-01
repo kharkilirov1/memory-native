@@ -82,6 +82,7 @@ weights on an outermost rung) and clip%.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import math
 import shutil
 import sys
@@ -91,6 +92,7 @@ import zipfile
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -125,6 +127,7 @@ CLIP_FRAC = 0.0
 # Set from --scale-format / --headroom-mode / --headroom / --scale-growth / --growth-tau.
 SCALE_FORMAT = "e8m0"
 HEADROOM_MODE = "absolute"
+SDPA = False             # True (--sdpa / bench_train_step): Block attention = F.scaled_dot_product_attention(is_causal=True)
 HEADROOM = None          # None -> MXNLinear default (1.5; ladder mode: h = 1.0)
 SCALE_GROWTH = "off"
 GROWTH_TAU = 1.0 / 16
@@ -529,7 +532,12 @@ class Block(nn.Module):
         b, t, _ = x.shape
         h = self.ln1(x)
         q, k, v = self.qkv(h).chunk(3, dim=-1)
-        if self.heads == 1:          # the legacy single head (bit-identical to the probe before --heads existed)
+        if SDPA:                     # --sdpa: F.scaled_dot_product_attention (flash / mem-efficient), same maths as below
+            hd = self.d // self.heads
+            q, k, v = (z.reshape(b, t, self.heads, hd).transpose(1, 2) for z in (q, k, v))
+            y = F.scaled_dot_product_attention(q, k, v, is_causal=True)      # scale = 1/sqrt(hd) (= 1/sqrt(d) at 1 head)
+            y = y.transpose(1, 2).reshape(b, t, self.d)
+        elif self.heads == 1:          # the legacy single head (bit-identical to the probe before --heads existed)
             att = (q @ k.transpose(-2, -1)) / math.sqrt(self.d)
             mask = torch.triu(torch.ones(t, t, dtype=torch.bool, device=x.device), diagonal=1)
             att = att.masked_fill(mask, float("-inf")).softmax(dim=-1)
@@ -610,6 +618,47 @@ ADAMW_STATE_BYTES = ADAM_STATE_BITS / 8.0       # 12 B/param: fp32 master + Adam
 def block_linears(model: nn.Module) -> list:
     """The 4 linears (qkv, proj, fc, out) of every block, in order = the "counter layers" of the quantised arms."""
     return [lin for blk in model.blocks for lin in (blk.qkv, blk.proj, blk.fc, blk.out)]
+
+
+def autocast_ctx(precision: str = "fp32", device: str | None = None):
+    """--precision bf16: torch.autocast(bfloat16) around the model FORWARD (the weights stay fp32 masters; backward runs
+    outside it, autograd replays the forward casts). fp32 (default): a no-op context = the old behaviour."""
+    if precision == "fp32":
+        return contextlib.nullcontext()
+    if precision != "bf16":
+        raise ValueError(f"precision must be fp32 or bf16, got {precision!r}")
+    return torch.autocast(device_type=device or DEV, dtype=torch.bfloat16)
+
+
+def fp32_islands(model: nn.Module) -> int:
+    """bf16 support for the CUSTOM-autograd block linears (mx6 / latent-grid / tern / dense_rms: x @ W^T lives inside a
+    torch.autograd.Function whose backward runs OUTSIDE autocast -> bf16 grad_out vs fp32 saved x = dtype mismatch).
+    Each such linear's forward becomes: autocast OFF, input cast to fp32, fp32 output (instance attribute; the module
+    and its apply_update_ / weight() are untouched). Consequence: the counter arms' OWN matmuls stay fp32 (no tensor
+    cores) while attention / LN / head follow autocast; nn.Linear / QATLinear arms are plain autocast. Exception:
+    LatentGridLinear layers on the native path (`native_enabled()`, i.e. triton backend on CUDA) run bf16 end to end
+    (bf16 decode + cuBLAS GEMMs + bf16 grad into the fused update) and are NOT islands. Returns #islands."""
+    n = 0
+    for lin in block_linears(model):
+        if isinstance(lin, nn.Linear) or "forward" in lin.__dict__:
+            continue
+        native = getattr(lin, "native_enabled", None)
+        if callable(native) and native():        # LatentGridLinear native path: casts x to the autocast dtype itself
+            continue
+
+        def fwd(x, _orig=lin.forward):
+            with torch.autocast(device_type=x.device.type, enabled=False):
+                return _orig(x.float())
+        lin.forward = fwd
+        n += 1
+    return n
+
+
+def fwd_logits(model: nn.Module, x: torch.Tensor, precision: str = "fp32") -> torch.Tensor:
+    """model(x) under the precision; logits returned in fp32 for the loss."""
+    with autocast_ctx(precision, x.device.type):
+        out = model(x)
+    return out.float()
 
 
 def count_params(model: nn.Module) -> dict:
@@ -804,7 +853,7 @@ def flip_edge(prev, cur):
 
 
 @torch.no_grad()
-def evaluate(model, data, seq=128, iters=10) -> float:
+def evaluate(model, data, seq=128, iters=10, precision="fp32") -> float:
     model.eval()
     gen = torch.Generator(device="cpu").manual_seed(1234)
     total = 0.0
@@ -813,7 +862,7 @@ def evaluate(model, data, seq=128, iters=10) -> float:
         x = torch.stack([data[s:s + seq] for s in starts]).to(DEV)
         y = torch.stack([data[s + 1:s + seq + 1] for s in starts]).to(DEV)
         total += float(nn.functional.cross_entropy(
-            model(x).reshape(-1, model.head.out_features), y.reshape(-1)))
+            fwd_logits(model, x, precision).reshape(-1, model.head.out_features), y.reshape(-1)))
     model.train()
     return total / iters / math.log(2)   # bits/char
 
@@ -844,12 +893,13 @@ def run_arm(arm: str, seed: int, d: int, steps: int, batch: int, seq: int,
             ids: torch.Tensor, vocab: int, lr: float, adam_lr: float,
             sched: str = "const", warmup_frac: float = 0.02, lr_min_frac: float = 0.1,
             eval_every: int = 100, val_ids: torch.Tensor | None = None,
-            blocks: int = 2, heads: int = 1) -> dict:
+            blocks: int = 2, heads: int = 1, precision: str = "fp32") -> dict:
     """`ids` is the TRAINING tensor (batches are sampled from it only). `val_ids` is the held-out
     tensor "val" is measured on; None -> `ids` itself (legacy: val == train). Each eval also
     estimates the train loss on a fixed subset of `ids` (same fixed starts every time)."""
-    if val_ids is None:
-        val_ids = ids
+    same = val_ids is None or val_ids is ids
+    ids = ids.to(DEV)                    # data built on CPU while DEV=cuda (tests, notebooks): sample indices live on DEV
+    val_ids = ids if same else val_ids.to(DEV)
     cuda = _cuda_mem()
     base_mem, peak = 0, 0
     if cuda:                       # per-run peak: what is allocated now (corpus tensors, ...) is the baseline
@@ -858,6 +908,8 @@ def run_arm(arm: str, seed: int, d: int, steps: int, batch: int, seq: int,
         base_mem = torch.cuda.memory_allocated()
     torch.manual_seed(seed)
     model, opt = build_model_opt(arm, vocab, d, lr, adam_lr, blocks, heads)
+    if precision != "fp32":
+        fp32_islands(model)
     bits = measured_bits(model, arm)
     want = expected_bits(model, arm)
     if abs(bits - want) > 0.02:
@@ -881,7 +933,7 @@ def run_arm(arm: str, seed: int, d: int, steps: int, batch: int, seq: int,
         idx = torch.randint(0, len(ids) - seq - 1, (batch,), device=DEV)
         x = ids[idx.unsqueeze(1) + torch.arange(seq, device=DEV)]
         y = ids[idx.unsqueeze(1) + torch.arange(1, seq + 1, device=DEV)]
-        loss = nn.functional.cross_entropy(model(x).reshape(-1, vocab), y.reshape(-1))
+        loss = nn.functional.cross_entropy(fwd_logits(model, x, precision).reshape(-1, vocab), y.reshape(-1))
         opt.zero_grad(set_to_none=True)
         loss.backward()
         opt.step()
@@ -897,8 +949,8 @@ def run_arm(arm: str, seed: int, d: int, steps: int, batch: int, seq: int,
             flip, edge = flip_edge(prev, cur)       # vs the previous eval (or init)
             prev = cur
             clip_now = float(torch.stack(clips).mean()) if clips else float("nan")
-            v = evaluate(model, val_ids, seq=seq)
-            tr = v if val_ids is ids else evaluate(model, ids, seq=seq)   # train-loss estimate
+            v = evaluate(model, val_ids, seq=seq, precision=precision)
+            tr = v if val_ids is ids else evaluate(model, ids, seq=seq, precision=precision)   # train-loss estimate
             curve.append((step + 1, v, cur_lr, flip, edge, clip_now, tr))
             if cuda:
                 torch.cuda.reset_peak_memory_stats()
@@ -1002,7 +1054,15 @@ def main(argv=None) -> int:
     ap.add_argument("--heads", type=int, default=1,
                     help="attention heads (default 1 = the legacy single head, 1/sqrt(d) scaling); must divide --d; "
                          "H > 1 gives H heads of d/H scaled by 1/sqrt(d/H). e.g. d/64")
+    ap.add_argument("--precision", default="fp32", choices=["fp32", "bf16"],
+                    help="fp32 (default, unchanged) or bf16 = torch.autocast(bfloat16) for forward/backward, fp32 master "
+                         "weights; custom-autograd counter linears stay fp32 inside (fp32_islands)")
+    ap.add_argument("--sdpa", action="store_true",
+                    help="attention via F.scaled_dot_product_attention(is_causal=True) instead of the naive T x T "
+                         "softmax (same maths, different rounding; default OFF so quality numbers stay unchanged)")
     args = ap.parse_args(argv)
+    global SDPA
+    SDPA = bool(args.sdpa)
     if args.layers < 1:
         ap.error("--layers must be >= 1")
     if args.heads < 1 or args.d % args.heads:
@@ -1078,7 +1138,7 @@ def main(argv=None) -> int:
                         args.adam_lr, sched=args.sched,
                         warmup_frac=args.warmup_frac, lr_min_frac=args.lr_min_frac,
                         eval_every=args.eval_every, val_ids=val_ids,
-                        blocks=args.layers, heads=args.heads)
+                        blocks=args.layers, heads=args.heads, precision=args.precision)
             results.append(r)
             f0, f1, f2 = r["flip"]
             print(f"  {r['arm']:17} seed={r['seed']} bits={r['bits']:.3f} "

@@ -1,0 +1,16 @@
+.........ss
+[torch_scaled_mm] M=1 fwd NVFP4-activation error vs exact x: 0.1059
+..ss
+[torch_scaled_mm] M=64 fwd NVFP4-activation error vs exact x: 0.1055
+..ss
+[torch_scaled_mm] M=4096 fwd NVFP4-activation error vs exact x: 0.0881
+..ss
+[torch_scaled_mm] M=8192 fwd NVFP4-activation error vs exact x: 0.0906
+..ss
+[torch_scaled_mm] M=1 dx error vs exact W/dy (re-quantized W^T, fp4 dy): 0.1395
+..ss
+[torch_scaled_mm] M=64 dx error vs exact W/dy (re-quantized W^T, fp4 dy): 0.1417
+..ss
+[torch_scaled_mm] M=4096 dx error vs exact W/dy (re-quantized W^T, fp4 dy): 0.1332
+..s.s.ss...
+28 passed, 18 skipped in 142.20s (0:02:22)
