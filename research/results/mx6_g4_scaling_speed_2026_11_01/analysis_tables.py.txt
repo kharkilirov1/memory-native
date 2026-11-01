@@ -1,0 +1,251 @@
+import sys, json, math, statistics as st
+sys.path.insert(0, r'C:\Users\Kharki\AppData\Local\claude-ctl\g4f')
+from ana3 import parse, ms, X, OLD
+import re
+Q = X + r'\q\\'
+def P(n): return parse(Q + n + '.log')
+def mean(v): return st.mean(v)
+def sd(v): return st.stdev(v) if len(v) > 1 else float('nan')
+def f(x, n=4): return f"{x:.{n}f}"
+def sgn(x, n=4): return f"{x:+.{n}f}"
+out = []
+def o(s=''): out.append(s)
+
+arms = ['dense_nobias', 'qat_fp4', 'tern_counter', 'na_fp4_c8', 'lg6_fp4_h2']
+ds = [128, 256, 512]
+D = {}
+for a in arms:
+    for d in ds:
+        D[(a, d, 'base')] = P(f'{a}_d{d}')
+for a in ['dense_nobias', 'qat_fp4', 'lg6_fp4_h2']:
+    D[(a, 512, 'a1e-3')] = P(f'{a}_d512_a1e-3')
+D[('dense_nobias', 512, 'a5e-4')] = P('dense_nobias_d512_a5e-4')
+
+def st_(rows, key='val'):
+    v = [r[key] for r in rows]; return mean(v), sd(v), len(v)
+def num(rows, key):
+    vals = []
+    for r in rows:
+        try: vals.append(float(r[key]))
+        except Exception: pass
+    return mean(vals) if vals else float('nan')
+
+# ---- T1 raw table
+o('T1')
+o('| d | arm (adam-lr) | bits/param | val mean +- sd (n) | per-seed val | train | gap val-train | edge % | flip % (end) | kurt | clip % |')
+o('|---:|---|---:|---|---|---:|---:|---:|---:|---:|---:|')
+order = []
+for d in ds:
+    for a in arms:
+        order.append((a, d, 'base'))
+        if d == 512 and a in ('dense_nobias', 'qat_fp4', 'lg6_fp4_h2'):
+            order.append((a, d, 'a1e-3'))
+        if d == 512 and a == 'dense_nobias':
+            order.append((a, d, 'a5e-4'))
+for key in order:
+    rows = D[key]; a, d, t = key
+    m, s, n = st_(rows)
+    lab = a + ('' if t == 'base' else ' (' + t.replace('a', 'adam-lr ') + ')') + (' (adam-lr 3e-3)' if (t == 'base' and d == 512 and a in ('dense_nobias', 'qat_fp4', 'lg6_fp4_h2')) else '')
+    flag = ' DIVERGED' if (t == 'base' and d == 512 and a in ('dense_nobias', 'qat_fp4')) else ''
+    bits = rows[0]['bits']
+    vals = ', '.join(f"{r['val']:.4f}" for r in rows)
+    o(f"| {d} | {lab}{flag} | {bits:.2f} | **{m:.4f}** +- {s:.4f} ({n}) | {vals} | {num(rows,'train'):.4f} | {sgn(num(rows,'gap'))} | {num(rows,'edge'):.2f} | {num(rows,'flip'):.1f} | {num(rows,'kurt'):.2f} | {num(rows,'clip'):.2f} |")
+o()
+
+# ---- T2 gaps vs dense_nobias
+ref = {128: D[('dense_nobias', 128, 'base')], 256: D[('dense_nobias', 256, 'base')], 512: D[('dense_nobias', 512, 'a1e-3')]}
+refq = {128: D[('qat_fp4', 128, 'base')], 256: D[('qat_fp4', 256, 'base')], 512: D[('qat_fp4', 512, 'a1e-3')]}
+o('T2')
+o('| arm | d=128 | d=256 | d=512 | change 128->512 | note |')
+o('|---|---:|---:|---:|---:|---|')
+gaps = {}
+for a in ['qat_fp4', 'tern_counter', 'na_fp4_c8', 'lg6_fp4_h2']:
+    g = []
+    for d in ds:
+        rr = D[(a, d, 'base')] if not (d == 512 and a in ('qat_fp4', 'lg6_fp4_h2')) else D[(a, 512, 'a1e-3')]
+        mr, sr, _ = st_(rr); md, sdd, _ = st_(ref[d])
+        g.append((mr - md, math.sqrt(sr ** 2 + sdd ** 2)))
+    gaps[a] = g
+    note = {'qat_fp4': 'adam-lr 1e-3 at d=512 (same as the dense reference)', 'tern_counter': 'fp emb/LN/head at adam-lr 3e-3 at d=512 (confound)', 'na_fp4_c8': 'fp emb/LN/head at adam-lr 3e-3 at d=512 (confound)', 'lg6_fp4_h2': 'adam-lr 1e-3 at d=512 (same as dense)'}[a]
+    o(f"| {a} | {sgn(g[0][0])} | {sgn(g[1][0])} | {sgn(g[2][0])} | {sgn(g[2][0]-g[0][0])} | {note} |")
+# lg6 at 3e-3
+mr = st_(D[('lg6_fp4_h2', 512, 'base')])[0]
+o(f"| lg6_fp4_h2 (adam-lr 3e-3 at d=512; dense ref still a1e-3) | {sgn(gaps['lg6_fp4_h2'][0][0])} | {sgn(gaps['lg6_fp4_h2'][1][0])} | {sgn(mr-st_(ref[512])[0])} | {sgn(mr-st_(ref[512])[0]-gaps['lg6_fp4_h2'][0][0])} | unconfounded vs 3e-3 dense is impossible: dense diverged |")
+o()
+o('gap sd (sqrt(sd_a^2+sd_ref^2), n=2): ' + '; '.join(f"{a}: " + ' / '.join(f"{x[1]:.4f}" for x in g) for a, g in gaps.items()))
+# alt: gaps vs qat_fp4
+o()
+o('T2b relative gaps (arm - qat_fp4 at same d; qat d=512 = a1e-3)')
+for a in ['tern_counter', 'na_fp4_c8', 'lg6_fp4_h2']:
+    g = []
+    for d in ds:
+        rr = D[(a, d, 'base')] if not (d == 512 and a == 'lg6_fp4_h2') else D[(a, 512, 'a1e-3')]
+        g.append(st_(rr)[0] - st_(refq[d])[0])
+    o(f"{a}: " + ' / '.join(sgn(x) for x in g))
+# dense variants at 512
+o()
+o('d=512 dense: 3e-3 %.4f, 1e-3 %.4f, 5e-4 %.4f; qat: 3e-3 %.4f, 1e-3 %.4f' % (st_(D[('dense_nobias',512,'base')])[0], st_(D[('dense_nobias',512,'a1e-3')])[0], st_(D[('dense_nobias',512,'a5e-4')])[0], st_(D[('qat_fp4',512,'base')])[0], st_(D[('qat_fp4',512,'a1e-3')])[0]))
+# relative gap in % of dense val
+o('relative gap (% of dense val): ' + '; '.join(f"{a}: " + ' / '.join(f"{100*g[i][0]/st_(ref[ds[i]])[0]:.1f}%" for i in range(3)) for a, g in gaps.items()))
+# val improvement vs d per arm
+o()
+o('val change with d (128->256, 256->512):')
+for a in arms:
+    k512 = 'a1e-3' if a in ('dense_nobias', 'qat_fp4', 'lg6_fp4_h2') else 'base'
+    v = [st_(D[(a, 128, 'base')])[0], st_(D[(a, 256, 'base')])[0], st_(D[(a, 512, k512)])[0]]
+    o(f"{a}: {v[0]:.4f} -> {v[1]:.4f} -> {v[2]:.4f}  ({sgn(v[1]-v[0])}, {sgn(v[2]-v[1])})")
+o()
+
+# ---- seed variance na/tern at 128/256
+o('T3 seed spread (|seed1-seed0|) per arm per d')
+for a in arms:
+    line = []
+    for d in ds:
+        r = D[(a, d, 'base')]; v = [x['val'] for x in r]
+        line.append(f"d{d}: sd {sd(v):.4f} (range {max(v)-min(v):.4f})")
+    o(a + ': ' + '; '.join(line))
+o()
+
+# ---- 4-seed means
+def load_old(n):
+    return parse(OLD + '\\' + n + '.log')
+sets = {'na_fp4_c8 (h2)': (load_old('fp4c8_h2'), P('seeds23_na_fp4_c8')),
+        'lg6_fp4_h2': (load_old('lg6_fp4_h2'), P('seeds23_lg6_fp4_h2')),
+        'lg7_fp4_h2': (load_old('lg7_fp4_h2'), P('seeds23_lg7_fp4_h2'))}
+o('T4')
+o('| arm | bits | seeds 0,1 mean (old report) | seeds 2,3 mean | per-seed val (s0, s1, s2, s3) | 4-seed mean | sd (n-1) | train | val-train | edge % |')
+o('|---|---:|---:|---:|---|---:|---:|---:|---:|---:|')
+four = {}
+for k, (a, b) in sets.items():
+    allr = a + b
+    v = [r['val'] for r in allr]
+    four[k] = (mean(v), sd(v), allr)
+    o(f"| {k} | {allr[0]['bits']:.3f} | {mean([r['val'] for r in a]):.4f} | {mean([r['val'] for r in b]):.4f} | {', '.join('%.4f' % x for x in v)} | **{mean(v):.4f}** | {sd(v):.4f} | {num(allr,'train'):.4f} | {sgn(num(allr,'gap'))} | {num(allr,'edge'):.2f} |")
+o()
+# paired comparisons
+def diff(k1, k2):
+    v1 = [r['val'] for r in four[k1][2]]; v2 = [r['val'] for r in four[k2][2]]
+    d = [x - y for x, y in zip(v1, v2)]
+    return mean(d), d, max(four[k1][1], four[k2][1])
+for k1, k2 in [('lg7_fp4_h2', 'na_fp4_c8 (h2)'), ('lg6_fp4_h2', 'na_fp4_c8 (h2)'), ('lg6_fp4_h2', 'lg7_fp4_h2')]:
+    m, d, s = diff(k1, k2)
+    o(f"{k1} - {k2}: {sgn(m)} per-seed {[round(x,4) for x in d]}; larger sd {s:.4f}; ratio {abs(m)/s:.2f}")
+# refs from the old reports
+o('dense_bf16 2.2864, dense_nobias 2.2891, qat_fp4 2.2983 (decomp, 4 seeds, other snapshot)')
+for k in four:
+    o(f"{k}: vs qat_fp4 2.2983 {sgn(four[k][0]-2.2983)}; vs dense_nobias 2.2891 {sgn(four[k][0]-2.2891)}; vs dense_bf16 2.2864 {sgn(four[k][0]-2.2864)}")
+o()
+
+# ---- bench
+bs = json.load(open(X + r'\bench_out\bench_std.json'))['results']
+bx = json.load(open(X + r'\bench_out\bench_x.json'))['results']
+def idx(res):
+    return {(r['label'], r['d']): r for r in res}
+IS = idx(bs); IX = idx(bx)
+o('T5 speed')
+o('| d | arm / variant | ms/step | tok/s | x dense eager | x dense+compile | fwd | bwd | opt | update (in bwd) | decode (in fwd) | GPU kernel ms | launches |')
+o('|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|')
+def fm(x): return '-' if x is None else f"{x:.2f}"
+rowsets = [('dense_nobias', IS), ('dense_nobias+compile', IX), ('qat_fp4', IS), ('qat_fp4+compile', IX), ('tern_counter', IS),
+           ('na_fp4_c8', IS), ('na_fp4_c8+compile', IX), ('na_fp4_c8+fastpack', IX), ('lg6_fp4_h2', IS), ('lg6_fp4_h2+compile', IX),
+           ('lg8_fp4_h2', IS), ('lg8_fp4_h2+compile', IX)]
+speed = {}
+for d in ds:
+    de = IS[('dense_nobias', d)]['ms_step']; dc = IX[('dense_nobias+compile', d)]['ms_step']
+    for lab, I in rowsets:
+        r = I[(lab, d)]
+        speed[(lab, d)] = r['ms_step']
+        pr = r['profile']
+        o(f"| {d} | {lab} | {r['ms_step']:.2f} | {r['tokens_per_s']:,.0f} | {r['ms_step']/de:.2f}x | {r['ms_step']/dc:.2f}x | {fm(r['fwd_ms'])} | {fm(r['bwd_ms'])} | {fm(r['opt_ms'])} | {fm(r['update_ms'])} | {fm(r['decode_ms'])} | {pr['total_ms']:.2f} | {pr['launches']} |")
+o()
+# repeatability of eager rows std vs x
+o('T5b eager repeatability (bench_std vs bench_x, same arm)')
+for lab in ['dense_nobias', 'qat_fp4', 'na_fp4_c8', 'lg6_fp4_h2', 'lg8_fp4_h2']:
+    o(lab + ': ' + ', '.join(f"d{d}: {IS[(lab,d)]['ms_step']:.2f} vs {IX[(lab,d)]['ms_step']:.2f} ({100*(IX[(lab,d)]['ms_step']/IS[(lab,d)]['ms_step']-1):+.1f}%)" for d in ds))
+o()
+# kernel categories
+o('T6 kernel categories (ms of GPU kernel time per step, from the profile)')
+o('| d | arm | total | gemm | elementwise | copy/cast | reduce | index/gather | other/triton/rng | wall ms/step | GPU busy share |')
+o('|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|')
+for d in ds:
+    for lab, I in [('dense_nobias', IS), ('qat_fp4', IS), ('tern_counter', IS), ('na_fp4_c8', IS), ('lg6_fp4_h2', IS), ('na_fp4_c8+compile', IX), ('lg6_fp4_h2+compile', IX)]:
+        r = I[(lab, d)]; c = r['profile']['categories']; tot = r['profile']['total_ms']
+        oth = tot - sum(c.get(k, 0) for k in ['gemm', 'elementwise', 'copy/cast', 'reduce', 'index/gather'])
+        o(f"| {d} | {lab} | {tot:.2f} | {c.get('gemm',0):.2f} | {c.get('elementwise',0):.2f} | {c.get('copy/cast',0):.2f} | {c.get('reduce',0):.2f} | {c.get('index/gather',0):.2f} | {oth:.2f} | {r['ms_step']:.2f} | {100*tot/r['ms_step']:.0f}% |")
+o()
+# top kernels for na and lg per d
+o('T7 top kernels (eager)')
+for lab in ['na_fp4_c8', 'lg6_fp4_h2']:
+    for d in ds:
+        r = IS[(lab, d)]
+        o(f"{lab} d={d}:")
+        for t in r['profile']['top'][:5]:
+            o(f"   {t['ms']:.3f} ms {t['pct']:.1f}% x{t['count']}  {t['name'][:90]}")
+o()
+# speed notes vs measured
+o('T8 SPEED_NOTES estimate vs measured: update time in bwd (ms) and B/param implied')
+npar = {128: 786432, 256: 3145728, 512: 12582912}
+est = {'na_fp4_c8': 1800, 'na_fp4_c8+fastpack': 975, 'lg6_fp4_h2': 465}
+for lab in ['na_fp4_c8', 'na_fp4_c8+fastpack', 'lg6_fp4_h2']:
+    for d in ds:
+        I = IX if 'fastpack' in lab else IS
+        r = I[(lab, d)]
+        u = r['update_ms']
+        floor = est[lab] * npar[d] / 1.5e12 * 1e3
+        o(f"{lab} d={d}: measured update {u:.2f} ms (+ decode {r['decode_ms']:.2f}); SPEED_NOTES ideal HBM time at 1.5 TB/s {floor:.2f} ms; ratio measured/floor {u/floor:.1f}x")
+o()
+# memory
+o('T9 memory (bench; MB)')
+o('| d | arm | bits | state (analytic) | +grad | peak (bench) | resident (bench) | peak - resident | resident - state - other_fp |')
+o('|---:|---|---:|---:|---:|---:|---:|---:|---:|')
+for d in ds:
+    for lab in ['dense_nobias', 'qat_fp4', 'tern_counter', 'na_fp4_c8', 'lg6_fp4_h2', 'lg8_fp4_h2']:
+        r = IS[(lab, d)]
+        ex = r['resident_mb'] - r['state_mb'] - r['other_state_mb']
+        o(f"| {d} | {lab} | {r['bits']:.2f} | {r['state_mb']:.2f} | {r['state_grad_mb']:.2f} | {r['peak_mem_mb']:.0f} | {r['resident_mb']:.0f} | {r['peak_mem_mb']-r['resident_mb']:.0f} | {ex:.1f} |")
+o()
+o('T12 ms per profiled kernel launch (wall ms / launches) and ceiling if update+decode were free')
+for d in ds:
+    dn = IS[('dense_nobias', d)]['ms_step']
+    for lab in ['dense_nobias', 'qat_fp4', 'tern_counter', 'na_fp4_c8', 'lg6_fp4_h2']:
+        r = IS[(lab, d)]
+        u = r['update_ms'] or 0; dec = r['decode_ms'] or 0
+        o(f"d={d} {lab}: {1000*r['ms_step']/r['profile']['launches']:.1f} us/launch; step {r['ms_step']:.2f}; minus update {u:.2f} and decode {dec:.2f} = {r['ms_step']-u-dec:.2f} ms = {(r['ms_step']-u-dec)/dn:.2f}x dense")
+o()
+o('T13 fastpack effect (bench_x eager na vs fastpack)')
+for d in ds:
+    a = IX[('na_fp4_c8', d)]; b = IX[('na_fp4_c8+fastpack', d)]
+    o(f"d={d}: step {a['ms_step']:.2f} -> {b['ms_step']:.2f} ({100*(b['ms_step']/a['ms_step']-1):+.1f}%, {b['ms_step']-a['ms_step']:+.2f} ms); fwd {a['fwd_ms']:.2f}->{b['fwd_ms']:.2f}; bwd {a['bwd_ms']:.2f}->{b['bwd_ms']:.2f}; update {a['update_ms']:.2f}->{b['update_ms']:.2f}; launches {a['profile']['launches']}->{b['profile']['launches']}; kernel ms {a['profile']['total_ms']:.2f}->{b['profile']['total_ms']:.2f}")
+o('T14 compile effect (bench_x)')
+for d in ds:
+    for lab in ['dense_nobias', 'qat_fp4', 'na_fp4_c8', 'lg6_fp4_h2']:
+        a = IX[(lab, d)]; b = IX[(lab + '+compile', d)]
+        o(f"d={d} {lab}: {a['ms_step']:.2f} -> {b['ms_step']:.2f} ms ({a['ms_step']/b['ms_step']:.2f}x faster); launches {a['profile']['launches']}->{b['profile']['launches']}")
+o()
+o('fp32 scale cache size (4 B x block-linear params, MB): ' + ', '.join(f"d{d}: {4*npar[d]/2**20:.1f}" for d in ds))
+o('compile peaks: ' + '; '.join(f"d{d} {lab}: {IX[(lab,d)]['peak_mem_mb']:.0f} (eager {IS[(lab.split('+')[0],d)]['peak_mem_mb']:.0f})" for d in ds for lab in ['dense_nobias+compile', 'lg6_fp4_h2+compile', 'na_fp4_c8+compile']))
+o()
+# equal state memory
+o('T10 equal-state-memory')
+def v512(a):
+    k = 'a1e-3' if a in ('dense_nobias', 'qat_fp4', 'lg6_fp4_h2') else 'base'
+    return st_(D[(a, 512, k)])
+pairs = [('lg6_fp4_h2', 512, 'dense_nobias', 128), ('tern_counter', 512, 'dense_nobias', 128), ('na_fp4_c8', 512, 'dense_nobias', 128),
+         ('na_fp4_c8', 512, 'dense_nobias', 256), ('lg6_fp4_h2', 512, 'dense_nobias', 256), ('tern_counter', 512, 'dense_nobias', 256),
+         ('lg6_fp4_h2', 256, 'dense_nobias', 128), ('na_fp4_c8', 256, 'dense_nobias', 128), ('tern_counter', 256, 'dense_nobias', 128),
+         ('lg6_fp4_h2', 512, 'qat_fp4', 128), ('na_fp4_c8', 512, 'qat_fp4', 128)]
+for a, da, b, db in pairs:
+    va = v512(a)[0] if da == 512 else st_(D[(a, da, 'base')])[0]
+    vb = v512(b)[0] if db == 512 else st_(D[(b, db, 'base')])[0]
+    ra = IS[(a, da)]; rb = IS[(b, db)]
+    o(f"{a} d={da} (state {ra['state_mb']:.2f}, +grad {ra['state_grad_mb']:.2f}, +other {ra['state_mb']+ra['other_state_mb']:.2f}, resident {ra['resident_mb']:.0f}, peak {ra['peak_mem_mb']:.0f}, val {va:.4f}) vs {b} d={db} (state {rb['state_mb']:.2f}, +grad {rb['state_grad_mb']:.2f}, +other {rb['state_mb']+rb['other_state_mb']:.2f}, resident {rb['resident_mb']:.0f}, peak {rb['peak_mem_mb']:.0f}, val {vb:.4f}): dval {va-vb:+.4f}; state ratio {ra['state_mb']/rb['state_mb']:.2f}")
+o()
+# training-run memory lines
+o('T11 train-run peak (from q logs)')
+for a in arms:
+    for d in ds:
+        r = D[(a, d, 'base')][0]
+        o(f"{a} d={d}: state {r.get('state')} +grad {r.get('grad')} peak {r.get('peak')} over {r.get('over')}")
+txt = '\n'.join(out).replace('| nan |', '| - |').replace('| nan |', '| - |')
+open(r'C:\Users\Kharki\AppData\Local\claude-ctl\g4f\tables3.md', 'w', encoding='utf-8').write(txt)
+print('ok')

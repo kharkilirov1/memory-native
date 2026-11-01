@@ -1,0 +1,25 @@
+device=NVIDIA RTX PRO 6000 Blackwell Server Edition d=512 steps=6000 batch=32 seq=128 vocab=202 tokens=20000000 train_tokens=18000000 val_tokens=2000000 val_frac=0.1 epochs=1.37 (loss in bits/char) sched=cosine(warmup=0.02 min=0.1) lr=0.01 adam_lr=0.003 eval_every=500 scale_format=nvfp4
+data: dataset=enwik8 encoding=latin-1 (byte-level) path=/content/mx/mxfp4-native/data/enwik8 chars=20000000 (--chars 20000000) vocab=202
+model: d=512 layers=4 heads=8 head_dim=64 mlp=4d seq=128 | params total=13,061,120 block_linears(counter layers)=12,582,912 other(emb/pos/LN/head)=478,208 | AdamW state 12 B/param (fp32 master+m+v)
+gap arms: counter_wd=0 scale_lr=0
+  na_fp4_c8         seed=0 bits=8.547 val=1.9026 train=1.7759 gap=+0.1267 best=1.9026 clip=0.00% flip%(start/mid/end)=75.42/63.28/42.37 edge=13.76% grown=0 (2135s)
+      weights: kurt=2.71 tail3=0.00% zero=6.3%
+      memory: params total=13,061,120 block_linears=12,582,912 | state=12.8MB (+grad 16.8MB) | peak=1025MB (+872MB over run start)
+      curve: 500:3.357 1000:2.655 1500:2.417 2000:2.285 2500:2.200 3000:2.107 3500:2.036 4000:1.992 4500:1.960 5000:1.933 5500:1.919 6000:1.903
+      magnitudes: -6:6.9%  -4:6.9%  -3:6.8%  -2:6.7%  -1.5:6.7%  -1:6.5%  -0.5:6.4%  +0:6.3%  +0.5:6.4%  +1:6.5%  +1.5:6.7%  +2:6.7%  +3:6.8%  +4:6.9%  +6:6.9%
+  na_fp4_c8         seed=1 bits=8.547 val=1.9059 train=1.7688 gap=+0.1371 best=1.9059 clip=0.00% flip%(start/mid/end)=66.17/65.21/44.07 edge=14.04% grown=0 (351s)
+      weights: kurt=2.69 tail3=0.00% zero=6.3%
+      memory: params total=13,061,120 block_linears=12,582,912 | state=12.8MB (+grad 16.8MB) | peak=1025MB (+855MB over run start)
+      curve: 500:3.831 1000:2.887 1500:2.482 2000:2.316 2500:2.222 3000:2.148 3500:2.066 4000:2.015 4500:1.971 5000:1.936 5500:1.909 6000:1.906
+      magnitudes: -6:7.0%  -4:7.0%  -3:6.8%  -2:6.7%  -1.5:6.7%  -1:6.4%  -0.5:6.3%  +0:6.3%  +0.5:6.3%  +1:6.4%  +1.5:6.6%  +2:6.7%  +3:6.8%  +4:7.0%  +6:7.0%
+
+arm                 bits  mean val   train     gap      sd  clip%    best  flip%e  edge%  seeds
+na_fp4_c8          8.547    1.9043  1.7724 +0.1319  0.0023   0.00  1.9043   43.22  13.90  [1.9026, 1.9059]
+
+deployed weights of the 4 block linears (pooled over rows & layers; mean over seeds): kurt = E[w^4]/E[w^2]^2 per row (Gaussian 3, uniform 1.8); tail3 = frac |w| > 3*rms_row (Gaussian 0.27%); zero = frac exactly 0
+arm                  kurt  tail3%  zero%
+na_fp4_c8            2.70    0.00    6.3
+
+memory per arm, MB (block linears: 12,582,912 params; formulas in the module docstring)
+arm                 bits  B/param     state     +grad    other      peak  peak-run
+na_fp4_c8          8.547    1.068     12.82     16.82     5.47      1025       872
