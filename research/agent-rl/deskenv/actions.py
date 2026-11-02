@@ -66,7 +66,7 @@ def parse_action(text: str, refmap: dict[int, str]) -> Action | str:
 
     # Parse JSON
     try:
-        raw: dict[str, Any] = json.loads(action_line)
+        raw: dict[str, Any] = json.JSONDecoder().raw_decode(action_line)[0]   # ignore trailing text on the line
     except json.JSONDecodeError as exc:
         return f"invalid JSON in ACTION: {exc}"
 
