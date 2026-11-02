@@ -223,13 +223,22 @@ def main() -> None:
                     for t in e["turns"]:
                         t["advantage"] = e["reward"] - mean
                         turns.append(t)
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                print(f"  rollout done: {len(turns)} update turns, "
+                      f"{sum(len(t['prompt_ids']) + len(t['completion_ids']) for t in turns)} tokens, "
+                      f"gpu {torch.cuda.memory_allocated() / 2 ** 30:.1f} GB", flush=True)
             loss = update(model, turns, args.n_micro, args.optim, adamw, pad_id, device) if turns else 0.0
             rs = [e["reward"] for e in eps]
             rec = {"step": step, "mean_reward": sum(rs) / len(rs), "success": sum(r >= 0.99 for r in rs) / len(rs),
                    "mean_turns": sum(len(e["turns"]) for e in eps) / len(eps), "n_update_turns": len(turns),
                    "loss": loss, "t_rollout": round(t_roll, 1), "t_step": round(time.time() - t0, 1),
                    "kinds": [e["kind"] for e in eps[::args.G]], "rewards": rs,
-                   "sample": eps[0]["turns"][0]["text"][-200:] if eps and eps[0]["turns"] else ""}
+                   "sample": eps[0]["turns"][0]["text"][-200:] if eps and eps[0]["turns"] else "",
+                   # first episode of every group: its reward and the tail of every reply (why it failed)
+                   "traces": [{"kind": e["kind"], "reward": e["reward"],
+                               "acts": [t["text"][-160:] for t in e["turns"]]} for e in eps[::args.G]],
+                   "gpu_peak_gb": round(torch.cuda.max_memory_allocated() / 2 ** 30, 1) if torch.cuda.is_available() else 0}
             log.write(json.dumps(rec) + "\n")
             log.flush()
             print(f"step {step}: R={rec['mean_reward']:.3f} succ={rec['success']:.2f} turns={rec['mean_turns']:.1f} "
