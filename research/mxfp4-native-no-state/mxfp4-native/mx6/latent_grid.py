@@ -428,7 +428,14 @@ def _op_acc_bwd_impl(dy, x, idx, scale, tscale, v_rms, clip_buf, lr_t, wd_t, acc
     dx = _op_dx(dy, idx, scale, tscale, grid, gemm, dx_gemm, triton_on) if needs_dx else x.new_empty(0)
     grad_w = dy.t() @ x
     st = lg_accum.get_state(acc_id)
-    g = lg_accum.accum_grad_(st, grad_w, acc_buf if acc_buf.numel() else None, acc_scale if acc_scale.numel() else None)
+    finish = key = None
+    if st.sparse:                                    # the update is deferred to the exit of lg_accumulate
+        def finish(g):
+            _op_update_(g, idx, scale, tscale, v_rms, clip_buf, lr_t, wd_t, grid, triton_on, umode, beta, eps, has_wd,
+                        track_clip)
+        key = acc_buf.data_ptr()
+    g = lg_accum.accum_grad_(st, grad_w, acc_buf if acc_buf.numel() else None, acc_scale if acc_scale.numel() else None,
+                             finish, key)
     if g is not None:
         lr_eff = lr_t * st.lr_mult if st.lr_mult != 1.0 else lr_t
         _op_update_(g, idx, scale, tscale, v_rms, clip_buf, lr_eff, wd_t, grid, triton_on, umode, beta, eps, has_wd,
@@ -898,8 +905,12 @@ class LatentGridLinear(nn.Module):
         if st is None:
             self.apply_update_(grad_w)
             return
+        finish = None
+        if st.sparse:                                # the update is deferred to the exit of lg_accumulate
+            def finish(g):
+                self.apply_update_(g, lr_scale=st.lr_mult, beta=st.beta_eff(self.rms_beta))
         g = lg_accum.accum_grad_(st, grad_w, self._acc_buf if self._acc_buf.numel() else None,
-                                 self._acc_scale if self._acc_scale.numel() else None)
+                                 self._acc_scale if self._acc_scale.numel() else None, finish, id(self))
         if g is not None:
             self.apply_update_(g, lr_scale=st.lr_mult, beta=st.beta_eff(self.rms_beta))
 
