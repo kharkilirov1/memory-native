@@ -57,9 +57,10 @@ def _value_str(node: dict[str, Any]) -> str:
         return ""
     # Escape inner quotes and backslashes so the output stays parseable
     text = text.replace("\\", "\\\\").replace('"', '\\"')
-    # Collapse internal whitespace runs for readability
+    # Keep line structure visible as a literal \n (delete/append-line tasks need it); collapse other runs
     import re as _re
-    text = _re.sub(r"\s+", " ", text)
+    text = _re.sub(r"[ \t\r\f\v]+", " ", text)
+    text = _re.sub(r" ?\n ?", r"\\n", text)
     if len(text) > _MAX_TEXT_VALUE:
         text = text[:_MAX_TEXT_VALUE] + "\u2026"
     return f' text="{text}"'
