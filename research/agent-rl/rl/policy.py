@@ -37,7 +37,13 @@ step 1 -> ACTION: {"op": "type", "id": 11, "text": "hi"}
 step 2 -> ACTION: {"op": "press", "keys": "ctrl+s"}
 step 3 -> ACTION: {"op": "done"}
 
-You may include brief reasoning before the ACTION line."""
+Tips:
+- text="..." shows a textfield's content; \\n marks a line break.
+- To change existing text (append a line, delete a line, edit), use set_value with the COMPLETE new
+  content (\\n inside the JSON string = line break), e.g. {"op": "set_value", "id": 11, "value": "line one\\nline two\\n"}.
+- After using a menu, save with File > Save (the menu keeps focus and ctrl+s is ignored).
+
+Reasoning: at most two short sentences, then the ACTION line."""
 
 
 def _build_prompt(task_instruction: str, history: list[tuple[str, str]],
