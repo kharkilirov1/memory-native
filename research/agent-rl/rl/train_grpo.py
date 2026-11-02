@@ -93,10 +93,23 @@ def micro_loss(model, batch: list[dict], pad_id: int, n_tokens_total: int, devic
         att[i, :len(s)] = 1
         tgt_mask[i, len(t["prompt_ids"]):len(s)] = 1.0          # completion tokens only
     ids, att, tgt_mask, adv = ids.to(device), att.to(device), tgt_mask.to(device), adv.to(device)
-    logits = model(input_ids=ids, attention_mask=att).logits[:, :-1].float()
-    logp = torch.gather(F.log_softmax(logits, -1), -1, ids[:, 1:, None]).squeeze(-1)   # logp of token t+1
+    # lm_head ONLY on completion positions: full-sequence fp32 logits at a 262k vocab (Gemma 4) are tens of GB
+    h = model.model(input_ids=ids, attention_mask=att).last_hidden_state[:, :-1]
     m = tgt_mask[:, 1:]
-    return -(adv[:, None] * logp * m).sum() / max(n_tokens_total, 1)
+    sel = m.bool()
+    hs, tg = h[sel], ids[:, 1:][sel]
+    w_adv = adv[:, None].expand_as(m)[sel]
+    head = model.get_output_embeddings()
+    cfg = getattr(model.config, "text_config", model.config)
+    cap = getattr(cfg, "final_logit_softcapping", None)
+    logp_parts = []
+    for j in range(0, hs.shape[0], 512):
+        lg = head(hs[j:j + 512]).float()
+        if cap:
+            lg = torch.tanh(lg / cap) * cap
+        logp_parts.append(lg.gather(-1, tg[j:j + 512, None]).squeeze(-1) - torch.logsumexp(lg, -1))
+    logp = torch.cat(logp_parts) if logp_parts else hs.sum(-1) * 0.0
+    return -(w_adv * logp).sum() / max(n_tokens_total, 1)
 
 
 def update(model, turns, n_micro, optim_kind, adamw, pad_id, device) -> float:
