@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from typing import Any
 
+import json
+
 import torch
+from transformers import StoppingCriteria
 
 SYSTEM_PROMPT = """You control a Linux desktop app through the accessibility tree.
 Read the tree below and decide the next action.
@@ -51,6 +54,34 @@ def _build_prompt(task_instruction: str, history: list[tuple[str, str]],
     lines.append(current_tree)
     return "\n".join(lines)
 
+
+
+def complete_action_end(text: str) -> bool:
+    """True once *text* holds an ``ACTION:`` followed by one complete JSON object (generation can stop there)."""
+    i = text.rfind("ACTION:")
+    if i < 0:
+        return False
+    rest = text[i + len("ACTION:"):].lstrip()
+    if not rest.startswith("{"):
+        return False
+    try:
+        json.JSONDecoder().raw_decode(rest)
+        return True
+    except json.JSONDecodeError:
+        return False
+
+
+class _StopAfterAction(StoppingCriteria):
+    """Stop sampling right after the first complete ACTION line: models like Gemma 4 keep rambling
+    (and may write more 'ACTION:' prose) after the action, wasting tokens and confusing the parser."""
+
+    def __init__(self, tokenizer, prompt_len: int):
+        self.tok, self.prompt_len = tokenizer, prompt_len
+
+    def __call__(self, input_ids, scores, **kw):
+        done = [complete_action_end(self.tok.decode(row[self.prompt_len:], skip_special_tokens=True))
+                for row in input_ids]
+        return torch.tensor(done, dtype=torch.bool, device=input_ids.device)
 
 class LMPolicy:
     """An LLM that generates actions from observations.
@@ -139,6 +170,7 @@ class LMPolicy:
             eos_token_id=self.tokenizer.eos_token_id,
             output_scores=False,
             return_dict_in_generate=False,
+            stopping_criteria=[_StopAfterAction(self.tokenizer, prompt_len)],
         )
 
         prompt_ids = inputs["input_ids"][0]

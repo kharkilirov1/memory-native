@@ -143,3 +143,18 @@ def test_parse_extra_fields_ignored():
     )
     assert isinstance(result, Action)
     assert result.op == "done"
+
+
+def test_parse_action_trailing_text_same_line():
+    """Gemma-style: JSON then prose on the same line."""
+    result = parse_action('ACTION: {"op": "done"} (then I will stop)', REFS)
+    assert isinstance(result, Action)
+    assert result.op == "done"
+
+
+def test_complete_action_end():
+    from rl.policy import complete_action_end
+    assert not complete_action_end("thinking...")
+    assert not complete_action_end('ACTION: {"op": "type", "id": 3, "text": "abc')
+    assert complete_action_end('x\nACTION: {"op": "type", "id": 3, "text": "a}b"}')
+    assert complete_action_end('ACTION: {"op": "done"}\n\n(Note: more')
