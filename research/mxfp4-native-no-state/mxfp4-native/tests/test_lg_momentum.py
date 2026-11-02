@@ -119,3 +119,24 @@ def test_layer_momentum_with_accum_runs_and_matches_one_update():
         lay(x[:8]).pow(2).mean().backward()
     with pytest.raises(ValueError):
         set_momentum(lay, 0.9, nesterov=True, n=4)
+
+
+def test_sparse_momentum_layer_semantics():
+    """sparse=True: 0..n backwards per layer; decay on the first backward; ONE update at the context exit; 0 backwards = untouched."""
+    torch.manual_seed(0)
+    a, b = LatentGridLinear(64, 32, k=6, lr=0.05), LatentGridLinear(64, 32, k=6, lr=0.05)
+    net = torch.nn.ModuleList([a, b])
+    st = set_momentum(net, 0.9, "fp32", n=3, sparse=True)
+    x = torch.randn(8, 64)
+    with lg_accumulate(net, 3) as acc:                    # step 1: a in micro 0 and 2, b never
+        for i in acc.micro_batches():
+            if i != 1:
+                (a(x).pow(2).mean() / 3).backward()
+    assert st.n_updates == 1 and b._acc_buf.abs().sum() == 0 and (a._acc_buf != 0).any()
+    ia, bufa, ib = a.idx.clone(), a._acc_buf.clone(), b.idx.clone()
+    with lg_accumulate(net, 3) as acc:                    # step 2: only b, once; a untouched (no decay, no update)
+        for i in acc.micro_batches():
+            if i == 2:
+                (b(x).pow(2).mean() / 3).backward()
+    assert torch.equal(a.idx, ia) and torch.equal(a._acc_buf, bufa) and (b.idx != ib).any()
+    assert st.n_updates == 2

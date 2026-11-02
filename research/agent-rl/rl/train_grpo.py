@@ -11,6 +11,8 @@ clip, no reference model).
 mx6 arm: every decoder nn.Linear -> LatentGridLinear (rl/convert.py), momentum 0.9 fp8 accumulated over EXACTLY
 --n-micro micro-batches (mx6/lg_accum.set_momentum(n=...) + lg_accumulate). Each micro-batch is ONE padded forward and
 ONE backward, so every lg layer sees exactly n backwards (empty micro-batches run a zero-loss 1-token pass).
+--moe: fused experts become per-expert lg layers (rl/convert_moe.py) and the momentum is sparse (a layer may get 0..n
+backwards, ONE update at the exit of lg_accumulate; empty micro-batches are skipped instead of the zero-loss pass).
 Embeddings and lm_head are frozen; biases (Qwen q/k/v) and norms train with a persistent AdamW.
 
 Verified 2026-11-01 on a real Xvfb desktop (CPU, Qwen2.5-0.5B-Instruct): rollouts + update run end to end
@@ -37,6 +39,7 @@ from deskenv.env import DesktopEnv          # noqa: E402
 from deskenv.session import DesktopSession  # noqa: E402
 from deskenv.tasks import make_task         # noqa: E402
 from rl.convert import convert_to_lg        # noqa: E402
+from rl.convert_moe import convert_moe_experts_to_lg, moe_skip  # noqa: E402
 from rl.policy import LMPolicy              # noqa: E402
 
 
@@ -102,9 +105,12 @@ def update(model, turns, n_micro, optim_kind, adamw, pad_id, device) -> float:
     total = 0.0
     batches = pack(turns, n_micro)
     if optim_kind == "lg":
-        from mx6.lg_accum import lg_accumulate
+        from mx6.lg_accum import get_accum, lg_accumulate
+        sparse = bool(getattr(get_accum(model), "sparse", False))
         with lg_accumulate(model, n_micro) as acc:
             for i in acc.micro_batches():
+                if sparse and not batches[i]:         # sparse (MoE): a layer may skip micro-batches; no zero-loss pass
+                    continue
                 loss = micro_loss(model, batches[i], pad_id, n_tok, device)
                 loss.backward()                       # the lg update happens here (on the last micro-batch)
                 total += float(loss.detach())
@@ -129,6 +135,8 @@ def main() -> None:
     ap.add_argument("--steps", type=int, default=20)
     ap.add_argument("--B", type=int, default=2)
     ap.add_argument("--G", type=int, default=4)
+    ap.add_argument("--moe", action="store_true",
+                    help="MoE model: fused experts -> per-expert lg layers (rl/convert_moe.py) + sparse momentum")
     ap.add_argument("--n-micro", type=int, default=4)
     ap.add_argument("--kinds", nargs="*", default=["write_save", "append_line"])
     ap.add_argument("--max-turns", type=int, default=6)
@@ -156,10 +164,17 @@ def main() -> None:
         p.requires_grad_(False)
 
     if args.optim == "lg":
-        rep = convert_to_lg(model, lr=args.lr, momentum=0.0,
-                            backend="torch" if device == "cpu" else "auto")
+        backend = "torch" if device == "cpu" else "auto"
+        if args.moe:
+            mrep = convert_moe_experts_to_lg(model, lr=args.lr, backend=backend)
+            print(f"moe: {mrep['n_modules']} expert modules, {mrep['n_experts']} experts -> {mrep['n_layers']} lg layers",
+                  flush=True)
+            rep = convert_to_lg(model, lr=args.lr, momentum=0.0, backend=backend, skip=moe_skip())
+            rep["n_layers"] += mrep["n_layers"]
+        else:
+            rep = convert_to_lg(model, lr=args.lr, momentum=0.0, backend=backend)
         from mx6.lg_accum import set_momentum
-        set_momentum(model, 0.9, "fp8", n=args.n_micro)
+        set_momentum(model, 0.9, "fp8", n=args.n_micro, sparse=args.moe)
         small = [p for n_, p in model.named_parameters() if n_.endswith("bias") or "norm" in n_]
         for p in small:
             p.requires_grad_(True)

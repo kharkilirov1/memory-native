@@ -78,7 +78,10 @@ class AccumState:
     """Shared by all LatentGridLinear layers of one model (see set_accum). `idx` = index of the micro-batch whose backward is
     running (set by `lg_accumulate`); the layers read it at run time."""
 
-    def __init__(self, n: int, mode: str, kind: str, loss_scaled: bool, grad_allreduce):
+    def __init__(self, n: int, mode: str, kind: str, loss_scaled: bool, grad_allreduce, sparse: bool = False):
+        if sparse and (mode != "ema" or grad_allreduce is not None):
+            raise ValueError("sparse accumulation is supported for momentum (ema) mode without a grad_allreduce hook only "
+                             "(ranks may touch different layers: a per-layer all-reduce would deadlock)")
         if mode == "ema":
             n = max(1, int(n))
         elif int(n) < 2:
@@ -93,6 +96,11 @@ class AccumState:
             raise ValueError("grad_allreduce must be None, 'dist' or a callable")
         self.n, self.mode, self.kind = int(n), mode, kind
         self.mu = 0.0                    # ema mode: momentum factor (set_momentum)
+        #: sparse (MoE experts): a layer may run 0..n backwards per step. Decay on its first backward, ONE update at the exit
+        #: of lg_accumulate for every touched layer; untouched layers are left alone (like sparse Adam).
+        self.sparse = bool(sparse)
+        self.touched: dict = {}          # sparse: layer key -> (finish(grad), buf, bscale), insertion order = first backward
+        self.micro_seen: dict = {}       # sparse: layer key -> micro-batch index of its last backward (<= 1 per micro-batch)
         self.nesterov = False
         self.loss_scaled, self.grad_allreduce = bool(loss_scaled), grad_allreduce
         self.idx = 0                     # micro-batch index of the running backward
@@ -258,13 +266,58 @@ def ema_accum_(st: AccumState, grad_w: torch.Tensor, buf: torch.Tensor, bscale):
     return grad_w
 
 
-def accum_grad_(st: AccumState, grad_w: torch.Tensor, buf, bscale):
+def _dense_of(buf: torch.Tensor, bscale, kind: str) -> torch.Tensor:
+    """The momentum buffer as a dense fp32 tensor (fp8: dequantised with the per-row scale)."""
+    if kind == "fp8":
+        return buf.to(torch.float32).mul_(bscale)
+    return buf.to(torch.float32)
+
+
+def ema_accum_sparse_(st: AccumState, grad_w: torch.Tensor, buf: torch.Tensor, bscale, finish, key) -> None:
+    """Sparse momentum accumulation of ONE layer backward. First backward of the layer in this step: buf *= mu (fp8: row scale);
+    every backward: buf += (1-mu) * g. NO update here: `flush_sparse_` applies one update per touched layer at the context exit
+    (the layer may not appear in the last micro-batch, or at all). At most one backward per layer per micro-batch."""
+    if finish is None or key is None:
+        raise RuntimeError("sparse accumulation needs the layer's update callback and key")
+    if st.micro_seen.get(key) == st.idx:
+        raise RuntimeError("sparse lg_accumulate: a layer ran two backwards in the same micro-batch (an expert must be called "
+                           "ONCE per forward with all its tokens batched)")
+    st.micro_seen[key] = st.idx
+    mu = float(st.mu)
+    c = (1.0 - mu) if st.loss_scaled else (1.0 - mu) / st.n
+    if key not in st.touched:
+        if st.kind == "fp8":
+            bscale.mul_(mu)
+        else:
+            buf.mul_(mu)
+        st.touched[key] = (finish, buf, bscale)
+    if st.kind == "fp8":
+        fp8_add_(buf, bscale, grad_w.mul_(c))
+    else:
+        buf.add_(grad_w.to(buf.dtype), alpha=c)
+
+
+def flush_sparse_(st: AccumState) -> int:
+    """Apply ONE update (direction = the momentum buffer) to every layer touched in this step; -> number of updates."""
+    n = 0
+    touched, st.touched, st.micro_seen = st.touched, {}, {}
+    for finish, buf, bscale in touched.values():
+        finish(_dense_of(buf, bscale, st.kind))
+        st.n_updates += 1
+        n += 1
+    return n
+
+
+def accum_grad_(st: AccumState, grad_w: torch.Tensor, buf, bscale, finish=None, key=None):
     """The accumulation step of one layer's backward. -> the gradient to hand to the update (after the all-reduce hook), or None
     (buffer mode, not the last micro-batch: nothing to update). `grad_w` is consumed (modified in place)."""
-    if st.mode == "ema" and st.n > 1:
+    if st.mode == "ema" and (st.n > 1 or st.sparse):
         if not st.active:
             raise RuntimeError("momentum with accumulation (set_momentum(..., n>1)) needs the lg_accumulate context")
         st.n_bwd += 1
+        if st.sparse:
+            ema_accum_sparse_(st, grad_w, buf, bscale, finish, key)
+            return None
         return ema_accum_(st, grad_w, buf, bscale)
     if st.mode == "ema":
         if st.grad_allreduce is not None:            # sync the raw gradient first: the EMA stays identical on all ranks
@@ -331,12 +384,16 @@ def set_accum(model, n: int, mode: str = "buffer", dtype: str = "bf16", loss_sca
 
 
 def set_momentum(model, mu: float, dtype: str = "bf16", nesterov: bool = False, grad_allreduce=None,
-                 n: int = 1) -> AccumState | None:
+                 n: int = 1, sparse: bool = False) -> AccumState | None:
     """Per-weight momentum for every LatentGridLinear (reuses the accumulation buffer: bf16 +2 B/param, fp8 ~ +1 B/param).
     Every backward: buf <- mu*buf + (1-mu)*grad and the update uses buf. No lg_accumulate context needed. mu <= 0 disables.
     n > 1: ALSO accumulates n micro-batches into the same buffer (run them inside lg_accumulate(model, n)); ONE update
     per optimizer step on mu*buf + (1-mu)*G, G = the big-batch gradient. Replaces set_accum (same buffer, no extra
-    memory). Call BEFORE torch.compile."""
+    memory). Call BEFORE torch.compile.
+    sparse=True (MoE experts; always needs the lg_accumulate context, any n >= 1): a layer may run 0..n backwards per step
+    (at most one per micro-batch). Its buffer decays by mu on its first backward, accumulates (1-mu)*g on each, and ONE update
+    with the buffer is applied at the EXIT of lg_accumulate; layers with 0 backwards are untouched (no decay, no update).
+    Not combinable with nesterov / grad_allreduce."""
     if mu is None or float(mu) <= 0.0:
         clear_accum(model)
         return None
@@ -345,10 +402,10 @@ def set_momentum(model, mu: float, dtype: str = "bf16", nesterov: bool = False, 
     layers = _lg_layers(model)
     if not layers:
         raise ValueError("set_momentum: the model has no LatentGridLinear layer")
-    if int(n) > 1 and nesterov:
+    if (int(n) > 1 or sparse) and nesterov:
         raise ValueError("nesterov momentum with accumulation is not supported")
     clear_accum(model)
-    st = AccumState(int(n), "ema", dtype, True, grad_allreduce)
+    st = AccumState(int(n), "ema", dtype, True, grad_allreduce, sparse=sparse)
     st.mu, st.nesterov = float(mu), bool(nesterov)
     for m in layers:
         m.enable_accum_(st)
@@ -400,6 +457,7 @@ def lg_accumulate(model, n: int | None = None):
     if st.active:
         raise RuntimeError("lg_accumulate is not re-entrant")
     st.active, st.idx, st.n_bwd = True, 0, 0
+    st.touched, st.micro_seen = {}, {}
     ok = False
     try:
         yield _Accumulate(st)
@@ -411,8 +469,19 @@ def lg_accumulate(model, n: int | None = None):
         st.idx = 0
         st.n_bwd = 0
         if not ok:
-            for m in _lg_layers(model):
-                m.zero_accum_()
+            if st.sparse:                       # only the touched layers hold a half-built buffer
+                for _, buf, bscale in st.touched.values():
+                    buf.zero_()
+                    if bscale is not None:
+                        bscale.zero_()
+                st.touched, st.micro_seen = {}, {}
+            else:
+                for m in _lg_layers(model):
+                    m.zero_accum_()
+    if st.sparse:
+        with torch.no_grad():
+            flush_sparse_(st)
+        return
     if got != want:
         for m in _lg_layers(model):
             m.zero_accum_()
