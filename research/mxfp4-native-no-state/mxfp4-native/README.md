@@ -4,6 +4,28 @@ Training with **no full-precision master weights or Adam moments**. The visible 
 
 This branch is a **clean-room rewrite**. The idea (finite-state weights, updates applied in backward, no fp32 master, no Adam moments) is carried over from the ternary `memory-native` project on `main`; nothing else is. No salient channel, no act-order permutation, no PTQ solver, no converter — the model is trained in the format it ships in.
 
+## Where it stands (2026-11-03) — read this first
+
+**Recipe:** `LatentGridLinear` k=6 (`lg6_fp4_h2`: a 6-bit index into a fine NVFP4/E2M1-aligned grid, block-scale headroom 2)
++ per-weight **int4 momentum** (`mx6.lg_accum.set_momentum(model, 0.9, "int4")`, fused into the Triton update kernel).
+The update runs inside backward; there is no fp32 master copy and no Adam for the block linears (embeddings / LayerNorm / head
+still use AdamW). Block-linear training state: ~6.5 bits index+scales + ~4.5 bits momentum = **~1.4 B/param** vs 12-16 B/param
+for AdamW (fp32 master + m + v).
+
+| question | answer (G4, RTX PRO 6000 Blackwell) | evidence |
+|---|---|---|
+| quality, d512 enwik8 (13M params, 3000 steps) | lg6 + int4 momentum 1.769 / 1.770 vs AdamW 1.760 / 1.752 (+0.010, 2 seeds) | `research/results/mx6_g4_bits_momentum_2026_11_03/` |
+| fewer bits | 5-bit +0.03, 4-bit +0.07 vs AdamW; headroom / lr / mu do not close the 5-bit gap | same + `mx6_g4_fused_m4_1b_2026_11_03/` |
+| speed + memory, 1.21B step (batch 8x512) | 114 ms, 8.8 GB peak vs AdamW 142 ms, 27.1 GB | `mx6_g4_fused_m4_1b_2026_11_03/` |
+| quality, 1.21B TinyStories, 1000 steps | 1.117 bpb vs AdamW 0.933 (no momentum: 2.942): **gap not closed at 1B yet** | same |
+
+Open: the 1B gap (one run, one lr, 1000 of 5000 steps), longer training, other data, a fused fp8 momentum, MLX / Metal.
+Tests: `python -m pytest tests -q` (CPU; Triton tests run on CUDA or with `TRITON_INTERPRET=1`).
+Reproduce d512: `python probes/lg_ab.py --dataset enwik8 --chars 20000000 --d 512 --layers 4 --heads 8 --steps 3000
+--precision bf16 --sdpa --compile --sched cosine --adam-lr 1e-3 --scale-format nvfp4 --batch 128 --arms lg6_fp4_h2
+--lr 0.03 --momentum 0.9 --momentum-dtype int4` (AdamW baseline: `--arms dense_nobias`).
+Everything below this section is older history (kept, partly superseded).
+
 ## Status (2026-10-31)
 
 **Implemented** (package `mx6/`): `layer.py`, `pack.py` (real bit packing), `update.py`, `packed_na.py` (PackedNA5/PackedNA6 layers, opt-in `enable_compile()`), `triton_kernel.py` (fused decode-in-GEMM, optional). The documents below remain the specification.
