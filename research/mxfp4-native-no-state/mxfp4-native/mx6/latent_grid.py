@@ -880,7 +880,11 @@ class LatentGridLinear(nn.Module):
         dev = self.idx.device
         empty = lambda dt: torch.empty(0, dtype=dt, device=dev)           # noqa: E731
         shape = tuple(self.idx.shape)
-        if st.mode in ("buffer", "ema"):
+        if st.mode == "ema" and st.kind == "int4":
+            bshape, sshape = lg_accum.q4_shapes(*shape)
+            self._acc_buf = torch.full(bshape, 0x88, dtype=torch.uint8, device=dev)       # q = 0 in both nibbles
+            self._acc_scale = torch.ones(sshape, dtype=torch.bfloat16, device=dev)
+        elif st.mode in ("buffer", "ema"):
             dt = {"bf16": torch.bfloat16, "fp32": torch.float32, "fp8": torch.float8_e4m3fn}[st.kind]
             self._acc_buf = torch.zeros(shape, dtype=dt, device=dev)
             self._acc_scale = (torch.zeros(shape[0], 1, dtype=torch.float32, device=dev) if st.kind == "fp8"
@@ -897,7 +901,7 @@ class LatentGridLinear(nn.Module):
     def zero_accum_(self) -> None:
         for t in (self._acc_buf, self._acc_scale):
             if t is not None and t.numel():
-                t.zero_()
+                t.fill_(0x88) if t.dtype == torch.uint8 else t.zero_()     # int4 buffer: q = 0 is nibble 8
 
     def _backward_update_(self, grad_w: torch.Tensor) -> None:
         """What backward calls: the plain update, or (accumulation configured) the accumulation step + update."""

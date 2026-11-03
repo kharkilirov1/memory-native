@@ -7,7 +7,7 @@ from mx6.lg_accum import (accum_bytes_per_param, set_momentum, AccumState, ema_s
                           lg_accumulate)
 
 
-@pytest.mark.parametrize("kind", ["fp32", "bf16", "fp8"])
+@pytest.mark.parametrize("kind", ["fp32", "bf16", "fp8", "int4"])
 @pytest.mark.parametrize("nesterov", [False, True])
 def test_momentum_trains_and_buffer_is_ema(kind, nesterov):
     torch.manual_seed(0)
@@ -140,3 +140,47 @@ def test_sparse_momentum_layer_semantics():
                 (b(x).pow(2).mean() / 3).backward()
     assert torch.equal(a.idx, ia) and torch.equal(a._acc_buf, bufa) and (b.idx != ib).any()
     assert st.n_updates == 2
+
+
+def test_int4_roundtrip_and_unbiased():
+    from mx6.lg_accum import q4_dequant, q4_store_, q4_shapes
+    torch.manual_seed(2)
+    rows, cols = 8, 128
+    bs, ss = q4_shapes(rows, cols)
+    assert bs == (8, 64) and ss == (8, 4)
+    t = torch.randn(rows, cols) * torch.logspace(-6, 0, rows).unsqueeze(1)     # rows of very different magnitude
+    acc = torch.zeros(rows, cols)
+    for _ in range(400):
+        buf, sc = torch.empty(bs, dtype=torch.uint8), torch.empty(ss, dtype=torch.bfloat16)
+        q4_store_(buf, sc, 0, rows, t)
+        d = q4_dequant(buf, sc, 0, rows, cols)
+        g = d.view(rows, 4, 32)
+        # every value lies on the group grid k*s, |k| <= 7
+        k = g / sc.float().unsqueeze(-1)
+        assert torch.allclose(k, k.round(), atol=1e-4) and k.abs().max() <= 7
+        acc += d
+    rel = ((acc / 400 - t).abs().amax(1) / t.abs().amax(1))
+    assert (rel < 0.06).all(), rel
+
+
+def test_int4_ema_matches_formula_in_expectation():
+    torch.manual_seed(3)
+    st = AccumState(1, "ema", "int4", True, None)
+    st.mu = 0.9
+    g = torch.randn(4, 64)
+    acc = torch.zeros(4, 64)
+    for _ in range(300):
+        buf = torch.full((4, 32), 0x88, dtype=torch.uint8)
+        sc = torch.ones(4, 2, dtype=torch.bfloat16)
+        out = ema_step_(st, g.clone(), buf, sc)
+        assert torch.allclose(out, 0.1 * g, atol=1e-6)        # the update sees the exact fp32 EMA
+        from mx6.lg_accum import q4_dequant
+        acc += q4_dequant(buf, sc, 0, 4, 64)
+    assert torch.allclose(acc / 300, 0.1 * g, atol=0.01)
+
+
+def test_int4_rejected_outside_plain_momentum():
+    lay = LatentGridLinear(32, 16, k=6)
+    with pytest.raises(ValueError):
+        set_momentum(lay, 0.9, "int4", n=2)
+    assert accum_bytes_per_param("int4", 512, "ema") == 0.5 + 2.0 / 32

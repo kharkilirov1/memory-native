@@ -54,7 +54,8 @@ import contextlib
 
 import torch
 
-KINDS = ("bf16", "fp8", "fp32")
+KINDS = ("bf16", "fp8", "fp32", "int4")
+Q4_GROUP = 32                            # int4 momentum: one bf16 scale per 32 weights of a row
 MODES = ("buffer", "latent", "ema")
 FP8_MAX = 448.0
 FP8_CHUNK = 1 << 23                      # elements per fp32 chunk in the fp8 buffer arithmetic
@@ -90,6 +91,8 @@ class AccumState:
             raise ValueError(f"accum mode must be one of {MODES}, got {mode!r}")
         if kind not in KINDS:
             raise ValueError(f"accum dtype must be one of {KINDS}, got {kind!r}")
+        if kind == "int4" and (mode != "ema" or n > 1 or sparse):
+            raise ValueError("int4 buffer: momentum only (set_momentum, n=1, not sparse)")
         if grad_allreduce == "dist":
             grad_allreduce = dist_allreduce_mean
         if grad_allreduce is not None and not callable(grad_allreduce):
@@ -186,12 +189,59 @@ def acc_finish_(buf: torch.Tensor, bscale: torch.Tensor, grad: torch.Tensor, kin
     return grad
 
 
+
+# ── int4 momentum buffer (packed nibbles, group-32 bf16 scales, stochastic rounding) ───────────────────────────
+
+def q4_group(cols: int) -> int:
+    return Q4_GROUP if cols % Q4_GROUP == 0 else cols
+
+
+def q4_shapes(rows: int, cols: int) -> tuple[tuple[int, int], tuple[int, int]]:
+    """(packed uint8 buffer shape, bf16 scale shape) of an int4 momentum buffer for a [rows, cols] weight (cols even)."""
+    if cols % 2:
+        raise ValueError(f"int4 momentum needs an even in_features, got {cols}")
+    return (rows, cols // 2), (rows, cols // q4_group(cols))
+
+
+def q4_dequant(buf: torch.Tensor, scale: torch.Tensor, r0: int, r1: int, cols: int) -> torch.Tensor:
+    """Rows r0:r1 of the int4 buffer as fp32 [r1-r0, cols]. Nibble = q + 8, q in [-7, 7]; low nibble = even column."""
+    b = buf[r0:r1]
+    q = torch.stack(((b & 15).to(torch.int8) - 8, (b >> 4).to(torch.int8) - 8), dim=-1).reshape(r1 - r0, cols)
+    g = q4_group(cols)
+    return (q.to(torch.float32).view(r1 - r0, cols // g, g) * scale[r0:r1].to(torch.float32).unsqueeze(-1)).view(r1 - r0, cols)
+
+
+def q4_store_(buf: torch.Tensor, scale: torch.Tensor, r0: int, r1: int, t: torch.Tensor) -> None:
+    """buf/scale rows r0:r1 <- SR_int4(t) (t fp32 [r1-r0, cols]): group scale = amax/7 rounded UP to bf16, q = floor(t/s + U)
+    clamped to [-7, 7] (never active: |t/s| <= 7) -> E[deq] = t (unbiased)."""
+    rows, cols = t.shape
+    g = q4_group(cols)
+    tg = t.view(rows, cols // g, g)
+    amax = tg.abs().amax(dim=-1)
+    s = torch.where(amax > 0, amax / 7.0 * (1.0 + 2.0 ** -7), torch.ones_like(amax)).to(torch.bfloat16)
+    sf = s.to(torch.float32).unsqueeze(-1)
+    q = torch.floor(tg / sf + torch.rand_like(tg)).clamp_(-7, 7).to(torch.int16).view(rows, cols) + 8
+    q = q.view(rows, cols // 2, 2)
+    buf[r0:r1] = (q[..., 0] | (q[..., 1] << 4)).to(torch.uint8)
+    scale[r0:r1] = s
+
 def ema_step_(st: AccumState, grad_w: torch.Tensor, buf: torch.Tensor, bscale) -> torch.Tensor:
     """Momentum ("ema" mode): buf <- mu*buf + (1-mu)*g; returns the direction handed to the RMS-normalised update:
     buf (heavy-ball EMA) or mu*buf + (1-mu)*g (nesterov). bf16/fp32 buffer: in-place lerp; fp8: fp32 chunk + SR requant.
     The update's row-RMS normaliser then sees the EMA, so the step stays ~unit-scale where the gradient sign is consistent
     and shrinks where it flips (noise averages out): Adam's first-moment effect at 1 or 2 B/param."""
     mu = float(st.mu)
+    if st.kind == "int4":
+        rows, cols = grad_w.shape
+        step = _rows_per_chunk(cols)
+        for r0 in range(0, rows, step):
+            r1 = min(rows, r0 + step)
+            g = grad_w[r0:r1].to(torch.float32)
+            t = q4_dequant(buf, bscale, r0, r1, cols).mul_(mu).add_(g, alpha=1.0 - mu)
+            q4_store_(buf, bscale, r0, r1, t)
+            out = t.mul_(mu).add_(g, alpha=1.0 - mu) if st.nesterov else t
+            grad_w[r0:r1] = out.to(grad_w.dtype)
+        return grad_w
     if st.kind == "fp8":
         rows, cols = buf.shape
         step = _rows_per_chunk(cols)
@@ -495,7 +545,8 @@ def accum_bytes_per_param(kind: str, in_features: int, mode: str = "buffer") -> 
     if mode == "latent":
         return 0.0
     # "ema" (momentum) uses the same buffer as "buffer"
-    return {"bf16": 2.0, "fp32": 4.0, "fp8": 1.0 + 4.0 / in_features}[kind]
+    return {"bf16": 2.0, "fp32": 4.0, "fp8": 1.0 + 4.0 / in_features,
+            "int4": 0.5 + 2.0 / q4_group(in_features)}[kind]
 
 
 def accum_resident_bytes(model) -> int:
