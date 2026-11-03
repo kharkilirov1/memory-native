@@ -978,6 +978,10 @@ def run_arm(arm: str, seed: int, d: int, steps: int, batch: int, seq: int,
             from mx6.lg_accum import set_momentum      # accum > 1: micro-batches accumulate INTO the momentum buffer
             st = set_momentum(model, momentum, momentum_dtype, nesterov, n=accum)
             acc_state = st if accum > 1 else None
+            from mx6.lg_accum import accum_resident_bytes
+            nb = accum_resident_bytes(model)
+            print(f"      momentum: mu={momentum} dtype={momentum_dtype} buffer={nb / 2 ** 20:.2f}MB "
+                  f"({nb / sum(m.idx.numel() for m in lg_layers(model)):.3f} B/param)", flush=True)
     train_fwd, cinfo = model, None
     if compile:                       # BEFORE fp32_islands: it must see the lg layers as native (no fp32 island)
         train_fwd, cinfo = compile_model(model, arm, compile_backend)
@@ -1096,7 +1100,7 @@ def main(argv=None) -> int:
                     help="lg buffer mode: bf16 (+2 B/param) or fp8 e4m3 + per-row scale + stochastic rounding (~ +1 B/param)")
     ap.add_argument("--momentum", type=float, default=0.0,
                     help="lg arms: per-weight momentum mu (EMA of the gradient fed to the RMS-normalised update). 0 = off")
-    ap.add_argument("--momentum-dtype", default="bf16", choices=["bf16", "fp8"],
+    ap.add_argument("--momentum-dtype", default="bf16", choices=["bf16", "fp8", "int4"],
                     help="lg momentum buffer: bf16 (+2 B/param) or fp8 e4m3 + row scale + SR (~ +1 B/param)")
     ap.add_argument("--nesterov", action="store_true", help="lg momentum: nesterov direction mu*buf + (1-mu)*g")
     ap.add_argument("--seq", type=int, default=128)

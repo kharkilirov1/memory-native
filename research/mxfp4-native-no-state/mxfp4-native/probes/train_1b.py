@@ -777,7 +777,7 @@ def build_parser():
                     help="lg buffer mode: bf16 (+2 B/param) or fp8 e4m3 with per-row scale + stochastic rounding (+~1 B/param)")
     ap.add_argument("--momentum", type=float, default=0.0,
                     help="lg only: per-weight momentum mu (EMA of grad fed to the update), 0 = off. d512 best: 0.9 with ~3x lr")
-    ap.add_argument("--momentum-dtype", default="bf16", choices=["bf16", "fp8"],
+    ap.add_argument("--momentum-dtype", default="bf16", choices=["bf16", "fp8", "int4"],
                     help="lg momentum buffer: bf16 (+2 B/param) or fp8 e4m3 + row scale + SR (+~1 B/param)")
     ap.add_argument("--nesterov", action="store_true", help="lg momentum: nesterov direction")
     ap.add_argument("--warmup-frac", type=float, default=0.02)
