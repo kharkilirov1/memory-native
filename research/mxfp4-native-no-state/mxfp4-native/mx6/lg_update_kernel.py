@@ -24,6 +24,8 @@ torch.rand); `emulate_update` is a torch transcription of the exact arithmetic f
 """
 from __future__ import annotations
 
+import os
+
 import torch
 
 from .packed_na import e4m3_decode
@@ -155,10 +157,39 @@ if HAS_TRITON:
         return 7.0 * M + tl.where(w < 0, -um, um)
 
     @triton.jit
+    def _m4_load(mb_ptr, ms_ptr, row, c0, cols, ng, BLOCK_C: tl.constexpr):
+        """int4 momentum, columns c0..c0+BLOCK_C of `row`, dequantised fp32 (nibble = q + 8, low nibble = even column,
+        one bf16 scale per 32 columns). Masked tail -> 0."""
+        hb = c0 // 2 + tl.arange(0, BLOCK_C // 2)
+        b = tl.load(mb_ptr + row * (cols // 2) + hb, mask=hb < cols // 2, other=0x88).to(tl.int32)
+        q = tl.reshape(tl.join((b & 15) - 8, (b >> 4) - 8), [BLOCK_C])
+        gi = (c0 + tl.arange(0, BLOCK_C)) // 32
+        sc = tl.load(ms_ptr + row * ng + gi, mask=gi < ng, other=1.0).to(tl.float32)
+        return q.to(tl.float32) * sc
+
+    @triton.jit
+    def _m4_store(mb_ptr, ms_ptr, row, c0, cols, ng, t, seed2, base, BLOCK_C: tl.constexpr):
+        """SR-requantise t (fp32 [BLOCK_C]) to int4 with a bf16 scale per 32 columns, rounded UP (amax/7 * (1 + 2^-7)) so
+        |t/s| <= 7: E[deq] = t."""
+        t2 = tl.reshape(t, [BLOCK_C // 32, 32])
+        amax = tl.max(tl.abs(t2), axis=1)
+        s = tl.where(amax > 0.0, amax / 7.0 * 1.0078125, 1.0).to(tl.bfloat16)
+        sf = s.to(tl.float32)
+        r = tl.reshape(tl.rand(seed2, base + c0 + tl.arange(0, BLOCK_C)), [BLOCK_C // 32, 32])
+        q = tl.floor(t2 / sf[:, None] + r)
+        q = tl.minimum(tl.maximum(q, -7.0), 7.0).to(tl.int32) + 8
+        lo, hi = tl.split(tl.reshape(q, [BLOCK_C // 2, 2]))
+        hb = c0 // 2 + tl.arange(0, BLOCK_C // 2)
+        tl.store(mb_ptr + row * (cols // 2) + hb, (lo | (hi << 4)).to(tl.uint8), mask=hb < cols // 2)
+        gi = c0 // 32 + tl.arange(0, BLOCK_C // 32)
+        tl.store(ms_ptr + row * ng + gi, s, mask=gi < ng)
+
+    @triton.jit
     def _lg_update_kernel(g_ptr, idx_ptr, sb_ptr, ts_ptr, v_ptr, clip_ptr,
                           cols, nb, lr, beta, eps, wd, seed, lr_ptr, wd_ptr,
+                          mb_ptr, ms_ptr, mu, seed2, ng,
                           M: tl.constexpr, TOP: tl.constexpr, BLOCK_C: tl.constexpr,
-                          HAS_WD: tl.constexpr, TRACK: tl.constexpr, TENSOR_HP: tl.constexpr):
+                          HAS_WD: tl.constexpr, TRACK: tl.constexpr, TENSOR_HP: tl.constexpr, MOM: tl.constexpr):
         row = tl.program_id(0)
         # TENSOR_HP: lr / wd come from 0-dim fp32 device tensors (read at run time => a scheduled lr never changes the
         # launch signature, so torch.compile / CUDA graphs see no new constant); else they are the scalar arguments.
@@ -174,6 +205,8 @@ if HAS_TRITON:
         for c0 in range(0, cols, BLOCK_C):
             o = c0 + offs0
             g = tl.load(g_ptr + base + o, mask=o < cols, other=0.0).to(tl.float32)
+            if MOM:                                          # fused int4 momentum: the update direction is the EMA
+                g = _m4_load(mb_ptr, ms_ptr, row, c0, cols, ng, BLOCK_C) * mu + g * (1.0 - mu)
             acc += g * g
         g_sq = tl.sum(acc, axis=0) / cols
         v_old = tl.load(v_ptr + row)
@@ -186,6 +219,9 @@ if HAS_TRITON:
             o = c0 + offs0
             mask = o < cols
             g = tl.load(g_ptr + base + o, mask=mask, other=0.0).to(tl.float32)
+            if MOM:                                          # same EMA as pass 1 (old buffer), then store the new buffer
+                g = _m4_load(mb_ptr, ms_ptr, row, c0, cols, ng, BLOCK_C) * mu + g * (1.0 - mu)
+                _m4_store(mb_ptr, ms_ptr, row, c0, cols, ng, g, seed2, base, BLOCK_C)
             i = tl.load(idx_ptr + base + o, mask=mask, other=0).to(tl.int32)
             sbyte = tl.load(sb_ptr + row * nb + (o >> 4), mask=mask, other=1)
             s = _e4m3_scale(sbyte, ts)
@@ -263,7 +299,7 @@ def _pow2_ge(n: int, cap: int) -> int:
 def lg_update_(grad: torch.Tensor, idx: torch.Tensor, scale_bytes: torch.Tensor, tscale: torch.Tensor,
                v_rms: torch.Tensor, *, lr, beta: float, eps: float, weight_decay, m: int, seed: int,
                track_clip: bool = True, block_c: int | None = None, num_warps: int | None = None,
-               has_wd: bool | None = None):
+               has_wd: bool | None = None, momentum=None):
     """In-place fused update of idx [rows, cols] and v_rms [rows, 1]. grad: bf16/fp16/fp32 contiguous [rows, cols].
     One kernel launch. -> int32 [rows] per-row count of requests beyond the grid (None if track_clip=False).
     lr / weight_decay: python floats (baked into the launch) OR 0-dim fp32 CUDA tensors (read by pointer inside the
@@ -277,7 +313,7 @@ def lg_update_(grad: torch.Tensor, idx: torch.Tensor, scale_bytes: torch.Tensor,
         raise ValueError("cols must be a multiple of 16")
     if rows * cols >= 2 ** 31:
         raise ValueError("numel must be < 2^31 (int32 offsets / Philox counter)")
-    if not (grad.is_cuda and idx.is_cuda):
+    if not (grad.is_cuda and idx.is_cuda) and os.environ.get("TRITON_INTERPRET") != "1":   # interpreter: CPU tensors
         raise ValueError("lg_update_ needs CUDA tensors")
     if grad.dtype not in (torch.float32, torch.bfloat16, torch.float16):
         grad = grad.float()
@@ -285,6 +321,18 @@ def lg_update_(grad: torch.Tensor, idx: torch.Tensor, scale_bytes: torch.Tensor,
     if not (idx.is_contiguous() and v_rms.is_contiguous() and scale_bytes.is_contiguous()):
         raise ValueError("idx, v_rms and scale_bytes must be contiguous")
     bc = block_c or _pow2_ge(cols, 2048)
+    # momentum = (mbuf uint8 [rows, cols/2], mscale bf16 [rows, cols/32], mu, seed2): fused int4 EMA (see lg_accum int4)
+    if momentum is not None:
+        mbuf, msc, mu, seed2 = momentum
+        if cols % 32 or mbuf.dtype != torch.uint8 or tuple(mbuf.shape) != (rows, cols // 2) \
+                or msc.dtype != torch.bfloat16 or tuple(msc.shape) != (rows, cols // 32):
+            raise ValueError("fused int4 momentum needs cols % 32 == 0, uint8 [rows, cols/2] and bf16 [rows, cols/32]")
+        if not (mbuf.is_contiguous() and msc.is_contiguous()):
+            raise ValueError("momentum buffers must be contiguous")
+        bc = max(bc, 32)
+        mom_args = (mbuf, msc, float(mu), int(seed2) & 0x7FFFFFFF, cols // 32)
+    else:
+        mom_args = (idx, idx, 0.0, 0, 1)                      # dummy pointers, never read (MOM=False)
     nw = num_warps or (8 if bc >= 2048 else 4 if bc >= 512 else 2)
     clip = torch.empty(rows, dtype=torch.int32, device=idx.device) if track_clip else idx   # dummy ptr when off
     tensor_hp = isinstance(lr, torch.Tensor)
@@ -301,9 +349,9 @@ def lg_update_(grad: torch.Tensor, idx: torch.Tensor, scale_bytes: torch.Tensor,
         use_wd = wd_f > 0.0 if has_wd is None else bool(has_wd)
     _lg_update_kernel[(rows,)](
         grad, idx, scale_bytes, tscale, v_rms, clip, cols, cols // NVFP4_BLOCK,
-        lr_f, float(beta), float(eps), wd_f, int(seed) & 0x7FFFFFFF, lr_p, wd_p,
+        lr_f, float(beta), float(eps), wd_f, int(seed) & 0x7FFFFFFF, lr_p, wd_p, *mom_args,
         M=int(m), TOP=float(14 * m), BLOCK_C=bc, HAS_WD=use_wd, TRACK=bool(track_clip), TENSOR_HP=tensor_hp,
-        num_warps=nw)
+        MOM=momentum is not None, num_warps=nw)
     return clip if track_clip else None
 
 

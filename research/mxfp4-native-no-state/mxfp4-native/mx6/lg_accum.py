@@ -51,6 +51,7 @@ sync. Not CUDA-graph-replay safe (mode="reduce-overhead"), same as the seed.
 from __future__ import annotations
 
 import contextlib
+import os
 
 import torch
 
@@ -314,6 +315,15 @@ def ema_accum_(st: AccumState, grad_w: torch.Tensor, buf: torch.Tensor, bscale):
         buf.copy_(grad_w.to(buf.dtype))
     st.n_updates += 1
     return grad_w
+
+
+def fused_int4_ok(st, cols: int, triton_on: bool) -> bool:
+    """True when the int4 momentum EMA can run INSIDE the Triton update kernel (lg_update_(momentum=...)): plain momentum
+    (n=1, not sparse, no nesterov, no all-reduce hook), Triton path, cols % 32 == 0. MX6_FUSE_M4=0 forces the unfused
+    torch path (A/B)."""
+    return (st is not None and st.mode == "ema" and st.kind == "int4" and st.n == 1 and not st.sparse
+            and not st.nesterov and st.grad_allreduce is None and bool(triton_on) and cols % 32 == 0
+            and os.environ.get("MX6_FUSE_M4", "1") != "0")
 
 
 def _dense_of(buf: torch.Tensor, bscale, kind: str) -> torch.Tensor:
