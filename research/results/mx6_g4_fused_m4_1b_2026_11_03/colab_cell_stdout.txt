@@ -1,0 +1,85 @@
+
+$ rm -rf /content/mn && git clone -q --depth 1 --branch research/mxfp4-native-no-state --filter=blob:none --sparse https://github.com/kharkilirov1/memory-native /content/mn && cd /content/mn && git spar
+4e5cc8d mx6: fused int4 momentum inside the Triton lg update kernel (EMA dequant/requant + SR in the same row pass; MX6_FUSE_M4=0 for A/B); CUDA/interpreter tests
+[rc=0]
+
+$ cd /content/mn/research/mxfp4-native-no-state/mxfp4-native && PYTHONPATH=. python -m pytest -q tests/test_lg_fused_m4.py tests/test_lg_momentum.py 2>&1 | tail -15
+.......................                                                  [100%]
+23 passed in 8.49s
+[rc=0]
+
+$ cd /content/mn/research/mxfp4-native-no-state/mxfp4-native && PYTHONPATH=. python probes/train_1b.py --probe-batch --batches 8 --probe-n 25 --no-grad-checkpoint --out /content/q6/speed --arm lg6_fp4_h
+lg6: lg6_fp4_h2             batch    8: OK  110 ms/step  peak 8.2 GB (reserved 8.6 GB)  first step 20s
+[rc=0]
+
+$ cd /content/mn/research/mxfp4-native-no-state/mxfp4-native && PYTHONPATH=. python probes/train_1b.py --probe-batch --batches 8 --probe-n 25 --no-grad-checkpoint --out /content/q6/speed --arm lg6_fp4_h
+lg6_int4_fused: lg6_fp4_h2             batch    8: OK  114 ms/step  peak 8.8 GB (reserved 9.0 GB)  first step 17s
+[rc=0]
+
+$ MX6_FUSE_M4=0 cd /content/mn/research/mxfp4-native-no-state/mxfp4-native && PYTHONPATH=. python probes/train_1b.py --probe-batch --batches 8 --probe-n 25 --no-grad-checkpoint --out /content/q6/speed -
+lg6_int4_unfused: lg6_fp4_h2             batch    8: OK  114 ms/step  peak 8.8 GB (reserved 9.0 GB)  first step 3s
+[rc=0]
+
+$ cd /content/mn/research/mxfp4-native-no-state/mxfp4-native && PYTHONPATH=. python probes/train_1b.py --probe-batch --batches 8 --probe-n 25 --no-grad-checkpoint --out /content/q6/speed --arm dense 2>&
+dense: dense                  batch    8: OK  142 ms/step  peak 27.1 GB (reserved 27.3 GB)  first step 14s
+[rc=0]
+speed done 2.2 min
+
+$ cd /content/mn/research/mxfp4-native-no-state/mxfp4-native && PYTHONPATH=. python probes/lg_ab.py --dataset enwik8 --chars 20000000 --d 64 --layers 1 --heads 1 --steps 1 --scale-format nvfp4 --arms de
+enwik8
+tinyshakespeare.txt
+[rc=0]
+
+$ grep -E 'momentum:|seed=|Error|error' /content/q6/lg6_int4f_s0.log | sed 's/^/lg6_int4f_s0: /'
+lg6_int4f_s0:       momentum: mu=0.9 dtype=int4 buffer=6.75MB (0.562 B/param)
+lg6_int4f_s0:   lg6_fp4_h2        seed=0 bits=6.547 val=1.7724 train=1.6195 gap=+0.1528 best=1.7724 clip=3.80% flip%(start/mid/end)=79.07/59.87/34.59 edge=19.57% grown=0 (154s)
+[rc=0]
+
+$ grep -E 'momentum:|seed=|Error|error' /content/q6/lg5_int4_m095.log | sed 's/^/lg5_int4_m095: /'
+lg5_int4_m095:       momentum: mu=0.95 dtype=int4 buffer=6.75MB (0.562 B/param)
+lg5_int4_m095:   lg5_fp4_h2        seed=0 bits=5.547 val=1.8227 train=1.6792 gap=+0.1435 best=1.8227 clip=6.63% flip%(start/mid/end)=83.36/59.43/34.10 edge=23.20% grown=0 (154s)
+[rc=0]
+
+$ grep -E 'momentum:|seed=|Error|error' /content/q6/lg5_int4_h3.log | sed 's/^/lg5_int4_h3: /'
+lg5_int4_h3:       momentum: mu=0.9 dtype=int4 buffer=6.75MB (0.562 B/param)
+lg5_int4_h3:   lg5_fp4_h3        seed=0 bits=5.547 val=1.8022 train=1.6517 gap=+0.1505 best=1.8022 clip=3.83% flip%(start/mid/end)=77.49/60.99/33.80 edge=14.81% grown=0 (155s)
+[rc=0]
+
+$ grep -E 'momentum:|seed=|Error|error' /content/q6/lg5_int4_h1.5.log | sed 's/^/lg5_int4_h1.5: /'
+lg5_int4_h1.5:       momentum: mu=0.9 dtype=int4 buffer=6.75MB (0.562 B/param)
+lg5_int4_h1.5:   lg5_fp4_h1.5      seed=0 bits=5.547 val=1.7981 train=1.6537 gap=+0.1445 best=1.7981 clip=7.09% flip%(start/mid/end)=82.33/66.32/46.16 edge=25.07% grown=0 (159s)
+[rc=0]
+
+$ grep -E 'momentum:|seed=|Error|error' /content/q6/lg5_int4_lr02.log | sed 's/^/lg5_int4_lr02: /'
+lg5_int4_lr02:       momentum: mu=0.9 dtype=int4 buffer=6.75MB (0.562 B/param)
+lg5_int4_lr02:   lg5_fp4_h2        seed=0 bits=5.547 val=1.8020 train=1.6533 gap=+0.1487 best=1.8020 clip=5.17% flip%(start/mid/end)=77.13/61.37/36.19 edge=19.26% grown=0 (155s)
+[rc=0]
+
+$ grep -E 'momentum:|seed=|Error|error' /content/q6/lg6_int4_m095.log | sed 's/^/lg6_int4_m095: /'
+lg6_int4_m095:       momentum: mu=0.95 dtype=int4 buffer=6.75MB (0.562 B/param)
+lg6_int4_m095:   lg6_fp4_h2        seed=0 bits=6.547 val=1.8258 train=1.6837 gap=+0.1421 best=1.8258 clip=4.48% flip%(start/mid/end)=83.34/55.83/29.55 edge=21.22% grown=0 (160s)
+[rc=0]
+d512 done 5.3 min
+
+$ tail -3 /content/q6/prep.log
+downloading https://huggingface.co/datasets/roneneldan/TinyStories/resolve/main/TinyStoriesV2-GPT4-valid.txt -> /content/data/TinyStoriesV2-GPT4-valid.txt
+train: /content/data/TinyStoriesV2-GPT4-train.txt 2,227,753,162 bytes (2124.6 MiB) head=b'\nOnce upon a time there was a little boy named Ben. Ben love' max_byte=226
+valid: /content/data/TinyStoriesV2-GPT4-valid.txt 22,502,601 bytes (21.5 MiB) head=b'u don\'t have to be scared of the loud dog, I\'ll protect you"' max_byte=226
+[rc=0]
+
+$ cd /content/mn/research/mxfp4-native-no-state/mxfp4-native && PYTHONPATH=. python probes/train_1b.py --arm lg6_fp4_h2 --adam-lr 1e-4 --lr 0.01 --momentum 0.9 --momentum-dtype int4 --steps 5000 --stop-
+
+[rc=0]
+
+$ grep -E 'EVAL|step (50|100|250|500|750|1000)/|optim|Error|error' /content/q6/run1b.log | cut -c1-220
+optim: adam_lr=0.0001 lr(counter)=0.01 wd=0.1 clip=1 betas=(0.9,0.95) sched=cosine warmup=0.02 min=0.1 precision=bf16 sdpa=True compile=True grad_checkpoint=True fused_adam=True lg_layers=96  [lg: grad clip covers FP par
+step 50/5000 | loss 4.5168 bpb | lr 5.00e-05 ctr 5.00e-03 | gnorm 4.680 | 28557 tok/s | 2295 ms/step | peak 19.5 GB (incl. compile)
+step 100/5000 | loss 3.3918 bpb | lr 1.00e-04 ctr 1.00e-02 | gnorm 1.778 | 34228 tok/s | 1915 ms/step | peak 19.5 GB
+step 250/5000 | loss 3.2443 bpb | lr 9.98e-05 ctr 9.98e-03 | gnorm 1.044 | 34187 tok/s | 1917 ms/step | peak 19.5 GB
+step 500/5000 | loss 2.1898 bpb | lr 9.85e-05 ctr 9.85e-03 | gnorm 1.017 | 34186 tok/s | 1917 ms/step | peak 19.5 GB
+EVAL step 500: val 2.0702 bpb (1.1s)
+step 750/5000 | loss 1.4184 bpb | lr 9.62e-05 ctr 9.62e-03 | gnorm 0.430 | 34197 tok/s | 1916 ms/step | peak 19.5 GB
+step 1000/5000 | loss 1.1485 bpb | lr 9.27e-05 ctr 9.27e-03 | gnorm 0.290 | 34217 tok/s | 1915 ms/step | peak 19.5 GB
+EVAL step 1000: val 1.1167 bpb (1.1s)
+[rc=0]
+ALL_DONE 37.9 min
