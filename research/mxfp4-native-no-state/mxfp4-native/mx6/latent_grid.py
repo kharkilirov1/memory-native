@@ -317,14 +317,14 @@ def _draw_seed() -> int:
 
 
 def _op_update_(grad_w, idx, scale, tscale, v_rms, clip_buf, lr_t, wd_t, grid, triton_on, umode, beta, eps, has_wd,
-                track_clip):
+                track_clip, momentum=None):
     """In-place state update with global-RNG randomness (module.generator is None on the ops path). lr / wd arrive as
     0-dim fp32 device tensors (module buffers updated in place by `set_counter_lr`), so a scheduled lr is DATA, not a
     schema constant: no recompiles, no host sync."""
     if triton_on:
         seed = _draw_seed()
         clip = lg_update_(grad_w, idx, scale, tscale, v_rms, lr=lr_t, beta=beta, eps=eps, weight_decay=wd_t, m=grid.m,
-                          seed=seed, track_clip=track_clip, has_wd=has_wd)
+                          seed=seed, track_clip=track_clip, has_wd=has_wd, momentum=momentum)
         if clip is not None:
             clip_buf.copy_(clip.sum(dtype=torch.float32) / idx.numel())
         return
@@ -428,6 +428,11 @@ def _op_acc_bwd_impl(dy, x, idx, scale, tscale, v_rms, clip_buf, lr_t, wd_t, acc
     dx = _op_dx(dy, idx, scale, tscale, grid, gemm, dx_gemm, triton_on) if needs_dx else x.new_empty(0)
     grad_w = dy.t() @ x
     st = lg_accum.get_state(acc_id)
+    if lg_accum.fused_int4_ok(st, idx.shape[1], triton_on):      # int4 momentum EMA inside the update kernel
+        st.n_updates += 1
+        _op_update_(grad_w, idx, scale, tscale, v_rms, clip_buf, lr_t, wd_t, grid, triton_on, umode, beta, eps, has_wd,
+                    track_clip, momentum=(acc_buf, acc_scale, st.mu, _draw_seed()))
+        return dx
     finish = key = None
     if st.sparse:                                    # the update is deferred to the exit of lg_accumulate
         def finish(g):
@@ -909,6 +914,10 @@ class LatentGridLinear(nn.Module):
         if st is None:
             self.apply_update_(grad_w)
             return
+        if lg_accum.fused_int4_ok(st, self.in_features, self._use_triton()):   # int4 momentum EMA inside the kernel
+            st.n_updates += 1
+            self._apply_update_triton(grad_w, momentum=(self._acc_buf, self._acc_scale, st.mu, self._next_seed()))
+            return
         finish = None
         if st.sparse:                                # the update is deferred to the exit of lg_accumulate
             def finish(g):
@@ -944,8 +953,9 @@ class LatentGridLinear(nn.Module):
         dev = gen.device if gen is not None else "cpu"
         return int(torch.randint(0, 2 ** 31 - 1, (1,), generator=gen, device=dev).item())
 
-    def _apply_update_triton(self, grad_w: torch.Tensor, lr_scale: float = 1.0, beta: float | None = None) -> None:
-        clip = lg_update_(grad_w, self.idx, self._scale, self._tscale, self.v_rms,
+    def _apply_update_triton(self, grad_w: torch.Tensor, lr_scale: float = 1.0, beta: float | None = None,
+                             momentum=None) -> None:
+        clip = lg_update_(grad_w, self.idx, self._scale, self._tscale, self.v_rms, momentum=momentum,
                           lr=self.lr if lr_scale == 1.0 else self.lr * lr_scale,
                           beta=self.rms_beta if beta is None else beta,
                           eps=self.rms_eps, weight_decay=self.weight_decay, m=self.fmt.m, seed=self._next_seed(),
