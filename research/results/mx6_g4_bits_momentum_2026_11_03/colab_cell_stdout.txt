@@ -1,0 +1,97 @@
+
+$ nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
+NVIDIA RTX PRO 6000 Blackwell Server Edition, 97887 MiB
+[rc=0]
+
+$ rm -rf /content/mn && git clone -q --depth 1 --branch research/mxfp4-native-no-state --filter=blob:none --sparse https://github.com/kharkilirov1/memory-native /content/mn && cd /content/mn && git spar
+12b8672 mx6: int4 momentum buffer (packed nibbles, group-32 bf16 scales, stochastic rounding, ~0.56 B/param); e1 prints the momentum buffer size
+[rc=0]
+
+$ cd /content/mn/research/mxfp4-native-no-state/mxfp4-native && PYTHONPATH=. python probes/train_1b.py --probe-batch --batches 8 --probe-n 25 --no-grad-checkpoint --out /content/q5/speed --arm dense 2>&
+dense: dense                  batch    8: OK  142 ms/step  peak 27.1 GB (reserved 27.4 GB)  first step 17s
+[rc=0]
+
+$ cd /content/mn/research/mxfp4-native-no-state/mxfp4-native && PYTHONPATH=. python probes/train_1b.py --probe-batch --batches 8 --probe-n 25 --no-grad-checkpoint --out /content/q5/speed --arm lg6_fp4_h
+lg6: lg6_fp4_h2             batch    8: OK  109 ms/step  peak 8.2 GB (reserved 8.6 GB)  first step 17s
+[rc=0]
+
+$ cd /content/mn/research/mxfp4-native-no-state/mxfp4-native && PYTHONPATH=. python probes/train_1b.py --probe-batch --batches 8 --probe-n 25 --no-grad-checkpoint --out /content/q5/speed --arm lg6_fp4_h
+lg6_fp8: lg6_fp4_h2             batch    8: OK  181 ms/step  peak 9.6 GB (reserved 9.8 GB)  first step 16s
+[rc=0]
+
+$ cd /content/mn/research/mxfp4-native-no-state/mxfp4-native && PYTHONPATH=. python probes/train_1b.py --probe-batch --batches 8 --probe-n 25 --no-grad-checkpoint --out /content/q5/speed --arm lg6_fp4_h
+lg6_int4: lg6_fp4_h2             batch    8: OK  169 ms/step  peak 9.0 GB (reserved 9.2 GB)  first step 16s
+[rc=0]
+
+$ cd /content/mn/research/mxfp4-native-no-state/mxfp4-native && PYTHONPATH=. python probes/train_1b.py --probe-batch --batches 8 --probe-n 25 --no-grad-checkpoint --out /content/q5/speed --arm lg6_fp4_h
+lg6_bf16: lg6_fp4_h2             batch    8: OK  113 ms/step  peak 10.4 GB (reserved 10.7 GB)  first step 16s
+[rc=0]
+speed done 3.3 min
+
+$ cd /content/mn/research/mxfp4-native-no-state/mxfp4-native && PYTHONPATH=. python probes/lg_ab.py --dataset enwik8 --chars 20000000 --d 64 --layers 1 --heads 1 --steps 1 --scale-format nvfp4 --arms de
+total 98760
+drwxr-xr-x 2 root root      4096 Nov  3 18:25 .
+drwxr-xr-x 8 root root      4096 Nov  3 18:22 ..
+-rw-r--r-- 1 root root 100000000 Nov  3 18:25 enwik8
+-rw-r--r-- 1 root root   1115394 Nov  3 18:22 tinyshakespeare.txt
+[rc=0]
+
+$ grep -E 'momentum:|seed=|memory:|Error|error' /content/q5/dense_s0.log | sed 's/^/dense_s0: /'
+dense_s0:   dense_nobias      seed=0 bits=96.000 val=1.7598 train=1.5951 gap=+0.1647 best=1.7598 clip=nan% flip%(start/mid/end)=nan/nan/nan edge=nan% grown=0 (221s)
+dense_s0:       memory: params total=13,061,120 block_linears=12,582,912 | state=144.0MB (+grad 192.0MB) | peak=1632MB (+1480MB over run start)
+[rc=0]
+
+$ grep -E 'momentum:|seed=|memory:|Error|error' /content/q5/lg6_fp8_s1.log | sed 's/^/lg6_fp8_s1: /'
+lg6_fp8_s1:       momentum: mu=0.9 dtype=fp8 buffer=12.07MB (1.006 B/param)
+lg6_fp8_s1:   lg6_fp4_h2        seed=1 bits=6.547 val=1.7746 train=1.6161 gap=+0.1585 best=1.7746 clip=3.74% flip%(start/mid/end)=77.87/58.73/33.82 edge=19.30% grown=0 (294s)
+lg6_fp8_s1:       memory: params total=13,061,120 block_linears=12,582,912 | state=9.8MB (+grad 13.8MB) | peak=1512MB (+1359MB over run start)
+[rc=0]
+
+$ grep -E 'momentum:|seed=|memory:|Error|error' /content/q5/lg5_fp8_s0.log | sed 's/^/lg5_fp8_s0: /'
+lg5_fp8_s0:       momentum: mu=0.9 dtype=fp8 buffer=12.07MB (1.006 B/param)
+lg5_fp8_s0:   lg5_fp4_h2        seed=0 bits=5.547 val=1.7875 train=1.6400 gap=+0.1475 best=1.7875 clip=5.79% flip%(start/mid/end)=80.37/63.42/39.99 edge=21.26% grown=0 (294s)
+lg5_fp8_s0:       memory: params total=13,061,120 block_linears=12,582,912 | state=8.3MB (+grad 12.3MB) | peak=1512MB (+1359MB over run start)
+[rc=0]
+
+$ grep -E 'momentum:|seed=|memory:|Error|error' /content/q5/lg5_fp8_s1.log | sed 's/^/lg5_fp8_s1: /'
+lg5_fp8_s1:       momentum: mu=0.9 dtype=fp8 buffer=12.07MB (1.006 B/param)
+lg5_fp8_s1:   lg5_fp4_h2        seed=1 bits=5.547 val=1.7883 train=1.6450 gap=+0.1433 best=1.7883 clip=5.78% flip%(start/mid/end)=80.04/63.56/40.11 edge=21.22% grown=0 (293s)
+lg5_fp8_s1:       memory: params total=13,061,120 block_linears=12,582,912 | state=8.3MB (+grad 12.3MB) | peak=1512MB (+1359MB over run start)
+[rc=0]
+
+$ grep -E 'momentum:|seed=|memory:|Error|error' /content/q5/lg5_fp8_lr05.log | sed 's/^/lg5_fp8_lr05: /'
+lg5_fp8_lr05:       momentum: mu=0.9 dtype=fp8 buffer=12.07MB (1.006 B/param)
+lg5_fp8_lr05:   lg5_fp4_h2        seed=0 bits=5.547 val=1.7870 train=1.6464 gap=+0.1406 best=1.7870 clip=6.57% flip%(start/mid/end)=83.84/66.67/45.86 edge=23.58% grown=0 (296s)
+lg5_fp8_lr05:       memory: params total=13,061,120 block_linears=12,582,912 | state=8.3MB (+grad 12.3MB) | peak=1512MB (+1359MB over run start)
+[rc=0]
+
+$ grep -E 'momentum:|seed=|memory:|Error|error' /content/q5/lg4_fp8_s0.log | sed 's/^/lg4_fp8_s0: /'
+lg4_fp8_s0:       momentum: mu=0.9 dtype=fp8 buffer=12.07MB (1.006 B/param)
+lg4_fp8_s0:   lg4_fp4_h2        seed=0 bits=4.547 val=1.8298 train=1.6964 gap=+0.1334 best=1.8298 clip=9.48% flip%(start/mid/end)=82.38/70.18/46.82 edge=18.44% grown=0 (294s)
+lg4_fp8_s0:       memory: params total=13,061,120 block_linears=12,582,912 | state=6.8MB (+grad 10.8MB) | peak=1512MB (+1359MB over run start)
+[rc=0]
+
+$ grep -E 'momentum:|seed=|memory:|Error|error' /content/q5/lg6_int4_s0.log | sed 's/^/lg6_int4_s0: /'
+lg6_int4_s0:       momentum: mu=0.9 dtype=int4 buffer=6.75MB (0.562 B/param)
+lg6_int4_s0:   lg6_fp4_h2        seed=0 bits=6.547 val=1.7692 train=1.6248 gap=+0.1443 best=1.7692 clip=3.82% flip%(start/mid/end)=78.90/60.05/34.81 edge=19.64% grown=0 (296s)
+lg6_int4_s0:       memory: params total=13,061,120 block_linears=12,582,912 | state=9.8MB (+grad 13.8MB) | peak=1528MB (+1376MB over run start)
+[rc=0]
+
+$ grep -E 'momentum:|seed=|memory:|Error|error' /content/q5/lg6_int4_s1.log | sed 's/^/lg6_int4_s1: /'
+lg6_int4_s1:       momentum: mu=0.9 dtype=int4 buffer=6.75MB (0.562 B/param)
+lg6_int4_s1:   lg6_fp4_h2        seed=1 bits=6.547 val=1.7701 train=1.6149 gap=+0.1553 best=1.7701 clip=3.81% flip%(start/mid/end)=78.85/60.08/34.87 edge=19.63% grown=0 (293s)
+lg6_int4_s1:       memory: params total=13,061,120 block_linears=12,582,912 | state=9.8MB (+grad 13.8MB) | peak=1490MB (+1337MB over run start)
+[rc=0]
+
+$ grep -E 'momentum:|seed=|memory:|Error|error' /content/q5/lg5_int4_s0.log | sed 's/^/lg5_int4_s0: /'
+lg5_int4_s0:       momentum: mu=0.9 dtype=int4 buffer=6.75MB (0.562 B/param)
+lg5_int4_s0:   lg5_fp4_h2        seed=0 bits=5.547 val=1.7915 train=1.6466 gap=+0.1449 best=1.7915 clip=5.86% flip%(start/mid/end)=81.26/64.29/40.95 edge=21.48% grown=0 (296s)
+lg5_int4_s0:       memory: params total=13,061,120 block_linears=12,582,912 | state=8.3MB (+grad 12.3MB) | peak=1490MB (+1337MB over run start)
+[rc=0]
+
+$ grep -E 'momentum:|seed=|memory:|Error|error' /content/q5/lg5_int4_s1.log | sed 's/^/lg5_int4_s1: /'
+lg5_int4_s1:       momentum: mu=0.9 dtype=int4 buffer=6.75MB (0.562 B/param)
+lg5_int4_s1:   lg5_fp4_h2        seed=1 bits=5.547 val=1.7985 train=1.6508 gap=+0.1476 best=1.7985 clip=5.86% flip%(start/mid/end)=81.00/64.37/41.02 edge=21.47% grown=0 (296s)
+lg5_int4_s1:       memory: params total=13,061,120 block_linears=12,582,912 | state=8.3MB (+grad 12.3MB) | peak=1490MB (+1337MB over run start)
+[rc=0]
+ALL_DONE 8.9 min
