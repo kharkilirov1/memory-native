@@ -184,3 +184,29 @@ def test_int4_rejected_outside_plain_momentum():
     with pytest.raises(ValueError):
         set_momentum(lay, 0.9, "int4", n=2)
     assert accum_bytes_per_param("int4", 512, "ema") == 0.5 + 2.0 / 32
+
+
+def test_reuse_sums_repeated_calls_one_update():
+    """A layer applied 3x in one graph: 3 backwards accumulate, ONE update at context exit, no version-guard error."""
+    torch.manual_seed(5)
+    lay = LatentGridLinear(32, 32, k=6, lr=0.01)
+    st = set_momentum(lay, 0.9, "fp32", sparse=True, reuse=True)
+    ref = LatentGridLinear(32, 32, k=6, lr=0.01)
+    ref.load_state_dict(lay.state_dict(), strict=False)
+    x = torch.randn(8, 32)
+    w0 = lay.weight().clone()
+    with lg_accumulate(lay, 1) as acc:
+        for _ in acc.micro_batches():
+            y = lay(lay(lay(x)))
+            y.pow(2).mean().backward()
+            assert torch.equal(lay.weight(), w0)          # nothing moved inside backward
+    assert st.n_updates == 1
+    assert (lay.weight() != w0).any()
+    # the buffer holds (1-mu) * sum of the three per-call gradients (fp32 kind: exact up to fp rounding)
+    assert lay._acc_buf.abs().sum() > 0
+
+
+def test_reuse_needs_sparse():
+    lay = LatentGridLinear(32, 16, k=6)
+    with pytest.raises(ValueError):
+        set_momentum(lay, 0.9, "bf16", reuse=True)

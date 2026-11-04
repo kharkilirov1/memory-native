@@ -106,6 +106,9 @@ class AccumState:
         self.touched: dict = {}          # sparse: layer key -> (finish(grad), buf, bscale), insertion order = first backward
         self.micro_seen: dict = {}       # sparse: layer key -> micro-batch index of its last backward (<= 1 per micro-batch)
         self.nesterov = False
+        #: sparse + reuse: a layer may run SEVERAL backwards in one micro-batch (a layer called repeatedly in one forward
+        #: graph: recurrent / looped models, latent-thought loops). Their gradients are summed into the buffer.
+        self.reuse = False
         self.loss_scaled, self.grad_allreduce = bool(loss_scaled), grad_allreduce
         self.idx = 0                     # micro-batch index of the running backward
         self.active = False              # inside lg_accumulate
@@ -339,7 +342,7 @@ def ema_accum_sparse_(st: AccumState, grad_w: torch.Tensor, buf: torch.Tensor, b
     (the layer may not appear in the last micro-batch, or at all). At most one backward per layer per micro-batch."""
     if finish is None or key is None:
         raise RuntimeError("sparse accumulation needs the layer's update callback and key")
-    if st.micro_seen.get(key) == st.idx:
+    if st.micro_seen.get(key) == st.idx and not st.reuse:
         raise RuntimeError("sparse lg_accumulate: a layer ran two backwards in the same micro-batch (an expert must be called "
                            "ONCE per forward with all its tokens batched)")
     st.micro_seen[key] = st.idx
@@ -444,7 +447,7 @@ def set_accum(model, n: int, mode: str = "buffer", dtype: str = "bf16", loss_sca
 
 
 def set_momentum(model, mu: float, dtype: str = "bf16", nesterov: bool = False, grad_allreduce=None,
-                 n: int = 1, sparse: bool = False) -> AccumState | None:
+                 n: int = 1, sparse: bool = False, reuse: bool = False) -> AccumState | None:
     """Per-weight momentum for every LatentGridLinear (reuses the accumulation buffer: bf16 +2 B/param, fp8 ~ +1 B/param).
     Every backward: buf <- mu*buf + (1-mu)*grad and the update uses buf. No lg_accumulate context needed. mu <= 0 disables.
     n > 1: ALSO accumulates n micro-batches into the same buffer (run them inside lg_accumulate(model, n)); ONE update
@@ -453,7 +456,10 @@ def set_momentum(model, mu: float, dtype: str = "bf16", nesterov: bool = False, 
     sparse=True (MoE experts; always needs the lg_accumulate context, any n >= 1): a layer may run 0..n backwards per step
     (at most one per micro-batch). Its buffer decays by mu on its first backward, accumulates (1-mu)*g on each, and ONE update
     with the buffer is applied at the EXIT of lg_accumulate; layers with 0 backwards are untouched (no decay, no update).
-    Not combinable with nesterov / grad_allreduce."""
+    Not combinable with nesterov / grad_allreduce.
+    reuse=True (with sparse=True): a layer may be called SEVERAL times in one forward graph (looped / recurrent models):
+    every backward adds (1-mu)*g to the buffer, ONE update per layer at the exit of lg_accumulate (sum of the gradients).
+    Weights never move inside the backward pass, so the forward/backward version guard holds."""
     if mu is None or float(mu) <= 0.0:
         clear_accum(model)
         return None
@@ -467,6 +473,9 @@ def set_momentum(model, mu: float, dtype: str = "bf16", nesterov: bool = False, 
     clear_accum(model)
     st = AccumState(int(n), "ema", dtype, True, grad_allreduce, sparse=sparse)
     st.mu, st.nesterov = float(mu), bool(nesterov)
+    if reuse and not sparse:
+        raise ValueError("reuse=True (several backwards per layer per micro-batch) needs sparse=True")
+    st.reuse = bool(reuse)
     for m in layers:
         m.enable_accum_(st)
     st.n_layers = len(layers)

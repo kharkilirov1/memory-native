@@ -788,7 +788,7 @@ class LatentGridLinear(nn.Module):
                     self.update_mode, float(self.rms_beta), float(self.rms_eps), self._has_wd, self.track_clip)
                 return out.reshape(*shape[:-1], self.out_features)
             if torch.is_grad_enabled() and self.training:
-                if self._pending:
+                if self._pending and not (self._acc is not None and self._acc.reuse):
                     raise RuntimeError("LatentGridLinear forwarded twice before backward; exactly one forward per "
                                        "backward is required (wrap measurement passes in torch.no_grad() / .eval())")
                 self._pending = True
@@ -797,7 +797,7 @@ class LatentGridLinear(nn.Module):
                 out = self._gemm_fwd(x2)[0]
             return out.reshape(*shape[:-1], self.out_features)
         if torch.is_grad_enabled() and self.training:
-            if self._pending:
+            if self._pending and not (self._acc is not None and self._acc.reuse):   # reuse: looped graphs
                 raise RuntimeError("LatentGridLinear forwarded twice before backward; exactly one forward per "
                                    "backward is required (wrap measurement passes in torch.no_grad() / .eval())")
             self._pending = True
